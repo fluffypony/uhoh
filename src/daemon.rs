@@ -307,6 +307,22 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 check_moved_folders(database, &mut watcher_handle, &mut project_states);
                 // Discover newly added projects and watch them
                 check_for_new_projects(database, &mut watcher_handle, &mut project_states);
+                // Remove watchers and state for projects removed from DB
+                if let Ok(db_projects) = database.list_projects() {
+                    use std::collections::HashSet;
+                    let db_paths: HashSet<String> = db_projects.into_iter().map(|p| p.current_path).collect();
+                    let mut to_remove: Vec<String> = Vec::new();
+                    for key in project_states.keys() {
+                        if !db_paths.contains(key) {
+                            to_remove.push(key.clone());
+                        }
+                    }
+                    for key in to_remove {
+                        let _ = watcher_handle.unwatch(std::path::Path::new(&key));
+                        project_states.remove(&key);
+                        tracing::info!("Stopped watching removed project: {}", key);
+                    }
+                }
                 // Attempt to recover watcher if it died earlier
                 // Attempt watcher recovery only when we get WatcherDied events; here keep lightweight
                 // If an update has been applied (trigger file present), restart like binary change
