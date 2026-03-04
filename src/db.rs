@@ -210,232 +210,7 @@ impl Database {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap_or(0);
 
-        if version < 1 {
-            conn.execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS projects (
-                    hash TEXT PRIMARY KEY,
-                    current_path TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    next_snapshot_id INTEGER NOT NULL DEFAULT 1
-                );
-
-                CREATE TABLE IF NOT EXISTS project_history (
-                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
-                    old_path TEXT NOT NULL,
-                    changed_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS snapshots (
-                    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
-                    snapshot_id INTEGER NOT NULL CHECK (snapshot_id > 0),
-                    timestamp TEXT NOT NULL,
-                    trigger TEXT NOT NULL,
-                    message TEXT NOT NULL DEFAULT '',
-                    pinned INTEGER NOT NULL DEFAULT 0,
-                    UNIQUE(project_hash, snapshot_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS snapshot_files (
-                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                    path TEXT NOT NULL,
-                    hash TEXT NOT NULL,
-                    size INTEGER NOT NULL,
-                    stored INTEGER NOT NULL DEFAULT 1,
-                    executable INTEGER NOT NULL DEFAULT 0,
-                    mtime INTEGER,
-                    storage_method INTEGER NOT NULL DEFAULT 1,
-                    PRIMARY KEY (snapshot_rowid, path)
-                );
-
-                CREATE TABLE IF NOT EXISTS snapshot_deleted (
-                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                    path TEXT NOT NULL,
-                    hash TEXT NOT NULL,
-                    size INTEGER NOT NULL,
-                    stored INTEGER NOT NULL DEFAULT 1,
-                    storage_method INTEGER NOT NULL DEFAULT 1,
-                    PRIMARY KEY (snapshot_rowid, path)
-                );
-
-                CREATE TABLE IF NOT EXISTS snapshot_tree (
-                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                    dir_path TEXT NOT NULL,
-                    tree_hash TEXT NOT NULL,
-                    PRIMARY KEY (snapshot_rowid, dir_path)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_snapshot_project ON snapshots(project_hash, timestamp);
-                CREATE INDEX IF NOT EXISTS idx_snapshot_files_hash ON snapshot_files(hash);
-                CREATE INDEX IF NOT EXISTS idx_snapshot_deleted_hash ON snapshot_deleted(hash);
-                CREATE INDEX IF NOT EXISTS idx_file_path ON snapshot_files(path, snapshot_rowid);
-
-                PRAGMA user_version = 1;
-                "
-            )?;
-        }
-
-        if version < 2 {
-            let _ = conn.execute_batch("ALTER TABLE snapshots ADD COLUMN ai_summary TEXT;");
-            conn.execute_batch("PRAGMA user_version = 2;")?;
-        }
-
-        if version < 3 {
-            let _ = conn.execute_batch(
-                "ALTER TABLE snapshots ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;",
-            );
-            let _ = conn.execute_batch(
-                "ALTER TABLE snapshot_files ADD COLUMN is_symlink INTEGER NOT NULL DEFAULT 0;",
-            );
-            conn.execute_batch("PRAGMA user_version = 3;")?;
-        }
-
-        if version < 4 {
-            conn.execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS operations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
-                    label TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    ended_at TEXT,
-                    first_snapshot_id INTEGER,
-                    last_snapshot_id INTEGER
-                );
-
-                CREATE TABLE IF NOT EXISTS pending_ai_summaries (
-                    snapshot_rowid INTEGER PRIMARY KEY REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                    project_hash   TEXT NOT NULL,
-                    queued_at      TEXT NOT NULL,
-                    attempts       INTEGER NOT NULL DEFAULT 0
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_operations_project ON operations(project_hash);
-                CREATE INDEX IF NOT EXISTS idx_ai_queue_time ON pending_ai_summaries(queued_at);
-
-                PRAGMA user_version = 4;
-                "
-            )?;
-        }
-
-        if version < 5 {
-            conn.execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS stats (
-                    key   TEXT PRIMARY KEY,
-                    value INTEGER NOT NULL DEFAULT 0
-                );
-                INSERT OR IGNORE INTO stats (key, value) VALUES ('blob_bytes', 0);
-                PRAGMA user_version = 5;
-                ",
-            )?;
-        }
-
-        if version < 6 {
-            conn.execute_batch(
-                "
-                CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-                    snapshot_rowid UNINDEXED,
-                    project_hash,
-                    trigger_type,
-                    message,
-                    ai_summary,
-                    file_paths
-                );
-                PRAGMA user_version = 6;
-                ",
-            )?;
-        }
-
-        if version < 7 {
-            conn.execute_batch(
-                "
-                BEGIN;
-
-                CREATE TABLE IF NOT EXISTS event_ledger (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    severity TEXT NOT NULL DEFAULT 'info',
-                    project_hash TEXT,
-                    agent_name TEXT,
-                    guard_name TEXT,
-                    path TEXT,
-                    detail TEXT,
-                    pre_state_ref TEXT,
-                    post_state_ref TEXT,
-                    prev_hash TEXT,
-                    causal_parent INTEGER REFERENCES event_ledger(id),
-                    resolved INTEGER NOT NULL DEFAULT 0
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_event_ledger_ts ON event_ledger(ts);
-                CREATE INDEX IF NOT EXISTS idx_event_ledger_source ON event_ledger(source);
-                CREATE INDEX IF NOT EXISTS idx_event_ledger_agent ON event_ledger(agent_name);
-                CREATE INDEX IF NOT EXISTS idx_event_ledger_guard ON event_ledger(guard_name);
-                CREATE INDEX IF NOT EXISTS idx_event_ledger_path ON event_ledger(path);
-                CREATE INDEX IF NOT EXISTS idx_event_ledger_causal ON event_ledger(causal_parent);
-                CREATE INDEX IF NOT EXISTS idx_event_ledger_severity ON event_ledger(severity);
-                CREATE INDEX IF NOT EXISTS idx_event_ledger_prev_hash ON event_ledger(prev_hash);
-
-                CREATE TABLE IF NOT EXISTS db_guards (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    engine TEXT NOT NULL,
-                    connection_ref TEXT NOT NULL,
-                    tables_csv TEXT NOT NULL,
-                    mode TEXT NOT NULL DEFAULT 'triggers',
-                    created_at TEXT NOT NULL,
-                    last_baseline_at TEXT,
-                    active INTEGER NOT NULL DEFAULT 1
-                );
-
-                CREATE TABLE IF NOT EXISTS agents (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    profile_path TEXT NOT NULL,
-                    profile_version INTEGER NOT NULL DEFAULT 1,
-                    data_dir TEXT,
-                    registered_at TEXT NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1
-                );
-
-                PRAGMA user_version = 7;
-
-                COMMIT;
-                ",
-            )?;
-        }
-
-        if version < 8 {
-            let mut columns = std::collections::HashSet::new();
-            {
-                let mut stmt = conn.prepare("PRAGMA table_info(event_ledger)")?;
-                let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-                for r in rows {
-                    columns.insert(r?);
-                }
-            }
-            if !columns.contains("prev_hash") {
-                conn.execute_batch("ALTER TABLE event_ledger ADD COLUMN prev_hash TEXT;")?;
-            }
-            if !columns.contains("session_id") {
-                conn.execute_batch(
-                    "ALTER TABLE event_ledger ADD COLUMN session_id TEXT GENERATED ALWAYS AS (
-                        CASE WHEN json_valid(detail) THEN json_extract(detail, '$.session_id') ELSE NULL END
-                    ) VIRTUAL;",
-                )?;
-            }
-            conn.execute_batch(
-                "
-                CREATE INDEX IF NOT EXISTS idx_event_ledger_prev_hash ON event_ledger(prev_hash);
-                CREATE INDEX IF NOT EXISTS idx_event_ledger_session ON event_ledger(session_id);
-                PRAGMA user_version = 8;
-                ",
-            )?;
-        }
+        migrations::apply_migrations(&conn, version)?;
 
         Ok(())
     }
@@ -637,84 +412,18 @@ impl Database {
             snapshot_id
         };
 
-        tx.execute(
-            "INSERT INTO snapshots (project_hash, snapshot_id, timestamp, trigger, message, pinned)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                project_hash,
-                snapshot_id,
-                timestamp,
-                trigger,
-                message,
-                pinned as i32
-            ],
+        let rowid = snapshots::create_snapshot_tx(
+            &tx,
+            project_hash,
+            snapshot_id,
+            timestamp,
+            trigger,
+            message,
+            pinned,
+            files,
+            deleted,
+            tree_hashes,
         )?;
-        let rowid = tx.last_insert_rowid();
-
-        {
-            let mut file_stmt = tx.prepare(
-                "INSERT INTO snapshot_files (snapshot_rowid, path, hash, size, stored, executable, mtime, storage_method, is_symlink)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )?;
-            for SnapFileEntry {
-                path,
-                hash,
-                size,
-                stored,
-                executable,
-                mtime,
-                storage_method,
-                is_symlink,
-            } in files
-            {
-                file_stmt.execute(params![
-                    rowid,
-                    path,
-                    hash,
-                    size,
-                    *stored as i32,
-                    *executable as i32,
-                    mtime,
-                    storage_method,
-                    *is_symlink as i32,
-                ])?;
-            }
-        }
-
-        {
-            let mut del_stmt = tx.prepare(
-                "INSERT INTO snapshot_deleted (snapshot_rowid, path, hash, size, stored, storage_method)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )?;
-            for (path, hash, size, stored, storage_method) in deleted {
-                del_stmt.execute(params![
-                    rowid,
-                    path,
-                    hash,
-                    size,
-                    *stored as i32,
-                    storage_method
-                ])?;
-            }
-        }
-
-        {
-            let mut tree_stmt = tx.prepare(
-                "INSERT INTO snapshot_tree (snapshot_rowid, dir_path, tree_hash)
-                 VALUES (?1, ?2, ?3)",
-            )?;
-            for (dir_path, tree_hash) in tree_hashes {
-                tree_stmt.execute(params![rowid, dir_path, tree_hash])?;
-            }
-        }
-
-        // Update denormalized file_count if column exists (schema v2)
-        let _ = tx.execute(
-            "UPDATE snapshots SET file_count = (
-                SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = ?1
-            ) WHERE rowid = ?1",
-            params![rowid],
-        );
 
         tx.commit()?;
         Ok((rowid, snapshot_id))
@@ -1659,25 +1368,18 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<EventLedgerEntry>> {
         let conn = self.conn();
-        let cap = limit.max(1) as i64;
-        let sql =
-            "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                    path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
-             FROM event_ledger
-             WHERE (?1 IS NULL OR source = ?1)
-               AND (?2 IS NULL OR guard_name = ?2)
-               AND (?3 IS NULL OR agent_name = ?3)
-               AND (
-                    ?4 IS NULL
-                    OR (
-                        session_id = ?4
-                    )
-               )
-             ORDER BY id DESC
-             LIMIT ?5";
-        let mut stmt = conn.prepare(sql)?;
+        let (sql, param_values) = ledger::build_recent_query(
+            ledger::LedgerRecentFilters {
+                source,
+                guard_name,
+                agent_name,
+                session,
+            },
+            limit as i64,
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(
-            params![source, guard_name, agent_name, session, cap],
+            rusqlite::params_from_iter(param_values.iter()),
             ledger::map_event_ledger_entry,
         )?;
         let mut out = Vec::new();

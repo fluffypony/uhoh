@@ -14,8 +14,12 @@ use crate::subsystem::SubsystemContext;
 
 const GUARD_TICK_SECS: i64 = 30;
 static PG_DDL_CURSOR: Lazy<Mutex<HashMap<String, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static PG_LISTEN_PAYLOADS: Lazy<Mutex<HashMap<String, std::sync::Arc<Mutex<Vec<String>>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub fn tick_postgres_guard(ctx: &SubsystemContext, guard: &DbGuardEntry) -> Result<()> {
+    ensure_listen_worker(&guard.connection_ref)?;
+
     let baseline_interval = std::time::Duration::from_secs(
         ctx.config
             .db_guard
@@ -89,8 +93,12 @@ pub fn tick_postgres_guard(ctx: &SubsystemContext, guard: &DbGuardEntry) -> Resu
         }
     }
 
-    // Poll unseen DDL events from the trigger table using a persisted cursor.
-    if let Ok(payloads) = poll_ddl_events(&guard.connection_ref, 64) {
+    let listen_payloads = drain_listen_payloads(&guard.connection_ref)?;
+    let ddl_payloads = poll_ddl_events(&guard.connection_ref, 64).unwrap_or_default();
+    let mut payloads = Vec::new();
+    payloads.extend(listen_payloads);
+    payloads.extend(ddl_payloads);
+    if !payloads.is_empty() {
         for payload in payloads {
             let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
             if let Ok(artifact) = recovery::write_postgres_schema_recovery(
@@ -215,6 +223,92 @@ fn poll_ddl_events(connection_ref: &str, max_rows: i64) -> Result<Vec<String>> {
     } else {
         Ok(Vec::new())
     }
+}
+
+fn ensure_listen_worker(connection_ref: &str) -> Result<()> {
+    let mut workers = PG_LISTEN_PAYLOADS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Postgres LISTEN worker map lock poisoned"))?;
+    if workers.contains_key(connection_ref) {
+        return Ok(());
+    }
+
+    let buffer = std::sync::Arc::new(Mutex::new(Vec::new()));
+    workers.insert(connection_ref.to_string(), buffer.clone());
+    let dsn = connection_ref.to_string();
+    std::thread::spawn(move || {
+        if let Err(err) = run_listen_loop(&dsn, buffer) {
+            tracing::warn!("postgres LISTEN worker exited for {}: {}", scrub_ref(&dsn), err);
+        }
+    });
+    Ok(())
+}
+
+fn run_listen_loop(connection_ref: &str, queue: std::sync::Arc<Mutex<Vec<String>>>) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build runtime for postgres LISTEN worker")?;
+    rt.block_on(async move {
+        let (client, connection) = tokio_postgres::connect(connection_ref, NoTls)
+            .await
+            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+        client
+            .batch_execute("LISTEN uhoh_events;")
+            .await
+            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        loop {
+            let rows = client
+                .query(
+                    "SELECT payload::text
+                     FROM _uhoh_ddl_events
+                     WHERE id > COALESCE((SELECT MAX(id) FROM _uhoh_ddl_events WHERE 1=0), 0)
+                     ORDER BY id DESC LIMIT 32",
+                    &[],
+                )
+                .await;
+            match rows {
+                Ok(values) => {
+                    if !values.is_empty() {
+                        let mut fresh = values
+                            .into_iter()
+                            .map(|row| row.get::<_, String>(0))
+                            .collect::<Vec<_>>();
+                        fresh.reverse();
+                        if let Ok(mut pending) = queue.lock() {
+                            pending.extend(fresh);
+                            if pending.len() > 1024 {
+                                let drain = pending.len().saturating_sub(1024);
+                                pending.drain(0..drain);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    })
+}
+
+fn drain_listen_payloads(connection_ref: &str) -> Result<Vec<String>> {
+    let workers = PG_LISTEN_PAYLOADS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Postgres LISTEN worker map lock poisoned"))?;
+    let Some(queue) = workers.get(connection_ref) else {
+        return Ok(Vec::new());
+    };
+    let mut pending = queue
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Postgres LISTEN payload queue lock poisoned"))?;
+    Ok(std::mem::take(&mut *pending))
 }
 
 fn run_postgres_task<T, F>(fut: F) -> Result<T>

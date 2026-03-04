@@ -1,10 +1,10 @@
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rand::RngCore;
 use subtle::ConstantTimeEq;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
 use zeroize::Zeroize;
 
 use crate::event_ledger::new_event;
@@ -14,9 +14,18 @@ const PROXY_TOKEN_FILE: &str = "server.token";
 const APPROVAL_RESPONSE_FILE_SUFFIX: &str = ".approved.json";
 
 pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build async runtime for MCP proxy")?;
+    runtime.block_on(run_proxy_async(ctx.clone()))
+}
+
+async fn run_proxy_async(ctx: SubsystemContext) -> Result<()> {
     let _ = ensure_proxy_token(&ctx.uhoh_dir)?;
     let addr = format!("127.0.0.1:{}", ctx.config.agent.mcp_proxy_port);
     let listener = TcpListener::bind(&addr)
+        .await
         .with_context(|| format!("Failed to bind MCP proxy listener on {addr}"))?;
 
     let mut event = new_event("agent", "mcp_proxy_started", "info");
@@ -26,7 +35,7 @@ pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
     }
 
     loop {
-        match listener.accept() {
+        match listener.accept().await {
             Ok((stream, addr)) => {
                 let peer = stream
                     .peer_addr()
@@ -42,9 +51,15 @@ pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
                 let uhoh_dir = ctx.uhoh_dir.clone();
                 let event_ledger = ctx.event_ledger.clone();
                 let config = ctx.config.clone();
-                std::thread::spawn(move || {
-                    if let Err(e) =
-                        handle_connection(stream, &upstream, &uhoh_dir, &event_ledger, &config)
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection_async(
+                        stream,
+                        upstream,
+                        uhoh_dir,
+                        event_ledger.clone(),
+                        config,
+                    )
+                    .await
                     {
                         let mut event = new_event("agent", "mcp_proxy_connection_failed", "warn");
                         event.detail = Some(format!("peer={}, error={}", addr, e));
@@ -69,27 +84,35 @@ pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
     Ok(())
 }
 
-fn handle_connection(
-    mut client_stream: TcpStream,
-    upstream_addr: &str,
-    uhoh_dir: &Path,
-    ledger: &crate::event_ledger::EventLedger,
-    config: &crate::config::Config,
+async fn handle_connection_async(
+    client_stream: tokio::net::TcpStream,
+    upstream_addr: String,
+    uhoh_dir: PathBuf,
+    ledger: crate::event_ledger::EventLedger,
+    config: crate::config::Config,
 ) -> Result<()> {
-    let mut upstream = TcpStream::connect(upstream_addr)
+    let upstream = tokio::net::TcpStream::connect(&upstream_addr)
+        .await
         .with_context(|| format!("Failed connecting MCP upstream: {upstream_addr}"))?;
-    let mut client_reader = BufReader::new(client_stream.try_clone()?);
-    let mut upstream_reader = BufReader::new(upstream.try_clone()?);
 
-    let mut line = String::new();
-    let mut authed = false;
-    let expected_token = ensure_proxy_token(uhoh_dir)?;
-    loop {
-        line.clear();
-        let n = client_reader.read_line(&mut line)?;
-        if n == 0 {
-            break;
+    let (client_reader, mut client_writer) = client_stream.into_split();
+    let (upstream_reader, mut upstream_writer) = upstream.into_split();
+    let mut client_lines = BufReader::new(client_reader).lines();
+    let mut upstream_lines = BufReader::new(upstream_reader).lines();
+
+    let upstream_to_client = tokio::spawn(async move {
+        while let Some(line) = upstream_lines.next_line().await? {
+            client_writer.write_all(line.as_bytes()).await?;
+            client_writer.write_all(b"\n").await?;
+            client_writer.flush().await?;
         }
+        Result::<(), anyhow::Error>::Ok(())
+    });
+
+    let mut authed = false;
+    let expected_token = ensure_proxy_token(&uhoh_dir)?;
+    while let Some(line) = client_lines.next_line().await? {
+        let mut should_forward = true;
 
         if !authed {
             authed = validate_auth_line(&line, &expected_token)?;
@@ -106,29 +129,25 @@ fn handle_connection(
                 .map(|m| m == "tools/call")
                 .unwrap_or(false)
             {
-                if intercept_tool_call(&json, uhoh_dir, ledger, config)? {
+                if intercept_tool_call(&json, &uhoh_dir, &ledger, &config).await? {
                     // Pause mode: hold and do not forward this call.
-                    continue;
+                    should_forward = false;
                 }
             }
         }
 
-        upstream.write_all(line.as_bytes())?;
-        upstream.flush()?;
-
-        let mut response = String::new();
-        let n = upstream_reader.read_line(&mut response)?;
-        if n == 0 {
-            break;
+        if should_forward {
+            upstream_writer.write_all(line.as_bytes()).await?;
+            upstream_writer.write_all(b"\n").await?;
+            upstream_writer.flush().await?;
         }
-
-        client_stream.write_all(response.as_bytes())?;
-        client_stream.flush()?;
     }
+
+    upstream_to_client.abort();
     Ok(())
 }
 
-fn intercept_tool_call(
+async fn intercept_tool_call(
     call: &serde_json::Value,
     uhoh_dir: &Path,
     ledger: &crate::event_ledger::EventLedger,
@@ -217,7 +236,8 @@ fn intercept_tool_call(
                 &approval_hmac,
                 config.agent.pause_timeout_seconds,
                 ledger,
-            )?;
+            )
+            .await?;
             if !approved {
                 let mut timeout_event = new_event("agent", "dangerous_action_timeout", "warn");
                 timeout_event.path = path.clone();
@@ -347,7 +367,7 @@ fn write_pending_approval(
     Ok(())
 }
 
-fn wait_for_approval(
+async fn wait_for_approval(
     uhoh_dir: &Path,
     approval_id: &str,
     expected_response: &str,
@@ -393,7 +413,7 @@ fn wait_for_approval(
             let _ = std::fs::remove_file(&pending);
             return Ok(false);
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 
