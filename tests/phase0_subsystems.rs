@@ -260,3 +260,31 @@ fn cli_agent_undo_cascade_marks_descendants_resolved() {
     assert!(root_row.resolved);
     assert!(child_row.resolved);
 }
+
+#[test]
+fn cli_health_endpoint_alias_and_auth_middleware_exemption_present() {
+    let source = std::fs::read_to_string("src/server/mod.rs").expect("read server mod");
+    assert!(source.contains(".route(\"/api/v1/health\", get(health_check))"));
+    assert!(source.contains(".route(\"/health\", get(health_check))"));
+
+    let auth = std::fs::read_to_string("src/server/auth.rs").expect("read auth middleware");
+    assert!(auth.contains("path == \"/health\" || path == \"/api/v1/health\""));
+}
+
+#[test]
+fn mcp_proxy_dangerous_patterns_use_exact_match_semantics() {
+    let proxy = std::fs::read_to_string("src/agent/mcp_proxy.rs").expect("read mcp proxy");
+    assert!(proxy.contains("return tool_l == raw.trim();"));
+    assert!(proxy.contains("return path_l == raw.trim();"));
+    assert!(proxy.contains("tool_l == p || path_l == p"));
+}
+
+#[test]
+fn postgres_listen_worker_queries_use_monotonic_id_cursor() {
+    let source = std::fs::read_to_string("src/db_guard/postgres.rs")
+        .expect("read postgres guard implementation");
+    assert!(source.contains("SELECT id, payload::text"));
+    assert!(source.contains("WHERE id > $1"));
+    assert!(source.contains("last_seen_id = last_seen_id.max(id);"));
+    assert!(!source.contains("WHERE id > COALESCE((SELECT MAX(id) FROM _uhoh_ddl_events WHERE 1=0), 0)"));
+}

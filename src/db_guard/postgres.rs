@@ -262,24 +262,38 @@ fn run_listen_loop(connection_ref: &str, queue: std::sync::Arc<Mutex<Vec<String>
             let _ = connection.await;
         });
 
+        let mut last_seen_id = {
+            let cache = PG_DDL_CURSOR
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Postgres DDL cursor lock poisoned"))?;
+            cache.get(connection_ref).copied().unwrap_or(0)
+        };
+
         loop {
             let rows = client
                 .query(
-                    "SELECT payload::text
+                    "SELECT id, payload::text
                      FROM _uhoh_ddl_events
-                     WHERE id > COALESCE((SELECT MAX(id) FROM _uhoh_ddl_events WHERE 1=0), 0)
-                     ORDER BY id DESC LIMIT 32",
-                    &[],
+                     WHERE id > $1
+                     ORDER BY id ASC LIMIT 64",
+                    &[&last_seen_id],
                 )
                 .await;
             match rows {
                 Ok(values) => {
                     if !values.is_empty() {
-                        let mut fresh = values
-                            .into_iter()
-                            .map(|row| row.get::<_, String>(0))
-                            .collect::<Vec<_>>();
-                        fresh.reverse();
+                        let mut fresh = Vec::with_capacity(values.len());
+                        for row in values {
+                            let id: i64 = row.get(0);
+                            let payload: String = row.get(1);
+                            last_seen_id = last_seen_id.max(id);
+                            fresh.push(payload);
+                        }
+
+                        if let Ok(mut cache) = PG_DDL_CURSOR.lock() {
+                            cache.insert(connection_ref.to_string(), last_seen_id);
+                        }
+
                         if let Ok(mut pending) = queue.lock() {
                             pending.extend(fresh);
                             if pending.len() > 1024 {
