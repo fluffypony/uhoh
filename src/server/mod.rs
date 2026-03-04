@@ -143,7 +143,13 @@ async fn health_check(State(state): State<AppState>) -> axum::Json<serde_json::V
         .map(|(name, health)| {
             let status = match health {
                 SubsystemHealth::Healthy => "healthy".to_string(),
+                SubsystemHealth::HealthyWithAudit(source) => {
+                    format!("healthy:audit={}", audit_source_label(&source))
+                }
                 SubsystemHealth::Degraded(msg) => format!("degraded:{msg}"),
+                SubsystemHealth::DegradedWithAudit { message, source } => {
+                    format!("degraded:{message};audit={}", audit_source_label(&source))
+                }
                 SubsystemHealth::Failed(msg) => format!("failed:{msg}"),
             };
             serde_json::json!({"name": name, "status": status})
@@ -161,4 +167,12 @@ async fn health_check(State(state): State<AppState>) -> axum::Json<serde_json::V
 async fn serve_ui() -> impl axum::response::IntoResponse {
     let html = include_str!("../../assets/timemachine.html");
     axum::response::Html(html)
+}
+
+fn audit_source_label(source: &crate::subsystem::AuditSource) -> &'static str {
+    match source {
+        crate::subsystem::AuditSource::None => "none",
+        crate::subsystem::AuditSource::Fanotify => "fanotify",
+        crate::subsystem::AuditSource::OpenBsm => "openbsm",
+    }
 }

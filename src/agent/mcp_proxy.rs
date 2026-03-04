@@ -18,9 +18,6 @@ pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
     let addr = format!("127.0.0.1:{}", ctx.config.agent.mcp_proxy_port);
     let listener = TcpListener::bind(&addr)
         .with_context(|| format!("Failed to bind MCP proxy listener on {addr}"))?;
-    listener
-        .set_nonblocking(true)
-        .context("Failed setting MCP proxy listener non-blocking")?;
 
     let mut event = new_event("agent", "mcp_proxy_started", "info");
     event.detail = Some(format!("addr={addr}"));
@@ -42,24 +39,22 @@ pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
                     tracing::error!("failed to append mcp_proxy_client_connected event: {err}");
                 }
                 let upstream = resolve_upstream_addr();
-                if let Err(e) = handle_connection(
-                    stream,
-                    &upstream,
-                    &ctx.uhoh_dir,
-                    &ctx.event_ledger,
-                    &ctx.config,
-                ) {
-                    let mut event = new_event("agent", "mcp_proxy_connection_failed", "warn");
-                    event.detail = Some(format!("peer={}, error={}", addr, e));
-                    if let Err(err) = ctx.event_ledger.append(event) {
-                        tracing::error!(
-                            "failed to append mcp_proxy_connection_failed event: {err}"
-                        );
+                let uhoh_dir = ctx.uhoh_dir.clone();
+                let event_ledger = ctx.event_ledger.clone();
+                let config = ctx.config.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) =
+                        handle_connection(stream, &upstream, &uhoh_dir, &event_ledger, &config)
+                    {
+                        let mut event = new_event("agent", "mcp_proxy_connection_failed", "warn");
+                        event.detail = Some(format!("peer={}, error={}", addr, e));
+                        if let Err(err) = event_ledger.append(event) {
+                            tracing::error!(
+                                "failed to append mcp_proxy_connection_failed event: {err}"
+                            );
+                        }
                     }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                });
             }
             Err(e) => {
                 let mut event = new_event("agent", "mcp_proxy_accept_failed", "warn");
@@ -332,8 +327,7 @@ fn write_pending_approval(
     timeout_seconds: u64,
 ) -> Result<()> {
     let runtime = runtime_dir(uhoh_dir);
-    std::fs::create_dir_all(&runtime)
-        .with_context(|| format!("Failed to create runtime dir: {}", runtime.display()))?;
+    ensure_secure_runtime_dir(&runtime)?;
 
     let pending = PendingApproval {
         approval_id: approval_id.to_string(),
@@ -345,7 +339,11 @@ fn write_pending_approval(
         args: args.clone(),
     };
     let serialized = serde_json::to_vec_pretty(&pending)?;
-    std::fs::write(pending_approval_path(uhoh_dir, approval_id), serialized)?;
+    atomic_write_secure(
+        &pending_approval_path(uhoh_dir, approval_id),
+        &serialized,
+        "pending",
+    )?;
     Ok(())
 }
 
@@ -362,6 +360,12 @@ fn wait_for_approval(
     let timeout = std::time::Duration::from_secs(timeout_seconds.max(1));
     let deadline = std::time::Instant::now() + timeout;
     loop {
+        if let Ok(meta) = std::fs::symlink_metadata(&approved) {
+            if meta.file_type().is_symlink() {
+                let _ = std::fs::remove_file(&approved);
+                continue;
+            }
+        }
         if let Some(response) = read_approval_response(&approved)? {
             if !secure_eq(response.approval_id.as_bytes(), approval_id.as_bytes())
                 || !secure_eq(response.response.as_bytes(), expected_response.as_bytes())
@@ -384,7 +388,7 @@ fn wait_for_approval(
             return Ok(true);
         }
         if std::time::Instant::now() >= deadline {
-            let _ = std::fs::create_dir_all(&runtime);
+            let _ = ensure_secure_runtime_dir(&runtime);
             let _ = std::fs::write(runtime.join("resume.pid"), std::process::id().to_string());
             let _ = std::fs::remove_file(&pending);
             return Ok(false);
@@ -435,6 +439,39 @@ fn read_approval_response(path: &Path) -> Result<Option<ApprovalResponse>> {
         }
     };
     Ok(Some(parsed))
+}
+
+fn ensure_secure_runtime_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("Failed to create runtime dir: {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to set permissions on {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn atomic_write_secure(path: &Path, payload: &[u8], label: &str) -> Result<()> {
+    let tmp = path.with_extension(format!("{}.tmp", label));
+    std::fs::write(&tmp, payload)
+        .with_context(|| format!("Failed writing temporary file: {}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("Failed finalizing pending approval file: {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn secure_eq(left: &[u8], right: &[u8]) -> bool {

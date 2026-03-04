@@ -49,11 +49,16 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
         "/usr".to_string(),
         "/lib".to_string(),
         "/etc".to_string(),
+        "/etc/ld.so.cache".to_string(),
         "/tmp".to_string(),
         "/dev/null".to_string(),
         "/dev/urandom".to_string(),
         "/proc/self".to_string(),
     ];
+    if let Ok(cwd) = std::env::current_dir() {
+        allow_paths.push(cwd.display().to_string());
+    }
+    allow_paths.push(crate::uhoh_dir().display().to_string());
     allow_paths.extend(profile.data_dirs.clone());
     allow_paths.extend(profile.memory_dirs.clone());
     allow_paths.extend(profile.config_files.clone());
@@ -61,8 +66,20 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
 
     let refs = allow_paths
         .iter()
-        .map(std::string::String::as_str)
+        .map(|path| expand_home(path))
+        .filter_map(|path| {
+            let candidate = std::path::PathBuf::from(&path);
+            if candidate.exists() {
+                dunce::canonicalize(&candidate).ok().or(Some(candidate))
+            } else {
+                None
+            }
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     ruleset = ruleset.add_rules(path_beneath_rules(&refs, AccessFs::from_all(abi)))?;
     let status = ruleset.restrict_self()?;
     match status.ruleset {
@@ -74,4 +91,14 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
 #[cfg(not(target_os = "linux"))]
 pub fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
     anyhow::bail!("Landlock is only supported on Linux")
+}
+
+#[cfg(target_os = "linux")]
+fn expand_home(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
 }

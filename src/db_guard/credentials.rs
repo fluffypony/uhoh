@@ -6,6 +6,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+#[cfg(feature = "keyring")]
 const KEYRING_SERVICE: &str = "uhoh-db-guard";
 const KEYRING_TIMEOUT_SECS: u64 = 3;
 
@@ -185,8 +186,14 @@ pub fn store_postgres_credentials_cli(
     connection_ref: &str,
     cred: &CredentialMaterial,
 ) -> Result<()> {
-    let _ = EncryptedFileBackend.store(connection_ref, cred);
-    let _ = KeyringBackend.store(connection_ref, cred);
+    EncryptedFileBackend.store(connection_ref, cred)?;
+    if let Err(err) = KeyringBackend.store(connection_ref, cred) {
+        tracing::warn!(
+            "Keyring store failed for '{}': {}",
+            scrub_dsn(connection_ref),
+            err
+        );
+    }
     Ok(())
 }
 

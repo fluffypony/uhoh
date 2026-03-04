@@ -11,6 +11,7 @@ use crate::subsystem::SubsystemContext;
 pub struct MysqlGuardState {
     pub last_schema_hash: Option<String>,
     pub last_row_total: Option<i64>,
+    pub last_table_count: Option<usize>,
 }
 
 pub fn tick_mysql_guard(
@@ -38,13 +39,25 @@ pub fn tick_mysql_guard(
 
     if let Some(prev_hash) = &state.last_schema_hash {
         if prev_hash != &schema_hash {
-            let mut event = new_event("db_guard", "drop_table", "critical");
+            let (event_type, severity) = if state
+                .last_table_count
+                .map(|previous| snapshot.table_count < previous)
+                .unwrap_or(false)
+            {
+                ("drop_table", "critical")
+            } else {
+                ("schema_change", "warn")
+            };
+            let mut event = new_event("db_guard", event_type, severity);
             event.guard_name = Some(guard.name.clone());
             event.detail = Some(
                 serde_json::json!({
                     "mode": "schema_polling",
                     "previous_schema_hash": prev_hash,
                     "current_schema_hash": schema_hash,
+                    "table_count_previous": state.last_table_count,
+                    "table_count_current": snapshot.table_count,
+                    "change_hint": event_type,
                     "detected_at": chrono::Utc::now().to_rfc3339(),
                 })
                 .to_string(),
@@ -77,6 +90,7 @@ pub fn tick_mysql_guard(
 
     state.last_schema_hash = Some(schema_hash);
     state.last_row_total = Some(snapshot.row_total);
+    state.last_table_count = Some(snapshot.table_count);
 
     let mut heartbeat = new_event("db_guard", "mysql_tick", "info");
     heartbeat.guard_name = Some(guard.name.clone());

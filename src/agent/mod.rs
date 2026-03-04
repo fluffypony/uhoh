@@ -18,13 +18,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::AgentEntry;
 use crate::event_ledger::new_event;
-use crate::subsystem::{Subsystem, SubsystemContext, SubsystemHealth};
+use crate::subsystem::{AuditSource, Subsystem, SubsystemContext, SubsystemHealth};
 
 pub struct AgentSubsystem {
     healthy: bool,
     intercept_started: bool,
     proxy_started: bool,
     background_failures: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    intercept_task: Option<tokio::task::JoinHandle<()>>,
+    proxy_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl AgentSubsystem {
@@ -34,6 +36,8 @@ impl AgentSubsystem {
             intercept_started: false,
             proxy_started: false,
             background_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            intercept_task: None,
+            proxy_task: None,
         }
     }
 }
@@ -77,6 +81,7 @@ impl Subsystem for AgentSubsystem {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                    self.poll_background_tasks().await;
                     if self
                         .background_failures
                         .load(std::sync::atomic::Ordering::Relaxed)
@@ -98,14 +103,61 @@ impl Subsystem for AgentSubsystem {
 
     fn health_check(&self) -> SubsystemHealth {
         if self.healthy {
-            SubsystemHealth::Healthy
+            if cfg!(all(target_os = "linux", feature = "audit-trail")) {
+                SubsystemHealth::HealthyWithAudit(AuditSource::Fanotify)
+            } else {
+                SubsystemHealth::HealthyWithAudit(AuditSource::None)
+            }
         } else {
-            SubsystemHealth::Degraded("agent monitor reported failures".to_string())
+            SubsystemHealth::DegradedWithAudit {
+                message: "agent monitor reported failures".to_string(),
+                source: if cfg!(all(target_os = "linux", feature = "audit-trail")) {
+                    AuditSource::Fanotify
+                } else {
+                    AuditSource::None
+                },
+            }
         }
     }
 }
 
 impl AgentSubsystem {
+    async fn poll_background_tasks(&mut self) {
+        if self
+            .intercept_task
+            .as_ref()
+            .map(|task| task.is_finished())
+            .unwrap_or(false)
+        {
+            if let Some(task) = self.intercept_task.take() {
+                if let Err(err) = task.await {
+                    self.background_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.healthy = false;
+                    tracing::error!("session tailer task panicked: {err}");
+                }
+            }
+            self.intercept_started = false;
+        }
+
+        if self
+            .proxy_task
+            .as_ref()
+            .map(|task| task.is_finished())
+            .unwrap_or(false)
+        {
+            if let Some(task) = self.proxy_task.take() {
+                if let Err(err) = task.await {
+                    self.background_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.healthy = false;
+                    tracing::error!("mcp proxy task panicked: {err}");
+                }
+            }
+            self.proxy_started = false;
+        }
+    }
+
     fn tick_agents(&mut self, ctx: &SubsystemContext, agents: &[AgentEntry]) -> Result<()> {
         if ctx.config.agent.intercept_enabled {
             if !self.intercept_started {
@@ -113,7 +165,7 @@ impl AgentSubsystem {
                 let ctx_cl = ctx.clone();
                 let agents_cl = agents.to_vec();
                 let failures = self.background_failures.clone();
-                std::thread::spawn(move || {
+                self.intercept_task = Some(tokio::task::spawn_blocking(move || {
                     #[cfg(target_os = "linux")]
                     {
                         if let Err(err) = fanotify::run_permission_monitor(&ctx_cl, &agents_cl) {
@@ -124,7 +176,7 @@ impl AgentSubsystem {
                         failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!("session tailer thread failed: {err}");
                     }
-                });
+                }));
             }
         }
         if ctx.config.agent.audit_enabled {
@@ -135,12 +187,12 @@ impl AgentSubsystem {
                 self.proxy_started = true;
                 let ctx_cl = ctx.clone();
                 let failures = self.background_failures.clone();
-                std::thread::spawn(move || {
+                self.proxy_task = Some(tokio::task::spawn_blocking(move || {
                     if let Err(err) = mcp_proxy::run_proxy(&ctx_cl) {
                         failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!("mcp proxy thread failed: {err}");
                     }
-                });
+                }));
             }
         }
         Ok(())

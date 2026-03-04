@@ -3,6 +3,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::RngCore;
+use tempfile::NamedTempFile;
 use zeroize::Zeroize;
 
 use super::credentials::CredentialMaterial;
@@ -177,21 +178,78 @@ pub fn sqlite_schema_dump(sqlite_path: &std::path::Path) -> Result<String> {
 }
 
 fn postgres_schema_dump(connection_ref: &str, creds: &CredentialMaterial) -> Result<String> {
+    let mut passfile: Option<NamedTempFile> = None;
     let mut cmd = std::process::Command::new("pg_dump");
     cmd.arg("--schema-only")
         .arg("--no-owner")
         .arg("--no-privileges")
         .arg(connection_ref);
     if let Some(password) = &creds.password {
-        cmd.env("PGPASSWORD", password);
+        let parsed = parse_postgres_connection_ref(connection_ref)?;
+        let mut file = NamedTempFile::new().context("Failed creating temporary pgpass file")?;
+        use std::io::Write as _;
+        writeln!(
+            file,
+            "{}:{}:{}:{}:{}",
+            parsed.host,
+            parsed.port,
+            parsed.database,
+            parsed.user,
+            password
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o600))?;
+        }
+        cmd.env("PGPASSFILE", file.path());
+        passfile = Some(file);
     }
     let output = cmd.output().context("Failed to execute pg_dump")?;
+    drop(passfile);
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("pg_dump failed: {}", err.trim());
     }
     let dump = String::from_utf8_lossy(&output.stdout).to_string();
     Ok(wrap_in_transaction(&dump))
+}
+
+struct ParsedPgRef {
+    host: String,
+    port: u16,
+    user: String,
+    database: String,
+}
+
+fn parse_postgres_connection_ref(connection_ref: &str) -> Result<ParsedPgRef> {
+    let url = url::Url::parse(connection_ref).context("Invalid postgres connection reference")?;
+    if !matches!(url.scheme(), "postgres" | "postgresql") {
+        anyhow::bail!("Expected postgres:// or postgresql:// connection reference");
+    }
+
+    let host = url.host_str().unwrap_or("localhost").to_string();
+    let port = url.port().unwrap_or(5432);
+    let user = if url.username().is_empty() {
+        "postgres".to_string()
+    } else {
+        url.username().to_string()
+    };
+    let database = {
+        let name = url.path().trim_start_matches('/').trim();
+        if name.is_empty() {
+            user.clone()
+        } else {
+            name.to_string()
+        }
+    };
+
+    Ok(ParsedPgRef {
+        host,
+        port,
+        user,
+        database,
+    })
 }
 
 fn wrap_in_transaction(sql: &str) -> String {

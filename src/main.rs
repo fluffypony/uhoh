@@ -1277,7 +1277,21 @@ fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Resul
                 100,
             )?;
             for e in events {
-                println!("#{} {} [{}] {}", e.id, e.ts, e.severity, e.event_type);
+                let session_out = e
+                    .detail
+                    .as_deref()
+                    .and_then(extract_session_id)
+                    .unwrap_or_else(|| "-".to_string());
+                let tool = e
+                    .detail
+                    .as_deref()
+                    .and_then(|d| extract_detail_field(d, "tool"))
+                    .unwrap_or_else(|| "-".to_string());
+                let path = e.path.clone().unwrap_or_else(|| "-".to_string());
+                println!(
+                    "#{} {} [{}] {} session={} tool={} path={}",
+                    e.id, e.ts, e.severity, e.event_type, session_out, tool, path
+                );
             }
         }
         AgentAction::Undo {
@@ -1454,6 +1468,14 @@ fn extract_session_id(detail: &str) -> Option<String> {
     json.get("session_id")
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+fn extract_detail_field(detail: &str, key: &str) -> Option<String> {
+    if !detail.trim_start().starts_with('{') {
+        return None;
+    }
+    let json = serde_json::from_str::<serde_json::Value>(detail).ok()?;
+    json.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
 
 fn expand_home_path(path: &str) -> String {
