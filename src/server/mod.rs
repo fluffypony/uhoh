@@ -15,7 +15,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tower_http::cors::{Any, CorsLayer};
 
 use crate::config::ServerConfig;
 use crate::db::Database;
@@ -87,13 +86,6 @@ pub async fn start_server(
     if config.ui_enabled {
         app = app.fallback(get(serve_ui));
     }
-
-    app = app.layer(
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any),
-    );
 
     app = app.route_layer(middleware::from_fn_with_state(
         config.port,
