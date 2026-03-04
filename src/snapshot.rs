@@ -109,6 +109,13 @@ pub fn create_snapshot(
                     if is_symlink {
                         match cas::store_symlink_target(&blob_root, &abs_path) {
                             Ok((hash, size, bytes_written)) => {
+                                let is_new_or_changed = prev_files
+                                    .get(rel_path)
+                                    .map_or(true, |prev| prev.hash != hash || !prev.is_symlink);
+                                if is_new_or_changed {
+                                    has_changes = true;
+                                    new_files.push(rel_path.clone());
+                                }
                                 let mtime_i = mtime_to_i64(mtime);
                                 files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored: true, executable: false, mtime: Some(mtime_i), storage_method: cas::StorageMethod::Copy.to_db(), is_symlink: true });
                                 current_hashes.insert(rel_path.clone(), (hash, true));
@@ -119,6 +126,25 @@ pub fn create_snapshot(
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to store symlink for {}: {}", rel_path, e);
+                                let is_new_or_changed = prev_files
+                                    .get(rel_path)
+                                    .map_or(true, |prev| prev.stored || !prev.is_symlink);
+                                if is_new_or_changed {
+                                    has_changes = true;
+                                    new_files.push(rel_path.clone());
+                                }
+                                files_for_manifest.push(crate::db::SnapFileEntry {
+                                    path: rel_path.clone(),
+                                    hash: String::new(),
+                                    size,
+                                    stored: false,
+                                    executable: false,
+                                    mtime: Some(mtime_to_i64(mtime)),
+                                    storage_method: cas::StorageMethod::None.to_db(),
+                                    is_symlink: true,
+                                });
+                                current_hashes.insert(rel_path.clone(), (String::new(), false));
+                                inserted.insert(rel_path.clone());
                             }
                         }
                     } else {
@@ -237,6 +263,13 @@ pub fn create_snapshot(
             if is_symlink {
                 match cas::store_symlink_target(&blob_root, abs_path) {
                     Ok((hash, size, bytes_written)) => {
+                        let is_new_or_changed = prev_files
+                            .get(rel_path)
+                            .map_or(true, |prev| prev.hash != hash || !prev.is_symlink);
+                        if is_new_or_changed {
+                            has_changes = true;
+                            new_files.push(rel_path.clone());
+                        }
                         let mtime_i = mtime_to_i64(mtime);
                         files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored: true, executable: false, mtime: Some(mtime_i), storage_method: cas::StorageMethod::Copy.to_db(), is_symlink: true });
                         current_hashes.insert(rel_path.clone(), (hash, true));
@@ -244,7 +277,27 @@ pub fn create_snapshot(
                             let _ = database.add_blob_bytes(bytes_written as i64);
                         }
                     }
-                    Err(e) => tracing::warn!("Failed to store symlink for {}: {}", rel_path, e),
+                    Err(e) => {
+                        tracing::warn!("Failed to store symlink for {}: {}", rel_path, e);
+                        let is_new_or_changed = prev_files
+                            .get(rel_path)
+                            .map_or(true, |prev| prev.stored || !prev.is_symlink);
+                        if is_new_or_changed {
+                            has_changes = true;
+                            new_files.push(rel_path.clone());
+                        }
+                        files_for_manifest.push(crate::db::SnapFileEntry {
+                            path: rel_path.clone(),
+                            hash: String::new(),
+                            size,
+                            stored: false,
+                            executable: false,
+                            mtime: Some(mtime_to_i64(mtime)),
+                            storage_method: cas::StorageMethod::None.to_db(),
+                            is_symlink: true,
+                        });
+                        current_hashes.insert(rel_path.clone(), (String::new(), false));
+                    }
                 }
             } else {
                 match cas::store_blob_from_file(&blob_root, abs_path, config.storage.max_copy_blob_bytes, config.storage.max_binary_blob_bytes, config.storage.max_text_blob_bytes, cfg!(feature = "compression") && config.storage.compress, config.storage.compress_level) {

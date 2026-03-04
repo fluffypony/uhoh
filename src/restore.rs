@@ -109,9 +109,12 @@ pub fn cmd_restore(
             let mut set = HashSet::new();
             for e in crate::ignore_rules::build_walker(project_path) {
                 if let Ok(ent) = e {
-                    if ent.file_type().map_or(false, |ft| ft.is_file()) {
+                    if ent
+                        .file_type()
+                        .map_or(false, |ft| ft.is_file() || ft.is_symlink())
+                    {
                         if let Ok(rel) = ent.path().strip_prefix(project_path) {
-                            set.insert(crate::cas::normalize_path(rel));
+                            set.insert(crate::cas::encode_relpath(rel));
                         }
                     }
                 }
