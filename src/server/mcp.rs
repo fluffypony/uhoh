@@ -216,8 +216,9 @@ async fn tool_pre_notify(state: AppState, id: Option<Value>, args: Value) -> Jso
         event.agent_name = Some(agent.clone());
         event.path = path.clone();
         event.detail = Some(format!("action={action}"));
-        event.prev_hash = None;
-        let event_id = db.insert_event_ledger(&event)?;
+        let ledger = crate::event_ledger::EventLedger::new(db.clone());
+        let _ = ledger.flush();
+        let event_id = ledger.append(event)?;
         Ok(json!({
             "content": [{"type": "text", "text": "pre-notify accepted"}],
             "event_id": event_id,

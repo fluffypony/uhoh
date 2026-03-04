@@ -80,6 +80,42 @@ fn check_no_symlink_parents(restore_base: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+fn safe_remove_dir_tree_within(project_base: &Path, target: &Path) -> Result<()> {
+    let project_canonical = dunce::canonicalize(project_base)
+        .with_context(|| format!("Failed to canonicalize project base: {}", project_base.display()))?;
+    let target_canonical = dunce::canonicalize(target)
+        .with_context(|| format!("Failed to canonicalize target: {}", target.display()))?;
+
+    if !target_canonical.starts_with(&project_canonical) {
+        anyhow::bail!(
+            "Refusing to delete directory outside project root: {}",
+            target.display()
+        );
+    }
+
+    let mut stack = vec![target_canonical.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "Refusing to recursively delete directory containing symlink: {}",
+                    path.display()
+                );
+            }
+            if meta.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+
+    std::fs::remove_dir_all(&target_canonical)
+        .with_context(|| format!("Failed removing directory {}", target.display()))?;
+    Ok(())
+}
+
 fn validate_restore_path(project_path: &Path, relative_path: &str) -> Result<()> {
     let rel = Path::new(relative_path);
     if rel.is_absolute() {
@@ -394,7 +430,7 @@ pub fn cmd_restore(
             if dst.is_file() {
                 let _ = std::fs::remove_file(&dst);
             } else if dst.is_dir() {
-                let _ = std::fs::remove_dir_all(&dst);
+                safe_remove_dir_tree_within(project_path, &dst)?;
             } else {
                 let _ = std::fs::remove_file(&dst);
             }
@@ -409,7 +445,7 @@ pub fn cmd_restore(
             if final_dest.is_file() {
                 let _ = std::fs::remove_file(&final_dest);
             } else if final_dest.is_dir() {
-                let _ = std::fs::remove_dir_all(&final_dest);
+                safe_remove_dir_tree_within(project_path, &final_dest)?;
             } else {
                 let _ = std::fs::remove_file(&final_dest);
             }
@@ -478,4 +514,25 @@ pub fn cmd_restore(
     }
 
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_remove_dir_tree_within;
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_remove_dir_tree_rejects_nested_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let victim = project.join("victim");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, victim.join("escape")).unwrap();
+
+        let err = safe_remove_dir_tree_within(&project, &victim).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("containing symlink"));
+    }
 }

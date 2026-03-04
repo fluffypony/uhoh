@@ -198,7 +198,6 @@ async fn test_http_range_resume() {
     let mut pos: u64 = 0;
     let mut out = std::fs::OpenOptions::new()
         .create(true)
-        
         .append(true)
         .open(&out_path)
         .unwrap();

@@ -374,14 +374,26 @@ fn handle_stdio_tool_call(
             event.agent_name = Some(agent.to_string());
             event.path = path.map(|p| p.to_string());
             event.detail = Some(format!("action={action}"));
-            event.prev_hash = None;
-            let event_id = match database.insert_event_ledger(&event) {
+            let fallback_event = event.clone();
+            let event_id = match Database::open(&crate::uhoh_dir().join("uhoh.db")) {
+                Ok(db) => {
+                    let ledger =
+                        crate::event_ledger::EventLedger::new(std::sync::Arc::new(db));
+                    let _ = ledger.flush();
+                    ledger.append(event).ok()
+                }
+                Err(err) => {
+                    tracing::error!("failed to reopen database for pre_notify append: {err}");
+                    None
+                }
+            }
+            .or_else(|| match database.insert_event_ledger(&fallback_event) {
                 Ok(id) => Some(id),
                 Err(err) => {
                     tracing::error!("failed to append pre_notify event: {err}");
                     None
                 }
-            };
+            });
             JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 result: Some(json!({
