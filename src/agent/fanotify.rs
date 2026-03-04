@@ -7,11 +7,11 @@ use std::io::Read;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use std::os::fd::AsRawFd;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+use std::os::fd::RawFd;
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use std::os::unix::fs::OpenOptionsExt;
-#[cfg(all(target_os = "linux", feature = "audit-trail"))]
-use std::os::fd::RawFd;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use std::path::{Path, PathBuf};
 
@@ -21,9 +21,9 @@ use anyhow::{Context, Result};
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use crate::db::AgentEntry;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
-use crate::event_ledger::EventLedger;
-#[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use crate::event_ledger::new_event;
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+use crate::event_ledger::EventLedger;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use crate::subsystem::SubsystemContext;
 
@@ -104,7 +104,9 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
                         }
                         if sec_count >= max_per_sec {
                             dropped = dropped.saturating_add(1);
-                        } else if let Err(err) = capture_preimage(&ctx.uhoh_dir, path, &mut batch) {
+                        } else if let Err(err) =
+                            capture_preimage(&ctx.uhoh_dir, path, metadata.pid, &mut batch)
+                        {
                             tracing::warn!("fanotify pre-image capture failed: {}", err);
                         } else {
                             sec_count = sec_count.saturating_add(1);
@@ -174,6 +176,7 @@ fn path_within(root: &Path, path: &Path) -> bool {
 fn capture_preimage(
     uhoh_dir: &Path,
     path: &Path,
+    pid: i32,
     batch: &mut VecDeque<PendingAudit>,
 ) -> Result<()> {
     if !path.exists() || !path.is_file() {
@@ -185,7 +188,7 @@ fn capture_preimage(
     file.read_to_end(&mut bytes)
         .with_context(|| format!("Failed reading pre-image source: {}", path.display()))?;
     let (hash, _) = crate::cas::store_blob(&uhoh_dir.join("blobs"), &bytes)?;
-    let (pid, start_ticks) = process_pid_start_ticks()?;
+    let start_ticks = process_start_ticks(pid).unwrap_or_default();
     batch.push_back(PendingAudit {
         path: path.to_path_buf(),
         pre_state_ref: hash,
@@ -219,8 +222,7 @@ fn flush_batch(ledger: EventLedger, batch: &mut VecDeque<PendingAudit>) -> Resul
 }
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
-fn process_pid_start_ticks() -> Result<(i32, u64)> {
-    let pid = std::process::id() as i32;
+fn process_start_ticks(pid: i32) -> Result<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .with_context(|| format!("Failed reading /proc/{pid}/stat"))?;
     let parts: Vec<&str> = stat.split_whitespace().collect();
@@ -228,7 +230,7 @@ fn process_pid_start_ticks() -> Result<(i32, u64)> {
         .get(21)
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or_default();
-    Ok((pid, start_ticks))
+    Ok(start_ticks)
 }
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
@@ -243,5 +245,17 @@ fn respond_allow(fan_fd: RawFd, fd: RawFd) {
             &response as *const libc::fanotify_response as *const libc::c_void,
             std::mem::size_of::<libc::fanotify_response>(),
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux", feature = "audit-trail"))]
+mod tests {
+    use super::process_start_ticks;
+
+    #[test]
+    fn process_start_ticks_reads_current_process() {
+        let pid = std::process::id() as i32;
+        let ticks = process_start_ticks(pid).expect("current process stat should be readable");
+        assert!(ticks > 0);
     }
 }

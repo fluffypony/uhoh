@@ -509,8 +509,12 @@ fn atomic_write_secure(path: &Path, payload: &[u8], label: &str) -> Result<()> {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("Failed to set permissions on {}", tmp.display()))?;
     }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("Failed finalizing pending approval file: {}", path.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| {
+        format!(
+            "Failed finalizing pending approval file: {}",
+            path.display()
+        )
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -576,4 +580,36 @@ pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
             .with_context(|| format!("Failed to set permissions on {}", token_path.display()))?;
     }
     Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_dangerous_tool_call;
+
+    #[test]
+    fn dangerous_tool_pattern_exact_and_substring() {
+        let patterns = vec!["write".to_string()];
+        assert!(is_dangerous_tool_call(
+            "write",
+            Some("/tmp/file"),
+            &patterns
+        ));
+        assert!(!is_dangerous_tool_call(
+            "apply_patch",
+            Some("/workspace/write-target"),
+            &patterns
+        ));
+    }
+
+    #[test]
+    fn dangerous_tool_pattern_with_prefixes() {
+        let patterns = vec!["tool:apply_patch".to_string(), "path:/tmp/a".to_string()];
+        assert!(is_dangerous_tool_call(
+            "apply_patch",
+            Some("/other"),
+            &patterns
+        ));
+        assert!(is_dangerous_tool_call("other", Some("/tmp/a"), &patterns));
+        assert!(!is_dangerous_tool_call("other", Some("/tmp/b"), &patterns));
+    }
 }

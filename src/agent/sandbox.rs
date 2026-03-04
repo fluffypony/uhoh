@@ -1,12 +1,16 @@
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
 use landlock::{
     path_beneath_rules, AccessFs, LandlockStatus, RestrictionStatus, Ruleset, RulesetStatus, ABI,
 };
 
 pub fn sandbox_supported() -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
     {
         runtime_probe().is_ok()
+    }
+    #[cfg(all(target_os = "linux", not(feature = "landlock-sandbox")))]
+    {
+        false
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -14,7 +18,7 @@ pub fn sandbox_supported() -> bool {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
 fn runtime_probe() -> anyhow::Result<()> {
     let abi = match LandlockStatus::default() {
         LandlockStatus::Available { effective_abi, .. } => effective_abi,
@@ -27,7 +31,7 @@ fn runtime_probe() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
 pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
     unsafe {
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
@@ -91,12 +95,17 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
     }
 }
 
+#[cfg(all(target_os = "linux", not(feature = "landlock-sandbox")))]
+pub fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
+    anyhow::bail!("Landlock sandboxing requires building uhoh with --features landlock-sandbox")
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
     anyhow::bail!("Landlock is only supported on Linux")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
 fn expand_home(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
@@ -106,7 +115,7 @@ fn expand_home(path: &str) -> String {
     path.to_string()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
 fn log_restriction_status(status: &RestrictionStatus) {
     match status {
         RestrictionStatus::FullyEnforced => {

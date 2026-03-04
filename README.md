@@ -301,6 +301,8 @@ Credential resolution is mode-aware. Daemon paths resolve from env + encrypted c
 
 Build with `--features keyring` to enable OS keychain integration for CLI credential resolution and storage.
 
+Optional subsystems are feature-gated to keep default builds lean: `audit-trail`, `landlock-sandbox`, `pg-replication`, `mysql-cdc`, and `keyring`.
+
 ### Update settings
 
 - `update.auto_check` (default true): enable periodic update checks by the daemon. Restart required.

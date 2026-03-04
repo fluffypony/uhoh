@@ -294,6 +294,8 @@ pub struct AgentConfig {
     pub audit_enabled: bool,
     #[serde(default = "default_agent_audit_scope")]
     pub audit_scope: String,
+    #[serde(default = "default_agent_audit_max_events_per_second")]
+    pub audit_max_events_per_second: u64,
     #[serde(default)]
     pub sandbox_enabled: bool,
     #[serde(default = "default_agent_on_dangerous_change")]
@@ -431,6 +433,9 @@ fn default_agent_proxy_port() -> u16 {
 }
 fn default_agent_audit_scope() -> String {
     "project".to_string()
+}
+fn default_agent_audit_max_events_per_second() -> u64 {
+    500
 }
 fn default_agent_on_dangerous_change() -> String {
     "none".to_string()
@@ -599,6 +604,7 @@ impl Default for AgentConfig {
             intercept_enabled: true,
             audit_enabled: false,
             audit_scope: default_agent_audit_scope(),
+            audit_max_events_per_second: default_agent_audit_max_events_per_second(),
             sandbox_enabled: false,
             on_dangerous_change: default_agent_on_dangerous_change(),
             pause_timeout_seconds: default_agent_pause_timeout(),
@@ -655,6 +661,18 @@ impl Config {
             if config.agent.mcp_proxy_port == 0 {
                 anyhow::bail!("agent.mcp_proxy_port must be > 0");
             }
+            if config.agent.pause_timeout_seconds == 0 {
+                anyhow::bail!("agent.pause_timeout_seconds must be > 0");
+            }
+            if !matches!(config.agent.on_dangerous_change.as_str(), "none" | "pause") {
+                anyhow::bail!("agent.on_dangerous_change must be one of: none, pause");
+            }
+            if config.agent.audit_scope.trim().is_empty() {
+                anyhow::bail!("agent.audit_scope must not be empty");
+            }
+            if config.agent.audit_max_events_per_second == 0 {
+                anyhow::bail!("agent.audit_max_events_per_second must be > 0");
+            }
             if config.ai.mlx.check_interval_hours == 0 {
                 anyhow::bail!("ai.mlx.check_interval_hours must be > 0");
             }
@@ -668,5 +686,25 @@ impl Config {
             }
             Ok(config)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+    use std::io::Write;
+
+    #[test]
+    fn invalid_agent_on_dangerous_change_is_rejected() {
+        let mut file = tempfile::NamedTempFile::new().expect("tempfile");
+        write!(
+            file,
+            "[agent]\non_dangerous_change = \"block\"\npause_timeout_seconds = 10\n"
+        )
+        .expect("write config");
+        let err = Config::load(file.path()).expect_err("config must reject unknown mode");
+        assert!(err
+            .to_string()
+            .contains("agent.on_dangerous_change must be one of: none, pause"));
     }
 }
