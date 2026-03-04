@@ -54,6 +54,7 @@ impl DaemonMaintenanceSubsystem {
 
         if !db_projects.is_empty() {
             let db_path = ctx.uhoh_dir.join("uhoh.db");
+            let gc_uhoh_dir = ctx.uhoh_dir.clone();
             let cfg = ctx.config.compaction.clone();
             let idx = self.compaction_index;
             let projects = db_projects.clone();
@@ -76,6 +77,24 @@ impl DaemonMaintenanceSubsystem {
                         "Compaction estimated freed {:.1} MB; triggering GC",
                         freed as f64 / 1_048_576.0
                     );
+                    let db_path_for_gc = gc_uhoh_dir.join("uhoh.db");
+                    let gc_uhoh_dir_cl = gc_uhoh_dir.clone();
+                    std::mem::drop(tokio::task::spawn_blocking(move || {
+                        if let Ok(db) = crate::db::Database::open(&db_path_for_gc) {
+                            if let Err(err) = crate::gc::run_gc(&gc_uhoh_dir_cl, &db) {
+                                tracing::warn!("GC run after compaction failed: {err}");
+                            }
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            std::thread::spawn(move || {
+                                let _ = tx.send(db.vacuum());
+                            });
+                            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                                Ok(Ok(())) => {}
+                                Ok(Err(err)) => tracing::warn!("VACUUM failed: {}", err),
+                                Err(_) => tracing::warn!("VACUUM timed out after 30 seconds"),
+                            }
+                        }
+                    }));
                 }
             });
             self.compaction_index = self.compaction_index.wrapping_add(1);
