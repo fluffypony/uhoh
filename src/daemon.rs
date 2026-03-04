@@ -1083,6 +1083,9 @@ async fn process_ai_summary_queue(
             let blob_root = uhoh_dir.join("blobs");
             let mut diff_chunks = String::new();
             const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024;
+            let max_diff_chars = config.ai.max_context_tokens.saturating_mul(4);
+            let mut diff_chars = 0usize;
+            let mut diff_truncated = false;
 
             // Determine added/modified
             for f in &this_files {
@@ -1106,33 +1109,67 @@ async fn process_ai_summary_queue(
                                         (String::from_utf8(old), String::from_utf8(new))
                                     {
                                         let d = similar::TextDiff::from_lines(&old_s, &new_s);
-                                        diff_chunks.push_str(&format!(
-                                            "--- a/{}\n+++ b/{}\n",
-                                            f.path, f.path
-                                        ));
+                                        append_ai_diff_chunk(
+                                            &mut diff_chunks,
+                                            &mut diff_chars,
+                                            max_diff_chars,
+                                            &mut diff_truncated,
+                                            &format!("--- a/{}\n+++ b/{}\n", f.path, f.path),
+                                        );
+                                        if diff_truncated {
+                                            break;
+                                        }
                                         for hunk in d.unified_diff().context_radius(2).iter_hunks()
                                         {
-                                            diff_chunks.push_str(&format!("{}\n", hunk.header()));
+                                            append_ai_diff_chunk(
+                                                &mut diff_chunks,
+                                                &mut diff_chars,
+                                                max_diff_chars,
+                                                &mut diff_truncated,
+                                                &format!("{}\n", hunk.header()),
+                                            );
+                                            if diff_truncated {
+                                                break;
+                                            }
                                             for change in hunk.iter_changes() {
                                                 let sign = match change.tag() {
                                                     similar::ChangeTag::Delete => '-',
                                                     similar::ChangeTag::Insert => '+',
                                                     similar::ChangeTag::Equal => ' ',
                                                 };
-                                                diff_chunks.push(sign);
-                                                diff_chunks.push_str(&change.to_string());
+                                                append_ai_diff_chunk(
+                                                    &mut diff_chunks,
+                                                    &mut diff_chars,
+                                                    max_diff_chars,
+                                                    &mut diff_truncated,
+                                                    &format!("{}{}", sign, change),
+                                                );
+                                                if diff_truncated {
+                                                    break;
+                                                }
+                                            }
+                                            if diff_truncated {
+                                                break;
                                             }
                                         }
                                     }
                                 } else {
-                                    diff_chunks
-                                        .push_str(&format!("--- {}\n[Binary file]\n", f.path));
+                                    append_ai_diff_chunk(
+                                        &mut diff_chunks,
+                                        &mut diff_chars,
+                                        max_diff_chars,
+                                        &mut diff_truncated,
+                                        &format!("--- {}\n[Binary file]\n", f.path),
+                                    );
                                 }
                             }
                         }
                     }
                 } else {
                     added.push(f.path.clone());
+                }
+                if diff_truncated {
+                    break;
                 }
             }
             // Determine deleted
@@ -1185,6 +1222,41 @@ async fn process_ai_summary_queue(
             }
         }
     }
+}
+
+fn append_ai_diff_chunk(
+    out: &mut String,
+    chars_used: &mut usize,
+    max_chars: usize,
+    truncated: &mut bool,
+    chunk: &str,
+) {
+    if *truncated || chunk.is_empty() {
+        return;
+    }
+    if *chars_used >= max_chars {
+        out.push_str("\n[Diff truncated]\n");
+        *truncated = true;
+        return;
+    }
+
+    let remaining = max_chars.saturating_sub(*chars_used);
+    if chunk.len() <= remaining {
+        out.push_str(chunk);
+        *chars_used = chars_used.saturating_add(chunk.len());
+        return;
+    }
+
+    let mut cut = remaining;
+    while cut > 0 && !chunk.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    if cut > 0 {
+        out.push_str(&chunk[..cut]);
+        *chars_used = chars_used.saturating_add(cut);
+    }
+    out.push_str("\n[Diff truncated]\n");
+    *truncated = true;
 }
 
 fn check_moved_folders(
