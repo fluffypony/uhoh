@@ -456,12 +456,18 @@ fn handle_watch_event(
     // Find which project this path belongs to
     for (project_path, state) in states.iter_mut() {
         if path.starts_with(project_path) {
-            // Ignore files matched by ignore rules to avoid event storms
-            let matcher = crate::ignore_rules::build_walker(Path::new(project_path));
-            // Quick check: if parent .git directory or obvious ignores
-            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                if name == ".git" || name == "node_modules" || name == "target" { continue; }
+            // Ignore common noisy directories to avoid event storms
+            // Fast structural filter: skip events anywhere under these dirs
+            let noisy_dirs = [".git", "node_modules", "target", "dist", "build", "out"];
+            let mut skip = false;
+            for comp in path.components() {
+                if let std::path::Component::Normal(os) = comp {
+                    if let Some(s) = os.to_str() {
+                        if noisy_dirs.contains(&s) { skip = true; break; }
+                    }
+                }
             }
+            if skip { continue; }
             state.pending_changes.insert(path.clone());
             let now = Instant::now();
             if state.first_change_at.is_none() { state.first_change_at = Some(now); }
@@ -553,8 +559,10 @@ fn check_moved_folders(
     watcher: &mut notify::RecommendedWatcher,
     states: &mut HashMap<String, ProjectDaemonState>,
 ) {
-    static mut FAILURES: Option<std::collections::HashMap<String, u32>> = None;
-    let failures = unsafe { FAILURES.get_or_insert_with(Default::default) };
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+    static FAILURES: Lazy<Mutex<std::collections::HashMap<String, u32>>> = Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+    let mut failures = FAILURES.lock().unwrap();
     if let Ok(projects) = database.list_projects() {
         for project in &projects {
             let path = Path::new(&project.current_path);

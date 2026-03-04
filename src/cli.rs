@@ -15,7 +15,7 @@ pub struct Cli {
     pub command: Commands,
 
     /// Internal: PID of previous daemon to wait for during update takeover (Windows)
-    #[arg(long, hide = true)]
+    #[arg(long, hide = true, global = true)]
     pub takeover: Option<u32>,
 }
 
