@@ -23,25 +23,25 @@ Prebuilt binaries are available on the releases page. Place `uhoh` in your `PATH
 
 ```bash
 # Register the current directory
-uhoh add       # alias: uhoh +
+uhoh +         # alias: uhoh add
 
 # The daemon starts automatically; you can control it:
 uhoh start     # run in background
 uhoh stop
 
 # List projects and snapshots
-uhoh list      # alias: uhoh l
-uhoh snapshots # alias: uhoh s
+uhoh l         # alias: uhoh list
+uhoh s         # alias: uhoh snapshots
 
 # Create and restore
-uhoh commit "before refactor"   # alias: uhoh c
-uhoh restore <snapshot-id>       # alias: uhoh r <id>
+uhoh c "before refactor"   # alias: uhoh commit "before refactor"
+uhoh r <id>                # alias: uhoh restore <snapshot-id>
 
 # Diff and time travel
-uhoh diff                    # latest vs working tree
-uhoh diff <id1> <id2>        # snapshot vs snapshot
-uhoh cat src/main.rs <id>    # print a file at a snapshot (alias: uhoh p)
-uhoh log src/main.rs         # history for a file (alias: uhoh o)
+uhoh d                       # alias: uhoh diff (latest vs working tree)
+uhoh d <id1> <id2>           # alias: uhoh diff <id1> <id2>
+uhoh p src/main.rs <id>      # alias: uhoh cat src/main.rs <id>
+uhoh o src/main.rs           # alias: uhoh log src/main.rs
 
 # Grouped undo for agent runs
 uhoh mark "implement search"
@@ -122,14 +122,15 @@ If enabled, uhoh builds a compact diff and asks a local sidecar (llama.cpp or ml
 
 ## CLI reference
 
-- `uhoh add [path]`
-- `uhoh remove [path-or-hash]` (alias: `uhoh -`)
-- `uhoh list` (alias: `uhoh l`)
-- `uhoh snapshots` (alias: `uhoh s`)
-- `uhoh commit [message]` (alias: `uhoh c`)
-- `uhoh diff [id1] [id2]` (alias: `uhoh d`)
-- `uhoh cat <file> <id>` (alias: `uhoh p`)
-- `uhoh log <file>` (alias: `uhoh o`)
+- `uhoh`  # no-subcommand shortcut: if unregistered, register and snapshot; if registered, take a quick snapshot and revert to previous
+- `uhoh + [path]`  # alias: `uhoh add [path]`
+- `uhoh - [path-or-hash]`  # alias: `uhoh remove [path-or-hash]`
+- `uhoh l`  # alias: `uhoh list`
+- `uhoh s`  # alias: `uhoh snapshots`
+- `uhoh c [message]`  # alias: `uhoh commit [message]`
+- `uhoh d [id1] [id2]`  # alias: `uhoh diff [id1] [id2]`
+- `uhoh p <file> <id>`  # alias: `uhoh cat <file> <id>`
+- `uhoh o <file>`  # alias: `uhoh log <file>`
 - `uhoh gitstash <id>` (restore snapshot into a git stash)
 - `uhoh mark <label>` / `uhoh undo` / `uhoh operations`
 - `uhoh config [edit|set]`
@@ -149,3 +150,26 @@ We want atomic snapshots, fast lookups, and safe recovery. SQLite gives us trans
 ## Contributing
 
 Issues and PRs are welcome. If you’re changing snapshot logic, include a test and run `uhoh doctor` locally to sanity‑check the blob store.
+
+## Troubleshooting
+
+- The watcher keeps dying, then recovering
+  - uhoh backs off with exponential delay and retries automatically. On Linux, low inotify limits are a common cause. Check `/proc/sys/fs/inotify/max_user_watches` and raise it, e.g. `sudo sysctl fs.inotify.max_user_watches=524288`.
+
+- `uhoh snapshots` shows many `none` storage methods
+  - Files were too large to copy given your `storage.max_copy_blob_bytes` setting, or reflink/hardlink wasn’t possible. Raise `storage.max_copy_blob_bytes` to ensure recoverability, then commit again.
+
+- `uhoh restore` complains about missing blobs
+  - Run `uhoh doctor` to list missing and orphaned blobs. If blobs are corrupted, doctor can quarantine them with `--fix`. If the DB looks damaged, try `uhoh doctor --restore-latest` to restore the most recent backup.
+
+- Updates fail with “public key not set”
+  - Release builds require a non‑zero Ed25519 update key baked in. For local development, skip updates. For production, set the real key before publishing.
+
+- AI summaries don’t appear
+  - AI is off by default. Enable in `~/.uhoh/config.toml`. Summaries are skipped on battery or when available memory is below `ai.min_available_memory_gb`. Large or binary files are intentionally skipped.
+
+- “Not a registered uhoh project”
+  - Run `uhoh +` in the project root. uhoh stores the canonical path in the DB, so ensure you’re not in a symlinked path when using commands.
+
+- Snapshot ID is ambiguous or invalid
+  - IDs are base58 and must be ≥ 1. Use a longer prefix if ambiguous.
