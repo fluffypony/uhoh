@@ -95,6 +95,8 @@ pub fn store_blob_from_file(
     max_copy_blob_bytes: u64,
     max_binary_blob_bytes: u64,
     max_text_blob_bytes: u64,
+    #[allow(unused_variables)] compress_enabled: bool,
+    #[allow(unused_variables)] compress_level: i32,
 ) -> Result<(String, u64, StorageMethod)> {
     let metadata = std::fs::metadata(file_path)
         .with_context(|| format!("Cannot stat: {}", file_path.display()))?;
@@ -166,40 +168,69 @@ pub fn store_blob_from_file(
 
     // Try full copy if within size limit; apply compression when enabled and beneficial
     if file_size <= effective_limit {
-        // Write to temp then rename for atomicity
-        let tmp_dir = blob_root.join("tmp");
-        std::fs::create_dir_all(&tmp_dir)?;
-        let tmp_path = tmp_dir.join(format!(
-            ".tmp.{}.{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        // Stream copy to memory only for small files; otherwise do direct copy
-        // For simplicity and safety, reuse std::fs::copy then verify and optionally compress in-memory for small sizes.
-        std::fs::copy(file_path, &tmp_path)?;
-        // TOCTOU guard: re-hash the stored bytes to ensure match
-        let stored_hash = {
-            let mut hasher = blake3::Hasher::new();
-            let mut f = std::fs::File::open(&tmp_path)?;
-            let _ = std::io::copy(&mut f, &mut hasher)?;
-            hasher.finalize().to_hex().to_string()
-        };
-        if stored_hash != hash {
-            let _ = std::fs::remove_file(&tmp_path);
-            tracing::warn!("File changed during snapshot: {}", file_path.display());
-            return Ok((hash, file_size, StorageMethod::None));
+        // If compression is enabled (feature + runtime), try compressing in-memory for moderately sized files (<= 8 MiB)
+        #[cfg(feature = "compression")]
+        if compress_enabled && file_size <= 8 * 1024 * 1024 {
+            let data = std::fs::read(file_path)?;
+            // Verify content hash matches expected to avoid TOCTOU
+            if blake3::hash(&data).to_hex().to_string() != hash {
+                tracing::warn!("File changed during snapshot: {}", file_path.display());
+                return Ok((hash, file_size, StorageMethod::None));
+            }
+            let compressed = maybe_compress_with_level(&data, compress_level);
+            let to_write = if compressed.len() < data.len() { compressed } else { data };
+            let dir = blob_root.join(&hash[..hash.len().min(2)]);
+            std::fs::create_dir_all(&dir)?;
+            let tmp_path = dir.join(format!(
+                ".tmp.{}.{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            ));
+            {
+                let mut f = create_restricted_file(&tmp_path)?;
+                f.write_all(&to_write)?;
+                f.sync_all()?;
+            }
+            match std::fs::rename(&tmp_path, &blob_path) {
+                Ok(()) => { set_blob_readonly(&blob_path); return Ok((hash, file_size, StorageMethod::Copy)); }
+                Err(_) => { let _ = std::fs::remove_file(&tmp_path); if blob_path.exists() { return Ok((hash, file_size, StorageMethod::Copy)); } }
+            }
         }
-        set_blob_readonly(&tmp_path);
-        match std::fs::rename(&tmp_path, &blob_path) {
-            Ok(()) => return Ok((hash, file_size, StorageMethod::Copy)),
-            Err(_) => {
-                // Race: someone else wrote it
+        #[cfg(not(feature = "compression"))]
+        {
+            // Write to temp then rename for atomicity
+            let tmp_dir = blob_root.join("tmp");
+            std::fs::create_dir_all(&tmp_dir)?;
+            let tmp_path = tmp_dir.join(format!(
+                ".tmp.{}.{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::copy(file_path, &tmp_path)?;
+            // TOCTOU guard: re-hash the stored bytes to ensure match
+            let stored_hash = {
+                let mut hasher = blake3::Hasher::new();
+                let mut f = std::fs::File::open(&tmp_path)?;
+                let _ = std::io::copy(&mut f, &mut hasher)?;
+                hasher.finalize().to_hex().to_string()
+            };
+            if stored_hash != hash {
                 let _ = std::fs::remove_file(&tmp_path);
-                if blob_path.exists() {
-                    return Ok((hash, file_size, StorageMethod::Copy));
+                tracing::warn!("File changed during snapshot: {}", file_path.display());
+                return Ok((hash, file_size, StorageMethod::None));
+            }
+            set_blob_readonly(&tmp_path);
+            match std::fs::rename(&tmp_path, &blob_path) {
+                Ok(()) => return Ok((hash, file_size, StorageMethod::Copy)),
+                Err(_) => {
+                    // Race: someone else wrote it
+                    let _ = std::fs::remove_file(&tmp_path);
+                    if blob_path.exists() {
+                        return Ok((hash, file_size, StorageMethod::Copy));
+                    }
                 }
             }
         }
@@ -268,18 +299,9 @@ fn set_blob_readonly(path: &Path) {
 fn maybe_compress(data: &[u8]) -> Vec<u8> {
     #[cfg(feature = "compression")]
     {
-        // Prefix with a longer robust magic header to avoid accidental collisions
-        const COMPRESSION_MAGIC: &[u8; 8] = b"UHZS\x00\xF0\x9F\xA6"; // lengthened header
-        // Compression level is static at runtime; default to 3 when feature enabled
-        let level = 3;
-        let compressed = zstd::encode_all(std::io::Cursor::new(data), level)
+        let compressed = zstd::encode_all(std::io::Cursor::new(data), 3)
             .unwrap_or_else(|_| data.to_vec());
-        if compressed.len() < data.len() {
-            let mut out = Vec::with_capacity(compressed.len() + 4);
-            out.extend_from_slice(COMPRESSION_MAGIC);
-            out.extend_from_slice(&compressed);
-            return out;
-        }
+        return maybe_wrap_compressed(data, &compressed);
     }
     #[cfg(not(feature = "compression"))]
     {
@@ -287,11 +309,37 @@ fn maybe_compress(data: &[u8]) -> Vec<u8> {
     }
 }
 
+#[cfg(feature = "compression")]
+fn maybe_compress_with_level(data: &[u8], level: i32) -> Vec<u8> {
+    let lvl = if (1..=22).contains(&level) { level } else { 3 };
+    let compressed = zstd::encode_all(std::io::Cursor::new(data), lvl as i32)
+        .unwrap_or_else(|_| data.to_vec());
+    maybe_wrap_compressed(data, &compressed)
+}
+
+#[cfg(feature = "compression")]
+fn maybe_wrap_compressed(original: &[u8], compressed: &[u8]) -> Vec<u8> {
+    // Prefer a robust ASCII magic header; support legacy header on read
+    const COMPRESSION_MAGIC_NEW: &[u8; 12] = b"UHZS\x00ZSTD\x00v1";
+    if compressed.len() < original.len() {
+        let mut out = Vec::with_capacity(compressed.len() + COMPRESSION_MAGIC_NEW.len());
+        out.extend_from_slice(COMPRESSION_MAGIC_NEW);
+        out.extend_from_slice(compressed);
+        return out;
+    }
+    original.to_vec()
+}
+
 fn maybe_decompress(data: &[u8]) -> Result<Vec<u8>> {
     #[cfg(feature = "compression")]
     {
-        const COMPRESSION_MAGIC: &[u8; 8] = b"UHZS\x00\xF0\x9F\xA6";
-        if data.len() > 8 && &data[..8] == COMPRESSION_MAGIC {
+        const COMPRESSION_MAGIC_NEW: &[u8; 12] = b"UHZS\x00ZSTD\x00v1";
+        const COMPRESSION_MAGIC_OLD: &[u8; 8] = b"UHZS\x00\xF0\x9F\xA6";
+        if data.len() > 12 && &data[..12] == COMPRESSION_MAGIC_NEW {
+            return zstd::decode_all(std::io::Cursor::new(&data[12..]))
+                .context("Failed to decompress blob");
+        }
+        if data.len() > 8 && &data[..8] == COMPRESSION_MAGIC_OLD {
             return zstd::decode_all(std::io::Cursor::new(&data[8..]))
                 .context("Failed to decompress blob");
         }

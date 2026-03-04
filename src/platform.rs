@@ -148,7 +148,7 @@ Description=uhoh snapshot daemon
 
 [Service]
 Type=simple
-ExecStart={exe} start --service
+ExecStart="{exe}" start --service
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:{log}

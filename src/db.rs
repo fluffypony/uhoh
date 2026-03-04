@@ -112,6 +112,7 @@ impl Database {
             .unwrap_or(0);
 
         if version < 1 {
+            conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION;")?;
             conn.execute_batch(
                 "
                 CREATE TABLE IF NOT EXISTS projects (
@@ -130,7 +131,7 @@ impl Database {
                 CREATE TABLE IF NOT EXISTS snapshots (
                     rowid INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
-                    snapshot_id INTEGER NOT NULL,
+                    snapshot_id INTEGER NOT NULL CHECK (snapshot_id > 0),
                     timestamp TEXT NOT NULL,
                     trigger TEXT NOT NULL,
                     message TEXT NOT NULL DEFAULT '',
@@ -189,6 +190,7 @@ impl Database {
                 INSERT OR REPLACE INTO schema_version (version) VALUES (1);
                 ",
             )?;
+            conn.execute_batch("COMMIT;")?;
         }
 
         // Schema v2: add mtime to snapshot_files and denormalized file_count on snapshots

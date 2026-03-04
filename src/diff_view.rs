@@ -76,6 +76,8 @@ pub fn cmd_diff(
 
     let mut stdout = std::io::stdout().lock();
 
+    // Cap for very large files to avoid excessive memory in diffing
+    const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
     for path in sorted_paths {
         let old_hash = map1.get(path).copied();
         let new_hash = map2.get(path).copied();
@@ -92,6 +94,13 @@ pub fn cmd_diff(
             .and_then(|h| cas::read_blob(&blob_root, h).ok().flatten())
             .and_then(|b| String::from_utf8(b).ok())
             .unwrap_or_default();
+
+        if old_content.len() > MAX_DIFF_BYTES || new_content.len() > MAX_DIFF_BYTES {
+            writeln!(stdout, "\n--- {}/{}", label1, path)?;
+            writeln!(stdout, "+++ {}/{}", label2, path)?;
+            writeln!(stdout, "[Diff skipped due to large file size > {} bytes]", MAX_DIFF_BYTES)?;
+            continue;
+        }
 
         writeln!(stdout, "\n--- {}/{}", label1, path)?;
         writeln!(stdout, "+++ {}/{}", label2, path)?;

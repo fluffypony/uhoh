@@ -111,13 +111,19 @@ pub fn cmd_restore(
         None,
     );
 
-    // Pre-flight: verify that all required blobs exist
+    // Pre-flight: verify that all required blobs exist and warn about unstored files
     let mut missing_blobs = Vec::new();
+    let mut unstored = Vec::new();
     for f in &target_files {
-        if !f.stored { continue; }
+        if !f.stored { unstored.push(f.path.as_str()); continue; }
         if !crate::cas::blob_exists(&blob_root, &f.hash) {
             missing_blobs.push((f.path.as_str(), &f.hash));
         }
+    }
+    if !unstored.is_empty() {
+        eprintln!("⚠ {} file(s) in target snapshot were not stored (likely too large) and will be skipped.", unstored.len());
+        for p in unstored.iter().take(10) { eprintln!("  - {}", p); }
+        if unstored.len() > 10 { eprintln!("  ... and {} more", unstored.len() - 10); }
     }
     if !missing_blobs.is_empty() {
         eprintln!("ERROR: {} blob(s) missing; aborting restore.", missing_blobs.len());
@@ -130,7 +136,11 @@ pub fn cmd_restore(
 
     // Non-atomic deletions replaced by staged restore into temp dir followed by atomic renames
     // Use a unique staging directory name to avoid collisions
-    let unique_suffix = format!("{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos());
+    let now = chrono::Utc::now();
+    let nanos_i64: i64 = now
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| ((now.timestamp() as i128) * 1_000_000_000).try_into().unwrap_or(0));
+    let unique_suffix = format!("{}-{}", std::process::id(), nanos_i64);
     let restore_tmp = project_path.join(format!(".uhoh-restore-tmp-{}", unique_suffix));
     std::fs::create_dir_all(&restore_tmp)?;
 
@@ -162,6 +172,10 @@ pub fn cmd_restore(
             }
             std::fs::create_dir_all(parent)?;
         }
+        // Do not write to an existing symlink path
+        if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
+            if meta.file_type().is_symlink() { anyhow::bail!("Refusing to overwrite symlinked file: {}", full_path.display()); }
+        }
         let content = cas::read_blob(&blob_root, hash)?
             .ok_or_else(|| anyhow::anyhow!("Blob {} missing for {}", &hash[..hash.len().min(12)], path))?;
         std::fs::write(&full_path, &content)
@@ -181,14 +195,17 @@ pub fn cmd_restore(
     // Phase 2: Apply staged files atomically and delete tracked files missing from target
     for path in &to_delete {
         let dst = project_path.join(path);
-        if dst.exists() { let _ = std::fs::remove_file(&dst); }
+        if dst.is_file() { let _ = std::fs::remove_file(&dst); }
+        else if dst.is_dir() { let _ = std::fs::remove_dir_all(&dst); }
+        else { let _ = std::fs::remove_file(&dst); }
     }
     for (path, _, _) in &to_restore {
         let staged = restore_tmp.join(path);
         let final_dest = project_path.join(path);
         if let Some(parent) = final_dest.parent() { std::fs::create_dir_all(parent)?; }
-        // If a file with same name exists (not in to_delete), replace it
-        if final_dest.exists() { let _ = std::fs::remove_file(&final_dest); }
+        // Remove any existing file or directory before rename to handle dir->file transitions
+        if final_dest.is_file() { let _ = std::fs::remove_file(&final_dest); }
+        else if final_dest.is_dir() { let _ = std::fs::remove_dir_all(&final_dest); }
         std::fs::rename(&staged, &final_dest)
             .with_context(|| format!("Failed to move {} -> {}", staged.display(), final_dest.display()))?;
     }

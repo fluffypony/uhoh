@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::cas;
+use which::which;
 use crate::db::{Database, ProjectEntry};
 
 /// Create a git stash entry from a snapshot using plumbing commands.
@@ -170,8 +171,12 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
 
     let hook_path = hooks_dir.join("pre-commit");
 
-    // Use command name to honor PATH so hooks keep working after updates/moves
-    let exe_str = "uhoh".to_string();
+    // Try PATH first; if not found, fall back to ~/.uhoh/bin/uhoh for GUI clients with stripped PATH
+    let exe_str = if which("uhoh").is_ok() {
+        "uhoh".to_string()
+    } else {
+        crate::platform::uhoh_dir().join("bin/uhoh").to_string_lossy().to_string()
+    };
 
     let uhoh_hook_content = format!(
         r#"

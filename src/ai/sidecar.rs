@@ -48,6 +48,8 @@ static SIDECAR_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Get or spawn a persistent sidecar and return its port.
 pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs: u64) -> Result<u16> {
+    // Callers should prefer get_or_spawn_port_with_ctx to align with configured context;
+    // this legacy variant uses a reasonable default.
     get_or_spawn_port_with_ctx(model_path, uhoh_dir, idle_shutdown_secs, 8192)
 }
 

@@ -273,14 +273,16 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 {
                     use std::os::unix::process::CommandExt;
                     let args: Vec<String> = std::env::args().collect();
+                    let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
                     if let Some(ref exe) = exe_path {
-                        let err = std::process::Command::new(exe).args(&args[1..]).exec();
+                        let err = std::process::Command::new(exe).args(rest).exec();
                         anyhow::bail!("exec failed: {}", err);
                     }
                 }
                 #[cfg(windows)]
                 {
                     let mut args: Vec<String> = std::env::args().collect();
+                    let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
                     if let Some(pos) = args.iter().position(|a| a == "--takeover") {
                         // Remove flag and its PID argument if present
                         let _ = args.remove(pos);
@@ -288,7 +290,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     }
                     if let Some(ref exe) = exe_path {
                         let _child = std::process::Command::new(exe)
-                            .args(&args[1..])
+                            .args(rest)
                             .arg("--takeover")
                             .arg(std::process::id().to_string())
                             .spawn();
@@ -299,7 +301,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
             _ = debounce_interval.tick() => {
                 process_pending_snapshots(
                     &uhoh_dir,
-                    &*database,
+                    database.clone(),
                     &mut project_states,
                     &config,
                 ).await;
@@ -346,8 +348,9 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     {
                         use std::os::unix::process::CommandExt;
                         let args: Vec<String> = std::env::args().collect();
+                        let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
                         if let Ok(exe) = std::env::current_exe() {
-                            let err = std::process::Command::new(exe).args(&args[1..]).exec();
+                            let err = std::process::Command::new(exe).args(rest).exec();
                             tracing::error!("exec failed: {}", err);
                         }
                     }
@@ -355,6 +358,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     {
                         if let Ok(exe) = std::env::current_exe() {
                             let mut args: Vec<String> = std::env::args().collect();
+                            let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
                             if let Some(pos) = args.iter().position(|a| a == "--takeover") {
                                 // Remove existing --takeover and its value if present
                                 let _ = args.remove(pos);
@@ -363,7 +367,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                             args.push("--takeover".into());
                             args.push(std::process::id().to_string());
                             let _ = std::process::Command::new(exe)
-                                .args(&args[1..])
+                                .args(rest)
                                 .spawn();
                         }
                     }
@@ -517,7 +521,7 @@ fn handle_watch_event(
 
 async fn process_pending_snapshots(
     uhoh_dir: &Path,
-    _database: &Database,
+    database: Arc<Database>,
     states: &mut HashMap<String, ProjectDaemonState>,
     config: &Config,
 ) {
@@ -558,10 +562,10 @@ async fn process_pending_snapshots(
             let changed: Vec<PathBuf> = state.pending_changes.iter().cloned().collect();
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             // Move minimal state needed; clear after join completes below
+            let db_for_task = database.clone();
             join.spawn(async move {
                 let res = tokio::task::spawn_blocking(move || {
-                    let database = crate::db::Database::open(&db_path)?;
-                    snapshot::create_snapshot(&uhoh_dir_buf, &database, &project_hash, &proj_path, "auto", None, &cfg, Some(&changed))
+                    snapshot::create_snapshot(&uhoh_dir_buf, &db_for_task, &project_hash, &proj_path, "auto", None, &cfg, Some(&changed))
                 }).await;
                 drop(permit);
                 res.unwrap_or_else(|_| Ok(None))

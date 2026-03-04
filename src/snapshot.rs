@@ -108,6 +108,8 @@ pub fn create_snapshot(
                             config.storage.max_copy_blob_bytes,
                             config.storage.max_binary_blob_bytes,
                             config.storage.max_text_blob_bytes,
+                            cfg!(feature = "compression") && config.storage.compress,
+                            config.storage.compress_level,
                         ) {
                             Ok((hash, size, method)) => {
                                 let is_new_or_changed = prev_files.get(rel_path).map_or(true, |prev| prev.hash != hash);
@@ -201,7 +203,7 @@ pub fn create_snapshot(
                     continue;
                 }
             }
-            match cas::store_blob_from_file(&blob_root, abs_path, config.storage.max_copy_blob_bytes, config.storage.max_binary_blob_bytes, config.storage.max_text_blob_bytes) {
+            match cas::store_blob_from_file(&blob_root, abs_path, config.storage.max_copy_blob_bytes, config.storage.max_binary_blob_bytes, config.storage.max_text_blob_bytes, cfg!(feature = "compression") && config.storage.compress, config.storage.compress_level) {
                 Ok((hash, size, method)) => {
                     let is_new_or_changed = prev_files.get(rel_path).map_or(true, |prev| prev.hash != hash);
                     if is_new_or_changed { has_changes = true; new_files.push(rel_path.clone()); }
