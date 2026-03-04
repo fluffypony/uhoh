@@ -259,6 +259,12 @@ async fn main() -> Result<()> {
             diff_view::cmd_log(&database, &project, &path)?;
         }
 
+        Commands::Mcp => {
+            let config_path = uhoh.join("config.toml");
+            let config = config::Config::load(&config_path)?;
+            uhoh::mcp_stdio::run_stdio_mcp(&config)?;
+        }
+
         Commands::Start { service } => {
             if service {
                 daemon::run_foreground(&uhoh, std::sync::Arc::new(database)).await?;

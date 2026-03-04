@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -26,6 +27,28 @@ pub struct SnapshotRow {
     pub pinned: bool,
     pub ai_summary: Option<String>,
     pub file_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SnapshotSummary {
+    pub rowid: i64,
+    pub snapshot_id: u64,
+    pub timestamp: String,
+    pub trigger: String,
+    pub message: String,
+    pub pinned: bool,
+    pub file_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResult {
+    pub snapshot_rowid: i64,
+    pub snapshot_id: u64,
+    pub timestamp: String,
+    pub trigger: String,
+    pub message: String,
+    pub ai_summary: Option<String>,
+    pub match_context: String,
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +241,22 @@ impl Database {
                 );
                 INSERT OR IGNORE INTO stats (key, value) VALUES ('blob_bytes', 0);
                 PRAGMA user_version = 5;
+                "
+            )?;
+        }
+
+        if version < 6 {
+            conn.execute_batch(
+                "
+                CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+                    snapshot_rowid UNINDEXED,
+                    project_hash,
+                    trigger_type,
+                    message,
+                    ai_summary,
+                    file_paths
+                );
+                PRAGMA user_version = 6;
                 "
             )?;
         }
@@ -497,6 +536,136 @@ impl Database {
         Ok(snapshots)
     }
 
+    pub fn list_snapshots_paginated(
+        &self,
+        project_hash: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<SnapshotRow>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
+                    s.ai_summary,
+                    COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+             FROM snapshots s
+             WHERE s.project_hash = ?1
+             ORDER BY s.timestamp DESC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt.query_map(params![project_hash, limit as i64, offset as i64], |row| {
+            Ok(SnapshotRow {
+                rowid: row.get(0)?,
+                snapshot_id: row.get::<_, i64>(1)? as u64,
+                timestamp: row.get(2)?,
+                trigger: row.get(3)?,
+                message: row.get(4)?,
+                pinned: row.get::<_, i32>(5)? != 0,
+                ai_summary: row.get(6)?,
+                file_count: row.get::<_, i64>(7)? as u64,
+            })
+        })?;
+        let mut snapshots = Vec::new();
+        for row in rows {
+            snapshots.push(row?);
+        }
+        Ok(snapshots)
+    }
+
+    pub fn list_snapshot_summaries(
+        &self,
+        project_hash: &str,
+        from_ts: Option<&str>,
+        to_ts: Option<&str>,
+    ) -> Result<Vec<SnapshotSummary>> {
+        let conn = self.conn();
+        match (from_ts, to_ts) {
+            (None, None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
+                            COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                     FROM snapshots s
+                     WHERE s.project_hash = ?1
+                     ORDER BY s.timestamp DESC",
+                )?;
+                let rows = stmt.query_map(params![project_hash], |row| {
+                    Ok(SnapshotSummary {
+                        rowid: row.get(0)?,
+                        snapshot_id: row.get::<_, i64>(1)? as u64,
+                        timestamp: row.get(2)?,
+                        trigger: row.get(3)?,
+                        message: row.get(4)?,
+                        pinned: row.get::<_, i32>(5)? != 0,
+                        file_count: row.get::<_, i64>(6)? as u64,
+                    })
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+            }
+            (Some(from), None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
+                            COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                     FROM snapshots s
+                     WHERE s.project_hash = ?1 AND s.timestamp >= ?2
+                     ORDER BY s.timestamp DESC",
+                )?;
+                let rows = stmt.query_map(params![project_hash, from], |row| {
+                    Ok(SnapshotSummary {
+                        rowid: row.get(0)?,
+                        snapshot_id: row.get::<_, i64>(1)? as u64,
+                        timestamp: row.get(2)?,
+                        trigger: row.get(3)?,
+                        message: row.get(4)?,
+                        pinned: row.get::<_, i32>(5)? != 0,
+                        file_count: row.get::<_, i64>(6)? as u64,
+                    })
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+            }
+            (None, Some(to)) => {
+                let mut stmt = conn.prepare(
+                    "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
+                            COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                     FROM snapshots s
+                     WHERE s.project_hash = ?1 AND s.timestamp <= ?2
+                     ORDER BY s.timestamp DESC",
+                )?;
+                let rows = stmt.query_map(params![project_hash, to], |row| {
+                    Ok(SnapshotSummary {
+                        rowid: row.get(0)?,
+                        snapshot_id: row.get::<_, i64>(1)? as u64,
+                        timestamp: row.get(2)?,
+                        trigger: row.get(3)?,
+                        message: row.get(4)?,
+                        pinned: row.get::<_, i32>(5)? != 0,
+                        file_count: row.get::<_, i64>(6)? as u64,
+                    })
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+            }
+            (Some(from), Some(to)) => {
+                let mut stmt = conn.prepare(
+                    "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
+                            COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                     FROM snapshots s
+                     WHERE s.project_hash = ?1 AND s.timestamp >= ?2 AND s.timestamp <= ?3
+                     ORDER BY s.timestamp DESC",
+                )?;
+                let rows = stmt.query_map(params![project_hash, from, to], |row| {
+                    Ok(SnapshotSummary {
+                        rowid: row.get(0)?,
+                        snapshot_id: row.get::<_, i64>(1)? as u64,
+                        timestamp: row.get(2)?,
+                        trigger: row.get(3)?,
+                        message: row.get(4)?,
+                        pinned: row.get::<_, i32>(5)? != 0,
+                        file_count: row.get::<_, i64>(6)? as u64,
+                    })
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+            }
+        }
+    }
+
     /// Lookup a snapshot by its internal rowid
     pub fn get_snapshot_by_rowid(&self, rowid: i64) -> Result<Option<SnapshotRow>> {
         let conn = self.conn();
@@ -682,7 +851,126 @@ impl Database {
             "UPDATE snapshots SET ai_summary = ?1 WHERE rowid = ?2",
             params![summary, snapshot_rowid],
         )?;
+        let _ = self.update_search_index_summary(snapshot_rowid, summary);
         Ok(())
+    }
+
+    pub fn index_snapshot_for_search(
+        &self,
+        snapshot_rowid: i64,
+        project_hash: &str,
+        trigger: &str,
+        message: &str,
+        ai_summary: &str,
+        file_paths: &str,
+    ) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO search_index(snapshot_rowid, project_hash, trigger_type, message, ai_summary, file_paths)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![snapshot_rowid, project_hash, trigger, message, ai_summary, file_paths],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_search_index_summary(&self, snapshot_rowid: i64, ai_summary: &str) -> Result<()> {
+        let conn = self.conn();
+        let row: Option<(String, String, String, String)> = conn
+            .query_row(
+                "SELECT project_hash, trigger_type, message, file_paths
+                 FROM search_index WHERE snapshot_rowid = ?1 LIMIT 1",
+                params![snapshot_rowid],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+
+        if let Some((project_hash, trigger, message, file_paths)) = row {
+            conn.execute(
+                "DELETE FROM search_index WHERE snapshot_rowid = ?1",
+                params![snapshot_rowid],
+            )?;
+            conn.execute(
+                "INSERT INTO search_index(snapshot_rowid, project_hash, trigger_type, message, ai_summary, file_paths)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![snapshot_rowid, project_hash, trigger, message, ai_summary, file_paths],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn search_snapshots(
+        &self,
+        query: &str,
+        project_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let conn = self.conn();
+
+        // conservative query normalization for FTS parser safety
+        let safe = query
+            .replace('"', " ")
+            .replace('*', " ")
+            .replace(':', " ")
+            .trim()
+            .to_string();
+        if safe.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let fts_query = format!("\"{}\"*", safe);
+        let mut out = Vec::new();
+
+        if let Some(ph) = project_hash {
+            let mut stmt = conn.prepare(
+                "SELECT si.snapshot_rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.ai_summary,
+                        snippet(search_index, 3, '<mark>', '</mark>', '...', 32) as match_context
+                 FROM search_index si
+                 JOIN snapshots s ON s.rowid = si.snapshot_rowid
+                 WHERE search_index MATCH ?1 AND si.project_hash = ?2
+                 ORDER BY rank
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![fts_query, ph, limit as i64], |row| {
+                Ok(SearchResult {
+                    snapshot_rowid: row.get(0)?,
+                    snapshot_id: row.get::<_, i64>(1)? as u64,
+                    timestamp: row.get(2)?,
+                    trigger: row.get(3)?,
+                    message: row.get(4)?,
+                    ai_summary: row.get(5)?,
+                    match_context: row.get(6)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT si.snapshot_rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.ai_summary,
+                        snippet(search_index, 3, '<mark>', '</mark>', '...', 32) as match_context
+                 FROM search_index si
+                 JOIN snapshots s ON s.rowid = si.snapshot_rowid
+                 WHERE search_index MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![fts_query, limit as i64], |row| {
+                Ok(SearchResult {
+                    snapshot_rowid: row.get(0)?,
+                    snapshot_id: row.get::<_, i64>(1)? as u64,
+                    timestamp: row.get(2)?,
+                    trigger: row.get(3)?,
+                    message: row.get(4)?,
+                    ai_summary: row.get(5)?,
+                    match_context: row.get(6)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+
+        Ok(out)
     }
 
     // === AI summary queue ===

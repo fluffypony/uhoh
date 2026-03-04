@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
+use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashSet;
 use std::io::Write;
@@ -17,6 +18,158 @@ static SYNTAX_SET: Lazy<syntect::parsing::SyntaxSet> =
     Lazy::new(|| syntect::parsing::SyntaxSet::load_defaults_newlines());
 static THEME_SET: Lazy<syntect::highlighting::ThemeSet> =
     Lazy::new(|| syntect::highlighting::ThemeSet::load_defaults());
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffLine {
+    pub change_type: String,
+    pub old_line: Option<usize>,
+    pub new_line: Option<usize>,
+    pub content: String,
+    pub highlighted_html: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffHunk {
+    pub old_start: usize,
+    pub old_count: usize,
+    pub new_start: usize,
+    pub new_count: usize,
+    pub lines: Vec<DiffLine>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FileDiff {
+    pub path: String,
+    pub status: String,
+    pub hunks: Vec<DiffHunk>,
+    pub too_large: bool,
+    pub binary: bool,
+}
+
+pub const MAX_STRUCTURED_DIFF_BYTES: usize = 2 * 1024 * 1024;
+
+pub fn compute_structured_diff(
+    old_content: &[u8],
+    new_content: &[u8],
+    file_path: &str,
+    with_highlighting: bool,
+) -> FileDiff {
+    let is_binary = old_content.iter().take(8192).any(|&b| b == 0)
+        || new_content.iter().take(8192).any(|&b| b == 0);
+    if is_binary {
+        return FileDiff {
+            path: file_path.to_string(),
+            status: "modified".to_string(),
+            hunks: Vec::new(),
+            too_large: false,
+            binary: true,
+        };
+    }
+
+    if old_content.len() > MAX_STRUCTURED_DIFF_BYTES || new_content.len() > MAX_STRUCTURED_DIFF_BYTES {
+        return FileDiff {
+            path: file_path.to_string(),
+            status: "modified".to_string(),
+            hunks: Vec::new(),
+            too_large: true,
+            binary: false,
+        };
+    }
+
+    let old_str = String::from_utf8_lossy(old_content);
+    let new_str = String::from_utf8_lossy(new_content);
+    let status = if old_str.is_empty() && !new_str.is_empty() {
+        "added"
+    } else if !old_str.is_empty() && new_str.is_empty() {
+        "deleted"
+    } else {
+        "modified"
+    };
+
+    let diff = TextDiff::from_lines(old_str.as_ref(), new_str.as_ref());
+    let syntax = if with_highlighting {
+        let ext = std::path::Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        Some(
+            SYNTAX_SET
+                .find_syntax_by_extension(ext)
+                .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text()),
+        )
+    } else {
+        None
+    };
+
+    let mut lines = Vec::new();
+    let mut old_line: usize = 0;
+    let mut new_line: usize = 0;
+
+    for change in diff.iter_all_changes() {
+        let (change_type, o_line, n_line) = match change.tag() {
+            ChangeTag::Equal => {
+                old_line += 1;
+                new_line += 1;
+                ("context", Some(old_line), Some(new_line))
+            }
+            ChangeTag::Delete => {
+                old_line += 1;
+                ("remove", Some(old_line), None)
+            }
+            ChangeTag::Insert => {
+                new_line += 1;
+                ("add", None, Some(new_line))
+            }
+        };
+
+        let content = change.value().trim_end_matches('\n').to_string();
+        let highlighted_html = if with_highlighting {
+            if let Some(syntax_ref) = syntax {
+                let mut html_gen = syntect::html::ClassedHTMLGenerator::new_with_class_style(
+                    syntax_ref,
+                    &SYNTAX_SET,
+                    syntect::html::ClassStyle::Spaced,
+                );
+                let line_with_newline = format!("{}\n", &content);
+                let _ = html_gen.parse_html_for_line_which_includes_newline(&line_with_newline);
+                Some(html_gen.finalize())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        lines.push(DiffLine {
+            change_type: change_type.to_string(),
+            old_line: o_line,
+            new_line: n_line,
+            content,
+            highlighted_html,
+        });
+    }
+
+    let (old_start, new_start) = lines
+        .iter()
+        .find_map(|line| Some((line.old_line.unwrap_or(1), line.new_line.unwrap_or(1))))
+        .unwrap_or((1, 1));
+
+    let hunk = DiffHunk {
+        old_start,
+        old_count: lines.iter().filter(|l| l.old_line.is_some()).count(),
+        new_start,
+        new_count: lines.iter().filter(|l| l.new_line.is_some()).count(),
+        lines,
+    };
+
+    FileDiff {
+        path: file_path.to_string(),
+        status: status.to_string(),
+        hunks: vec![hunk],
+        too_large: false,
+        binary: false,
+    }
+}
 
 pub fn cmd_diff(
     uhoh_dir: &Path,

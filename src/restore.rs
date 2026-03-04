@@ -75,6 +75,32 @@ fn check_no_symlink_parents(restore_base: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_restore_path(project_path: &Path, relative_path: &str) -> Result<()> {
+    let rel = Path::new(relative_path);
+    if rel.is_absolute() {
+        anyhow::bail!("Absolute path in snapshot manifest: {}", relative_path);
+    }
+    for component in rel.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            anyhow::bail!("Path traversal detected in snapshot manifest: {}", relative_path);
+        }
+    }
+
+    let full = project_path.join(rel);
+    if let Ok(canonical) = dunce::canonicalize(&full) {
+        if let Ok(project_canonical) = dunce::canonicalize(project_path) {
+            if !canonical.starts_with(project_canonical) {
+                anyhow::bail!(
+                    "Path '{}' resolves outside project directory",
+                    relative_path
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn cmd_restore(
     uhoh_dir: &Path,
     database: &Database,
@@ -141,6 +167,7 @@ pub fn cmd_restore(
             if !file.stored {
                 continue;
             }
+            validate_restore_path(project_path, &file.path)?;
             to_restore.push((
                 std::path::PathBuf::from(crate::cas::decode_relpath_to_os(&file.path)),
                 file.hash.clone(),

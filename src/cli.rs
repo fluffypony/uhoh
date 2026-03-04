@@ -94,6 +94,9 @@ pub enum Commands {
         path: String,
     },
 
+    /// Run MCP server over STDIO for AI agent integration
+    Mcp,
+
     /// Start the snapshot daemon
     Start {
         /// Run in foreground (for service managers)

@@ -30,6 +30,14 @@ pub struct Config {
     #[serde(default)]
     /// Update configuration. Hot-reload applies to check_interval_hours; other fields require restart.
     pub update: UpdateConfig,
+
+    #[serde(default)]
+    /// Unified localhost server (MCP + REST + UI)
+    pub server: ServerConfig,
+
+    #[serde(default)]
+    /// Sidecar updater policy for llama.cpp artifacts.
+    pub sidecar_update: SidecarUpdateConfig,
 }
 
 fn default_schema_version() -> u32 {
@@ -164,6 +172,52 @@ pub struct UpdateConfig {
     pub check_interval_hours: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerConfig {
+    /// Enable the unified HTTP server.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Port to bind on localhost.
+    #[serde(default = "default_server_port")]
+    pub port: u16,
+
+    /// Bind address. Must stay loopback for safety.
+    #[serde(default = "default_bind_address")]
+    pub bind_address: String,
+
+    /// Enable the static Time Machine UI.
+    #[serde(default = "default_true")]
+    pub ui_enabled: bool,
+
+    /// Enable HTTP MCP endpoint.
+    #[serde(default = "default_true")]
+    pub mcp_enabled: bool,
+
+    /// Require bearer auth on mutating methods.
+    #[serde(default = "default_true")]
+    pub require_auth: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SidecarUpdateConfig {
+    /// Check and install newer llama-server builds.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+
+    /// Hours between sidecar update checks.
+    #[serde(default = "default_sidecar_check_hours")]
+    pub check_interval_hours: u64,
+
+    /// Optional pinned llama.cpp release tag.
+    #[serde(default)]
+    pub pin_version: Option<String>,
+
+    /// GitHub repository slug for release metadata.
+    #[serde(default = "default_llama_repo")]
+    pub llama_repo: String,
+}
+
 // === Default functions ===
 fn default_debounce_quiet_secs() -> u64 { 2 }
 fn default_min_snapshot_interval_secs() -> u64 { 5 }
@@ -188,6 +242,11 @@ fn default_idle_shutdown_secs() -> u64 { 300 }
 fn default_min_available_memory_gb() -> u64 { 4 }
 fn default_auto_update() -> bool { true }
 fn default_update_interval_hours() -> u64 { 24 }
+fn default_true() -> bool { true }
+fn default_server_port() -> u16 { 22822 }
+fn default_bind_address() -> String { "127.0.0.1".to_string() }
+fn default_sidecar_check_hours() -> u64 { 24 }
+fn default_llama_repo() -> String { "ggml-org/llama.cpp".to_string() }
 
 impl Default for Config {
     fn default() -> Self {
@@ -198,6 +257,8 @@ impl Default for Config {
             storage: StorageConfig::default(),
             ai: AiConfig::default(),
             update: UpdateConfig::default(),
+            server: ServerConfig::default(),
+            sidecar_update: SidecarUpdateConfig::default(),
         }
     }
 }
@@ -263,6 +324,30 @@ impl Default for UpdateConfig {
     }
 }
 
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: default_server_port(),
+            bind_address: default_bind_address(),
+            ui_enabled: true,
+            mcp_enabled: true,
+            require_auth: true,
+        }
+    }
+}
+
+impl Default for SidecarUpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_update: true,
+            check_interval_hours: default_sidecar_check_hours(),
+            pin_version: None,
+            llama_repo: default_llama_repo(),
+        }
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         if path.exists() {
@@ -279,6 +364,8 @@ impl Config {
             if config.compaction.emergency_expire_hours == 0 { anyhow::bail!("compaction.emergency_expire_hours must be > 0"); }
             if config.ai.max_context_tokens == 0 { anyhow::bail!("ai.max_context_tokens must be > 0"); }
             if !(1..=22).contains(&config.storage.compress_level) { anyhow::bail!("storage.compress_level must be between 1 and 22 (inclusive)"); }
+            if config.server.port == 0 { anyhow::bail!("server.port must be > 0"); }
+            if config.sidecar_update.check_interval_hours == 0 { anyhow::bail!("sidecar_update.check_interval_hours must be > 0"); }
             Ok(config)
         } else {
             let config = Config::default();

@@ -16,6 +16,9 @@ uhoh watches your project folders, takes small content‑addressable snapshots a
 - Optional zstd compression for blobs (behind `compression` feature flag)
 - `.uhohignore` files for project-specific exclusions beyond `.gitignore`
 - Optional AI summaries via a local sidecar (Qwen 3.5 tiers, MLX on Apple Silicon); skips on battery/low‑RAM
+- Built-in localhost server on `127.0.0.1:22822` with REST API, Time Machine UI, WebSocket events, and MCP HTTP endpoint
+- MCP over STDIO with `uhoh mcp` for zero-config agent integration
+- Bearer token auth for mutating server operations (token stored in `~/.uhoh/server.token`)
 - Git integration: pre-commit hooks, snapshot-to-stash, worktree support
 - Safe auto‑updates: Ed25519 signatures, DNS TXT fallback, atomically applied
 - Guardrails: emergency‑delete detection, GC, compaction, and a `doctor` command
@@ -85,6 +88,9 @@ uhoh d <id1> <id2>           # alias: uhoh diff <id1> <id2>
 uhoh p src/main.rs <id>      # alias: uhoh cat src/main.rs <id>
 uhoh o src/main.rs           # alias: uhoh log src/main.rs
 
+# MCP server over STDIO (Claude Desktop, Cursor, etc.)
+uhoh mcp
+
 # Grouped undo for agent runs
 uhoh mark "implement search"
 uhoh operations
@@ -125,6 +131,14 @@ Snapshots are created transactionally inside a single SQLite transaction. Each s
 The daemon uses a notify bridge thread, with a retry/backoff if the watcher dies. It batches changes with a configurable debounce window (quiet period elapsed, or a max ceiling since the first change) and enforces a minimum interval between snapshots per project. Multiple projects are snapshotted concurrently with a parallelism cap based on available CPU cores. Compaction is staggered: one project per tick rather than all at once, reducing lock contention.
 
 The daemon also watches its own binary file and a `~/.uhoh/.update-ready` trigger file. When either changes (after `uhoh update`, for example), the daemon automatically re-execs itself on Unix or spawns a replacement process on Windows.
+
+When enabled, the daemon also starts a unified localhost server (default `127.0.0.1:22822`) that serves:
+1. `GET /` Time Machine UI
+2. `GET/POST /api/v1/*` snapshot APIs
+3. `GET /ws` live events (`snapshot_created`, `snapshot_restored`, `ai_summary_completed`, `sidecar_updated`)
+4. `POST /mcp` MCP Streamable HTTP JSON-RPC endpoint
+
+Mutating requests require a bearer token by default. The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery.
 
 ## Commands you'll use most
 
@@ -198,6 +212,22 @@ All compaction settings require daemon restart.
 
 - `update.auto_check` (default true): enable periodic update checks by the daemon. Restart required.
 - `update.check_interval_hours` (default 24): hours between checks. **Hot-reloaded.**
+
+### Server Settings
+
+- `server.enabled` (default true): enable the unified localhost server. Restart required.
+- `server.port` (default 22822): server port. Restart required.
+- `server.bind_address` (default `127.0.0.1`): bind address. Keep loopback-only for security.
+- `server.ui_enabled` (default true): serve Time Machine UI at `/`.
+- `server.mcp_enabled` (default true): serve MCP HTTP endpoint at `/mcp`.
+- `server.require_auth` (default true): require bearer auth for mutating requests.
+
+### Sidecar Update Settings
+
+- `sidecar_update.auto_update` (default true): enable periodic llama.cpp sidecar checks.
+- `sidecar_update.check_interval_hours` (default 24): sidecar update check cadence.
+- `sidecar_update.pin_version` (default unset): optional release tag pin (e.g. `b5200`).
+- `sidecar_update.llama_repo` (default `ggml-org/llama.cpp`): GitHub release source.
 
 ## Deep dive: storage methods
 

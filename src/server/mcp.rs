@@ -1,0 +1,346 @@
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    Json,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use super::AppState;
+use crate::resolve;
+
+#[derive(Debug, Deserialize)]
+pub struct JsonRpcRequest {
+    pub jsonrpc: String,
+    pub method: String,
+    #[serde(default)]
+    pub params: Option<Value>,
+    pub id: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JsonRpcResponse {
+    pub jsonrpc: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<JsonRpcError>,
+    pub id: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JsonRpcError {
+    pub code: i64,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+impl JsonRpcResponse {
+    fn success(id: Option<Value>, result: Value) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            result: Some(result),
+            error: None,
+            id,
+        }
+    }
+
+    fn error(id: Option<Value>, code: i64, message: String) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message,
+                data: None,
+            }),
+            id,
+        }
+    }
+}
+
+fn tool_definitions() -> Value {
+    json!({
+        "tools": [
+            {
+                "name": "create_snapshot",
+                "description": "Create a manual snapshot of a project.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "project_hash": { "type": "string" },
+                        "message": { "type": "string" }
+                    }
+                }
+            },
+            {
+                "name": "list_snapshots",
+                "description": "List snapshots for a project.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "project_hash": { "type": "string" },
+                        "limit": { "type": "integer", "default": 20 },
+                        "offset": { "type": "integer", "default": 0 }
+                    }
+                }
+            },
+            {
+                "name": "restore_snapshot",
+                "description": "Restore to a previous snapshot. Defaults to dry run.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "snapshot_id": { "type": "string" },
+                        "path": { "type": "string" },
+                        "project_hash": { "type": "string" },
+                        "dry_run": { "type": "boolean", "default": true },
+                        "confirm": { "type": "boolean", "default": false }
+                    },
+                    "required": ["snapshot_id"]
+                }
+            }
+        ]
+    })
+}
+
+pub async fn handle_mcp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<JsonRpcRequest>,
+) -> impl IntoResponse {
+    if !super::auth::validate_host(&headers, state.config.server.port) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(JsonRpcResponse::error(
+                request.id,
+                -32600,
+                "Invalid Host header".to_string(),
+            )),
+        );
+    }
+
+    if request.jsonrpc != "2.0" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(JsonRpcResponse::error(
+                request.id,
+                -32600,
+                "Invalid jsonrpc version".to_string(),
+            )),
+        );
+    }
+
+    let response = match request.method.as_str() {
+        "initialize" => JsonRpcResponse::success(
+            request.id,
+            json!({
+                "protocolVersion": "2025-03-26",
+                "capabilities": { "tools": {} },
+                "serverInfo": {
+                    "name": "uhoh",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }),
+        ),
+        "ping" => JsonRpcResponse::success(request.id, json!({})),
+        "notifications/initialized" => JsonRpcResponse::success(request.id, json!({})),
+        "tools/list" => JsonRpcResponse::success(request.id, tool_definitions()),
+        "tools/call" => handle_tools_call(state, request.id, request.params).await,
+        _ => JsonRpcResponse::error(
+            request.id,
+            -32601,
+            format!("Method not found: {}", request.method),
+        ),
+    };
+
+    (StatusCode::OK, Json(response))
+}
+
+async fn handle_tools_call(state: AppState, id: Option<Value>, params: Option<Value>) -> JsonRpcResponse {
+    let params = match params {
+        Some(v) => v,
+        None => return JsonRpcResponse::error(id, -32602, "Missing params".to_string()),
+    };
+    let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    match tool_name {
+        "create_snapshot" => tool_create_snapshot(state, id, args).await,
+        "list_snapshots" => tool_list_snapshots(state, id, args).await,
+        "restore_snapshot" => tool_restore_snapshot(state, id, args).await,
+        _ => JsonRpcResponse::error(id, -32602, format!("Unknown tool: {}", tool_name)),
+    }
+}
+
+async fn tool_create_snapshot(state: AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+    let db = state.database.clone();
+    let cfg = state.config.clone();
+    let uhoh_dir = state.uhoh_dir.clone();
+    let event_tx = state.event_tx.clone();
+    let path = args.get("path").and_then(|v| v.as_str()).map(str::to_string);
+    let hash = args.get("project_hash").and_then(|v| v.as_str()).map(str::to_string);
+    let message = args.get("message").and_then(|v| v.as_str()).map(str::to_string);
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let project = resolve::resolve_project(&db, path.as_deref().or(hash.as_deref()), None)?;
+        let project_path = std::path::Path::new(&project.current_path);
+        let info = crate::snapshot::create_snapshot(
+            &uhoh_dir,
+            &db,
+            &project.hash,
+            project_path,
+            "mcp",
+            message.as_deref(),
+            &cfg,
+            None,
+        )?;
+
+        if let Some(snapshot_id) = info {
+            if let Some(rowid) = db.latest_snapshot_rowid(&project.hash)? {
+                if let Some(row) = db.get_snapshot_by_rowid(rowid)? {
+                    let _ = event_tx.send(crate::server::events::ServerEvent::SnapshotCreated {
+                        project_hash: project.hash.clone(),
+                        snapshot_id: crate::cas::id_to_base58(snapshot_id),
+                        timestamp: row.timestamp.clone(),
+                        trigger: "mcp".to_string(),
+                        file_count: row.file_count as usize,
+                        message: message.clone(),
+                    });
+                }
+            }
+            Ok(json!({
+                "content": [{"type": "text", "text": format!("Snapshot created: {}", crate::cas::id_to_base58(snapshot_id))}],
+                "snapshot_id": crate::cas::id_to_base58(snapshot_id)
+            }))
+        } else {
+            Ok(json!({
+                "content": [{"type": "text", "text": "No changes detected; snapshot not created."}]
+            }))
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(value)) => JsonRpcResponse::success(id, value),
+        Ok(Err(e)) => JsonRpcResponse::error(id, -32000, e.to_string()),
+        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {}", e)),
+    }
+}
+
+async fn tool_list_snapshots(state: AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+    let db = state.database.clone();
+    let path = args.get("path").and_then(|v| v.as_str()).map(str::to_string);
+    let hash = args.get("project_hash").and_then(|v| v.as_str()).map(str::to_string);
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let project = resolve::resolve_project(&db, path.as_deref().or(hash.as_deref()), None)?;
+        let snapshots = db.list_snapshots_paginated(&project.hash, limit, offset)?;
+        let list: Vec<Value> = snapshots
+            .iter()
+            .map(|s| {
+                json!({
+                    "id": crate::cas::id_to_base58(s.snapshot_id),
+                    "timestamp": s.timestamp,
+                    "trigger": s.trigger,
+                    "message": s.message,
+                    "pinned": s.pinned,
+                    "file_count": s.file_count,
+                    "ai_summary": s.ai_summary,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "content": [{"type":"text", "text": format!("Found {} snapshots", list.len())}],
+            "snapshots": list,
+            "project_hash": project.hash,
+            "project_path": project.current_path,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(value)) => JsonRpcResponse::success(id, value),
+        Ok(Err(e)) => JsonRpcResponse::error(id, -32000, e.to_string()),
+        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {}", e)),
+    }
+}
+
+async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+    let snapshot_id = match args.get("snapshot_id").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => return JsonRpcResponse::error(id, -32602, "Missing snapshot_id".to_string()),
+    };
+    let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(true);
+    let confirm = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !dry_run && !confirm {
+        return JsonRpcResponse::error(
+            id,
+            -32602,
+            "Non-dry-run restore requires confirm: true".to_string(),
+        );
+    }
+
+    let db = state.database.clone();
+    let path = args.get("path").and_then(|v| v.as_str()).map(str::to_string);
+    let hash = args.get("project_hash").and_then(|v| v.as_str()).map(str::to_string);
+    let uhoh_dir = state.uhoh_dir.clone();
+    let restore_in_progress = state.restore_in_progress.clone();
+    let event_tx = state.event_tx.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let project = resolve::resolve_project(&db, path.as_deref().or(hash.as_deref()), None)?;
+
+        if dry_run {
+            crate::restore::cmd_restore(
+                &uhoh_dir,
+                &db,
+                &project,
+                &snapshot_id,
+                true,
+                true,
+            )?;
+            return Ok(json!({
+                "content": [{"type":"text", "text": format!("Dry run complete for snapshot {}", snapshot_id)}],
+                "dry_run": true,
+            }));
+        }
+
+        restore_in_progress.store(true, std::sync::atomic::Ordering::SeqCst);
+        let restore_result = crate::restore::cmd_restore(
+            &uhoh_dir,
+            &db,
+            &project,
+            &snapshot_id,
+            false,
+            true,
+        );
+        restore_in_progress.store(false, std::sync::atomic::Ordering::SeqCst);
+        restore_result?;
+
+        let _ = event_tx.send(crate::server::events::ServerEvent::SnapshotRestored {
+            project_hash: project.hash,
+            snapshot_id: snapshot_id.clone(),
+            files_modified: 0,
+            files_deleted: 0,
+        });
+
+        Ok(json!({
+            "content": [{"type":"text", "text": format!("Snapshot {} restored", snapshot_id)}],
+            "restored": true,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(value)) => JsonRpcResponse::success(id, value),
+        Ok(Err(e)) => JsonRpcResponse::error(id, -32000, e.to_string()),
+        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {}", e)),
+    }
+}

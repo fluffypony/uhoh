@@ -357,6 +357,20 @@ pub fn create_snapshot(
         &tree_hashes,
     )?;
 
+    let file_paths_str = files_for_manifest
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = database.index_snapshot_for_search(
+        rowid,
+        project_hash,
+        actual_trigger,
+        msg,
+        "",
+        &file_paths_str,
+    );
+
     // If there is an active operation for this project and this was not a pre-restore snapshot,
     // keep last_snapshot_id updated so undo has a clear end.
     if actual_trigger != "pre-restore" {

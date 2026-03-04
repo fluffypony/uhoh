@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
@@ -100,6 +102,30 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let uhoh_dir = uhoh_dir.to_path_buf();
     let config_path = uhoh_dir.join("config.toml");
     let mut config = Config::load(&config_path)?;
+
+    let (server_event_tx, _) = broadcast::channel::<crate::server::events::ServerEvent>(256);
+    let restore_in_progress = Arc::new(AtomicBool::new(false));
+
+    let server_handle = if config.server.enabled {
+        Some(
+            crate::server::start_server(
+                &config.server,
+                config.clone(),
+                database.clone(),
+                uhoh_dir.clone(),
+                server_event_tx.clone(),
+                restore_in_progress.clone(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let mut last_sidecar_check: Option<std::time::Instant> = None;
+    let mut sidecar_check_interval = std::time::Duration::from_secs(
+        config.sidecar_update.check_interval_hours * 3600,
+    );
 
     #[cfg(windows)]
     let _daemon_mutex = {
@@ -259,6 +285,10 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     loop {
         tokio::select! {
             Some(event) = event_rx.recv() => {
+                if restore_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+                    tracing::debug!("Skipping watcher event during restore operation");
+                    continue;
+                }
                 match event {
                     WatchEvent::WatcherDied => {
                         let now = Instant::now();
@@ -331,6 +361,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     database.clone(),
                     &mut project_states,
                     &config,
+                    &server_event_tx,
                 ).await;
             }
             _ = tick_interval.tick() => {
@@ -342,6 +373,9 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     }
                     if new_cfg.update.check_interval_hours != config.update.check_interval_hours {
                         update_check_interval = tokio::time::interval(Duration::from_secs(new_cfg.update.check_interval_hours * 3600));
+                    }
+                    if new_cfg.sidecar_update.check_interval_hours != config.sidecar_update.check_interval_hours {
+                        sidecar_check_interval = std::time::Duration::from_secs(new_cfg.sidecar_update.check_interval_hours * 3600);
                     }
                     config = new_cfg;
                 }
@@ -498,7 +532,53 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 let mut tick_sys = sysinfo::System::new();
                 tick_sys.refresh_memory();
                 if crate::ai::should_run_ai_with(&config.ai, &tick_sys) {
-                    process_ai_summary_queue(&uhoh_dir, &*database, &config).await;
+                    process_ai_summary_queue(&uhoh_dir, &*database, &config, &server_event_tx).await;
+                }
+
+                if config.sidecar_update.auto_update {
+                    let should_check = match last_sidecar_check {
+                        None => true,
+                        Some(last) => last.elapsed() >= sidecar_check_interval,
+                    };
+
+                    if should_check {
+                        last_sidecar_check = Some(std::time::Instant::now());
+                        let sidecar_dir = uhoh_dir.join("sidecar");
+                        let repo = config.sidecar_update.llama_repo.clone();
+                        let pin = config.sidecar_update.pin_version.clone();
+                        let event_tx = server_event_tx.clone();
+
+                        tokio::task::spawn_blocking(move || {
+                            let before = crate::ai::sidecar_update::read_manifest(&sidecar_dir)
+                                .map(|m| m.version);
+                            match crate::ai::sidecar_update::run_update_check(
+                                &sidecar_dir,
+                                &repo,
+                                pin.as_deref(),
+                                || {
+                                    crate::ai::sidecar::shutdown_global_sidecar();
+                                },
+                            ) {
+                                Ok(true) => {
+                                    let after = crate::ai::sidecar_update::read_manifest(&sidecar_dir)
+                                        .map(|m| m.version)
+                                        .unwrap_or_else(|| "unknown".to_string());
+                                    let _ = event_tx.send(crate::server::events::ServerEvent::SidecarUpdated {
+                                        old_version: before,
+                                        new_version: after,
+                                    });
+                                }
+                                Ok(false) => {}
+                                Err(e) => tracing::warn!("Sidecar update check failed: {}", e),
+                            }
+                        });
+
+                        if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+                            if let Some(version) = crate::ai::sidecar_update::check_mlx_lm_version() {
+                                tracing::debug!("mlx_lm version: {}", version);
+                            }
+                        }
+                    }
                 }
             }
             _ = update_check_interval.tick() => {
@@ -513,6 +593,9 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 tracing::info!("Shutdown signal received");
                 // Attempt to shutdown AI sidecar if running
                 crate::ai::sidecar::shutdown_global_sidecar();
+                if let Some(handle) = &server_handle {
+                    handle.abort();
+                }
                 break;
             }
         }
@@ -520,6 +603,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
 
     // Cleanup
     std::fs::remove_file(&pid_path).ok();
+    std::fs::remove_file(uhoh_dir.join("server.port")).ok();
+    std::fs::remove_file(uhoh_dir.join("server.token")).ok();
     tracing::info!("Daemon stopped.");
     Ok(())
 }
@@ -591,6 +676,7 @@ async fn process_pending_snapshots(
     database: Arc<Database>,
     states: &mut HashMap<String, ProjectDaemonState>,
     config: &Config,
+    event_tx: &broadcast::Sender<crate::server::events::ServerEvent>,
 ) {
     let now = Instant::now();
 
@@ -664,9 +750,21 @@ async fn process_pending_snapshots(
     }
     while let Some(result) = join.join_next().await {
         match result {
-            Ok((project_path, _drained, Ok(Some(SnapshotResult::Created(_id))))) => {
+            Ok((project_path, _drained, Ok(Some(SnapshotResult::Created(id))))) => {
                 if let Some(state) = states.get_mut(&project_path) {
                     state.last_snapshot = Instant::now();
+                    if let Ok(Some(rowid)) = database.latest_snapshot_rowid(&state.hash) {
+                        if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
+                            let _ = event_tx.send(crate::server::events::ServerEvent::SnapshotCreated {
+                                project_hash: state.hash.clone(),
+                                snapshot_id: crate::cas::id_to_base58(id),
+                                timestamp: row.timestamp,
+                                trigger: row.trigger,
+                                file_count: row.file_count as usize,
+                                message: if row.message.is_empty() { None } else { Some(row.message) },
+                            });
+                        }
+                    }
                 }
             }
             Ok((project_path, _drained, Ok(Some(SnapshotResult::NoChanges)))) => {
@@ -694,7 +792,12 @@ fn database_backup_to(database: &Database, path: &std::path::Path) -> anyhow::Re
 }
 
 /// Process a small batch of deferred AI summary jobs when conditions allow.
-async fn process_ai_summary_queue(uhoh_dir: &Path, database: &Database, config: &Config) {
+async fn process_ai_summary_queue(
+    uhoh_dir: &Path,
+    database: &Database,
+    config: &Config,
+    event_tx: &broadcast::Sender<crate::server::events::ServerEvent>,
+) {
     // Limit per tick to avoid overwhelming the sidecar
     const MAX_PER_TICK: u32 = 2;
     const MAX_ATTEMPTS: i64 = 5;
@@ -763,7 +866,18 @@ async fn process_ai_summary_queue(uhoh_dir: &Path, database: &Database, config: 
             let files = crate::ai::summary::FileChangeSummary { added: added.clone(), deleted: deleted.clone(), modified: modified.clone() };
             match crate::ai::summary::generate_summary_blocking(uhoh_dir, &config.clone(), &diff_chunks, &files) {
                 Ok(text) if !text.is_empty() => {
-                    if let Err(e) = database.set_ai_summary(rowid, &text) { tracing::warn!("Failed to set AI summary: {}", e); } else { let _ = database.delete_pending_ai(rowid); }
+                    if let Err(e) = database.set_ai_summary(rowid, &text) {
+                        tracing::warn!("Failed to set AI summary: {}", e);
+                    } else {
+                        let _ = database.delete_pending_ai(rowid);
+                        if let Ok(Some(snapshot)) = database.get_snapshot_by_rowid(rowid) {
+                            let _ = event_tx.send(crate::server::events::ServerEvent::AiSummaryCompleted {
+                                project_hash: project_hash.clone(),
+                                snapshot_id: crate::cas::id_to_base58(snapshot.snapshot_id),
+                                summary: text,
+                            });
+                        }
+                    }
                 }
                 Ok(_) => { let _ = database.increment_ai_attempts(rowid); }
                 Err(e) => { tracing::debug!("Deferred AI summary failed: {}", e); let _ = database.increment_ai_attempts(rowid); }
