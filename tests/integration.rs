@@ -11,7 +11,7 @@ fn test_cas_store_read_roundtrip() {
     std::fs::create_dir_all(&blob_root).unwrap();
 
     let content = b"fn main() { println!(\"hello\"); }";
-    let hash = uhoh::cas::store_blob(&blob_root, content).unwrap();
+    let (hash, _) = uhoh::cas::store_blob(&blob_root, content).unwrap();
 
     let read_back = uhoh::cas::read_blob(&blob_root, &hash).unwrap().unwrap();
     assert_eq!(read_back, content);

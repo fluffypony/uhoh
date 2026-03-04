@@ -3,6 +3,7 @@ use anyhow::Result;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use sysinfo::{System, RefreshKind, MemoryRefreshKind};
+use std::io::IsTerminal;
 
 /// Default model tiers (used when config has none).
 /// Updated to Qwen3.5 tiers.
@@ -53,7 +54,7 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
     // Open file for append/create
     let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&tmp)?;
     // Show a progress bar if total known
-    let is_tty = atty::is(atty::Stream::Stderr);
+    let is_tty = std::io::stderr().is_terminal();
     let pb = if is_tty { total.map(|t| {
         let bar = indicatif::ProgressBar::new(t);
         bar.set_position(start);
@@ -66,19 +67,32 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
         let mut req = client.get(&model.url);
         if pos > 0 { req = req.header(reqwest::header::RANGE, format!("bytes={}-", pos)); }
         let resp = req.send()?;
+        if pos > 0 && resp.status() == reqwest::StatusCode::OK {
+            tracing::warn!("Server ignored Range request for {}, restarting download from zero", model.name);
+            pos = 0;
+            out.set_len(0)?;
+            use std::io::Seek;
+            out.seek(std::io::SeekFrom::Start(0))?;
+            continue;
+        }
         if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE { break; }
         if !resp.status().is_success() { anyhow::bail!("Failed to download model: HTTP {}", resp.status()); }
         let mut reader = std::io::BufReader::new(resp);
         let mut buf = [0u8; 64 * 1024];
+        let mut received_any = false;
         loop {
             let n = reader.read(&mut buf)?;
             if n == 0 { break; }
             out.write_all(&buf[..n])?;
             pos += n as u64;
+            received_any = true;
             if let Some(ref bar) = pb { bar.set_position(pos); }
         }
         out.flush()?;
         if let Some(total) = total { if pos >= total { break; } }
+        if total.is_none() && !received_any { break; }
+        if total.is_none() && received_any { break; }
+        tracing::info!("Download interrupted at {} bytes, retrying with resume", pos);
     }
     out.sync_all()?;
     if let Some(bar) = pb { bar.finish_and_clear(); }

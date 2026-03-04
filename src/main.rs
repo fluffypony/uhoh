@@ -443,34 +443,36 @@ async fn run_zero_verb() -> Result<()> {
 
 async fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bool, restore_latest: bool) -> Result<()> {
     // 1) SQLite integrity check
+    let mut integrity_ok = true;
     {
         let conn = rusqlite::Connection::open(uhoh_dir.join("uhoh.db"))?;
         let ok: String = conn
             .prepare("PRAGMA integrity_check;")?
             .query_row([], |row| row.get(0))?;
         if ok != "ok" {
+            integrity_ok = false;
             eprintln!("Database integrity check FAILED: {}", ok);
-            if restore_latest {
-                // Attempt restore from latest backup
-                let backups = uhoh_dir.join("backups");
-                if backups.exists() {
-                    let mut files: Vec<_> = std::fs::read_dir(&backups)?.flatten().collect();
-                    files.sort_by_key(|e| e.file_name());
-                    if let Some(last) = files.last() {
-                        let src = last.path();
-                        let dst = uhoh_dir.join("uhoh.db");
-                        std::fs::copy(&src, &dst)?;
-                        println!("Restored database from {}", src.display());
-                        // Remove WAL/SHM to avoid carrying corruption state
-                        let _ = std::fs::remove_file(uhoh_dir.join("uhoh.db-wal"));
-                        let _ = std::fs::remove_file(uhoh_dir.join("uhoh.db-shm"));
-                    } else {
-                        eprintln!("No backups found to restore.");
-                    }
-                }
-            }
         } else {
             println!("Database integrity: ok");
+        }
+    }
+
+    if !integrity_ok && restore_latest {
+        // Attempt restore from latest backup after integrity-check connection is dropped
+        let backups = uhoh_dir.join("backups");
+        if backups.exists() {
+            let mut files: Vec<_> = std::fs::read_dir(&backups)?.flatten().collect();
+            files.sort_by_key(|e| e.file_name());
+            if let Some(last) = files.last() {
+                let src = last.path();
+                let dst = uhoh_dir.join("uhoh.db");
+                std::fs::copy(&src, &dst)?;
+                println!("Restored database from {}", src.display());
+                let _ = std::fs::remove_file(uhoh_dir.join("uhoh.db-wal"));
+                let _ = std::fs::remove_file(uhoh_dir.join("uhoh.db-shm"));
+            } else {
+                eprintln!("No backups found to restore.");
+            }
         }
     }
 

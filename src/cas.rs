@@ -5,6 +5,11 @@ use std::path::Path;
 use std::ffi::OsString;
 use base64::Engine;
 
+#[cfg(feature = "compression")]
+const COMPRESSION_MAGIC_NEW: &[u8; 12] = b"UHZS\x00ZSTD\x00v1";
+#[cfg(feature = "compression")]
+const COMPRESSION_MAGIC_OLD: &[u8; 8] = b"UHZS\x00\xF0\x9F\xA6";
+
 /// How a blob was stored in the CAS.
 /// Numeric values can be persisted in the DB if needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,28 +45,42 @@ impl StorageMethod {
 }
 
 /// Store a blob in the CAS. Uses atomic write (write-to-temp, fsync, rename).
-/// Returns the BLAKE3 hex hash.
-pub fn store_blob(blob_root: &Path, content: &[u8]) -> Result<String> {
+/// Returns (BLAKE3 hex hash, bytes actually written to disk).
+/// `bytes_written` is 0 when deduplication hits an existing blob.
+pub fn store_blob(blob_root: &Path, content: &[u8]) -> Result<(String, u64)> {
+    store_blob_with_level(blob_root, content, 3)
+}
+
+/// Same as `store_blob`, but lets callers override zstd compression level.
+pub fn store_blob_with_level(
+    blob_root: &Path,
+    content: &[u8],
+    #[allow(unused_variables)] compress_level: i32,
+) -> Result<(String, u64)> {
     let hash = blake3::hash(content).to_hex().to_string();
     let dir = blob_root.join(&hash[..hash.len().min(2)]);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create blob dir: {}", dir.display()))?;
     let blob_path = dir.join(&hash);
     if blob_path.exists() {
-        return Ok(hash); // Deduplication: already stored
+        return Ok((hash, 0));
     }
 
-    // Atomic write: temp file → fsync → rename
     let tmp_path = dir.join(format!(
         ".tmp.{}.{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_nanos()
     ));
 
+    #[cfg(feature = "compression")]
+    let data = maybe_compress_with_level(content, compress_level);
+    #[cfg(not(feature = "compression"))]
     let data = maybe_compress(content);
+    let bytes_len = data.len() as u64;
+
     {
         let mut f = create_restricted_file(&tmp_path)
             .with_context(|| format!("Failed to write temp blob: {}", tmp_path.display()))?;
@@ -69,24 +88,50 @@ pub fn store_blob(blob_root: &Path, content: &[u8]) -> Result<String> {
         f.sync_all()?;
     }
 
-    // Atomic rename
-    std::fs::rename(&tmp_path, &blob_path).with_context(|| {
-        format!(
-            "Failed to rename blob {} -> {}",
-            tmp_path.display(),
-            blob_path.display()
-        )
-    })?;
-
-    // Restrict permissions
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Standardize on read-only
-        std::fs::set_permissions(&blob_path, std::fs::Permissions::from_mode(0o400)).ok();
+    match std::fs::rename(&tmp_path, &blob_path) {
+        Ok(()) => {}
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            if blob_path.exists() {
+                return Ok((hash, 0));
+            }
+            return Err(e).with_context(|| {
+                format!(
+                    "Failed to rename blob {} -> {}",
+                    tmp_path.display(),
+                    blob_path.display()
+                )
+            });
+        }
     }
 
-    Ok(hash)
+    set_blob_readonly(&blob_path);
+    fsync_parent_dir(&blob_path);
+
+    Ok((hash, bytes_len))
+}
+
+/// Reads a symlink target at `abs_path`, stores the target bytes in CAS,
+/// and returns (hash, target_byte_count, bytes_written_to_disk).
+pub fn store_symlink_target(
+    blob_root: &Path,
+    abs_path: &Path,
+) -> Result<(String, u64, u64)> {
+    let target = std::fs::read_link(abs_path)
+        .with_context(|| format!("Failed to read symlink: {}", abs_path.display()))?;
+
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        target.as_os_str().as_bytes().to_vec()
+    };
+
+    #[cfg(not(unix))]
+    let bytes = target.to_string_lossy().into_owned().into_bytes();
+
+    let size = bytes.len() as u64;
+    let (hash, bytes_written) = store_blob(blob_root, &bytes)?;
+    Ok((hash, size, bytes_written))
 }
 
 /// Store a blob from a file path using streaming BLAKE3 and a tiered strategy.
@@ -104,64 +149,167 @@ pub fn store_blob_from_file(
         .with_context(|| format!("Cannot stat: {}", file_path.display()))?;
     let file_size = metadata.len();
 
-    // Single-pass streaming hash+write: stream file once into a temp file while hashing
-    let mut reader = std::io::BufReader::new(std::fs::File::open(file_path)?);
+    let file = std::fs::File::open(file_path)
+        .with_context(|| format!("Cannot open: {}", file_path.display()))?;
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
     let mut hasher = blake3::Hasher::new();
-    let mut first_chunk: Vec<u8> = Vec::new();
-let mut is_binary = false;
+    let mut buf = [0u8; 64 * 1024];
+    let mut first_chunk = Vec::new();
+
+    let first_n = reader.read(&mut buf)?;
+    if first_n > 0 {
+        first_chunk.extend_from_slice(&buf[..first_n.min(8192)]);
+        hasher.update(&buf[..first_n]);
+    }
+    let is_binary = !first_chunk.is_empty() && content_inspector::inspect(&first_chunk).is_binary();
+    let cfg_limit = if is_binary {
+        max_binary_blob_bytes
+    } else {
+        max_text_blob_bytes
+    };
+    let effective_limit = std::cmp::min(cfg_limit, max_copy_blob_bytes);
+
+    if file_size > effective_limit {
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let hash = hasher.finalize().to_hex().to_string();
+        tracing::debug!(
+            "Not storing {} ({} bytes): size exceeds limit ({} bytes)",
+            file_path.display(),
+            file_size,
+            effective_limit
+        );
+        return Ok((hash, file_size, StorageMethod::None, 0));
+    }
+
     let tmp_dir = blob_root.join("tmp");
     std::fs::create_dir_all(&tmp_dir)?;
     let tmp_path = tmp_dir.join(format!(
-        ".tmp.{}.{}",
+        ".blob.{}.{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
     ));
-let mut tmp_file = create_restricted_file(&tmp_path)?;
-    let mut written = 0u64;
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 { break; }
-        if first_chunk.len() < 8192 { first_chunk.extend_from_slice(&buf[..n.min(8192 - first_chunk.len())]); }
-        hasher.update(&buf[..n]);
-        tmp_file.write_all(&buf[..n])?;
-        written += n as u64;
+
+    #[cfg(feature = "compression")]
+    let do_compress = compress_enabled;
+    #[cfg(not(feature = "compression"))]
+    let do_compress = false;
+
+    #[allow(unused_mut)]
+    let mut bytes_on_disk: u64;
+
+    if do_compress {
+        #[cfg(feature = "compression")]
+        {
+            let level = if (1..=22).contains(&compress_level) {
+                compress_level
+            } else {
+                3
+            };
+            let tmp_file = create_restricted_file(&tmp_path)?;
+            let mut tmp_writer = std::io::BufWriter::new(tmp_file);
+            tmp_writer.write_all(COMPRESSION_MAGIC_NEW)?;
+            let mut encoder = zstd::stream::write::Encoder::new(tmp_writer, level)?;
+
+            if first_n > 0 {
+                encoder.write_all(&buf[..first_n])?;
+            }
+
+            loop {
+                let n = reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                encoder.write_all(&buf[..n])?;
+            }
+
+            let mut writer = encoder.finish()?;
+            writer.flush()?;
+            let file = writer
+                .into_inner()
+                .map_err(|e| anyhow::anyhow!("Failed to get temp file handle: {}", e))?;
+            file.sync_all()?;
+            bytes_on_disk = file.metadata()?.len();
+
+            if bytes_on_disk >= file_size + COMPRESSION_MAGIC_NEW.len() as u64 {
+                drop(file);
+                let _ = std::fs::remove_file(&tmp_path);
+
+                let mut src = std::io::BufReader::with_capacity(64 * 1024, std::fs::File::open(file_path)?);
+                let mut dst = create_restricted_file(&tmp_path)?;
+                loop {
+                    let n = src.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    dst.write_all(&buf[..n])?;
+                }
+                dst.sync_all()?;
+                bytes_on_disk = file_size;
+            }
+        }
+        #[cfg(not(feature = "compression"))]
+        {
+            bytes_on_disk = 0;
+        }
+    } else {
+        let mut tmp_file = create_restricted_file(&tmp_path)?;
+        if first_n > 0 {
+            tmp_file.write_all(&buf[..first_n])?;
+        }
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            tmp_file.write_all(&buf[..n])?;
+        }
+        tmp_file.sync_all()?;
+        bytes_on_disk = file_size;
     }
-    tmp_file.sync_all()?;
-    if !first_chunk.is_empty() { is_binary = content_inspector::inspect(&first_chunk).is_binary(); }
-let hash = hasher.finalize().to_hex().to_string();
+
+    let hash = hasher.finalize().to_hex().to_string();
     let dir = blob_root.join(&hash[..hash.len().min(2)]);
     std::fs::create_dir_all(&dir)?;
     let blob_path = dir.join(&hash);
-    
-// If already exists, discard temp and report no write
+
     if blob_path.exists() {
         let _ = std::fs::remove_file(&tmp_path);
         return Ok((hash, file_size, StorageMethod::Copy, 0));
     }
-    
-    // Enforce size limits: decide if we should store or hash-only based on type
-    let cfg_limit = if is_binary { max_binary_blob_bytes } else { max_text_blob_bytes } as u64;
-let effective_limit = std::cmp::min(cfg_limit, max_copy_blob_bytes);
-    
-    if file_size <= effective_limit {
-        set_blob_readonly(&tmp_path);
-        match std::fs::rename(&tmp_path, &blob_path) {
-            Ok(()) => { fsync_parent_dir(&blob_path); return Ok((hash, file_size, StorageMethod::Copy, written)); },
-            Err(_) => {
-                let _ = std::fs::remove_file(&tmp_path);
-                if blob_path.exists() { return Ok((hash, file_size, StorageMethod::Copy, 0)); }
+
+    match std::fs::rename(&tmp_path, &blob_path) {
+        Ok(()) => {
+            set_blob_readonly(&blob_path);
+            fsync_parent_dir(&blob_path);
+            Ok((hash, file_size, StorageMethod::Copy, bytes_on_disk))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            if blob_path.exists() {
+                Ok((hash, file_size, StorageMethod::Copy, 0))
+            } else {
+                Err(e).with_context(|| {
+                    format!(
+                        "Failed to rename blob {} -> {}",
+                        tmp_path.display(),
+                        blob_path.display()
+                    )
+                })
             }
         }
     }
-    // Size exceeds configured limits or rename failed: remove temp and return None storage
-    let _ = std::fs::remove_file(&tmp_path);
-    tracing::debug!(
-        "Not storing {} ({} bytes): size exceeds limit ({} bytes)",
-        file_path.display(), file_size, effective_limit
-    );
-    Ok((hash, file_size, StorageMethod::None, 0))
-    }
+}
 
 /// Read a blob from the CAS with integrity verification.
 pub fn read_blob(blob_root: &Path, hash: &str) -> Result<Option<Vec<u8>>> {
@@ -215,12 +363,10 @@ fn set_blob_readonly(path: &Path) {
 }
 
 /// Compress if feature enabled
-fn maybe_compress(data: &[u8]) -> Vec<u8> {
+pub fn maybe_compress(data: &[u8]) -> Vec<u8> {
     #[cfg(feature = "compression")]
     {
-        let compressed = zstd::encode_all(std::io::Cursor::new(data), 3)
-            .unwrap_or_else(|_| data.to_vec());
-        return maybe_wrap_compressed(data, &compressed);
+        return maybe_compress_with_level(data, 3);
     }
     #[cfg(not(feature = "compression"))]
     {
@@ -229,17 +375,15 @@ fn maybe_compress(data: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(feature = "compression")]
-fn maybe_compress_with_level(data: &[u8], level: i32) -> Vec<u8> {
+pub fn maybe_compress_with_level(data: &[u8], level: i32) -> Vec<u8> {
     let lvl = if (1..=22).contains(&level) { level } else { 3 };
-    let compressed = zstd::encode_all(std::io::Cursor::new(data), lvl as i32)
+    let compressed = zstd::encode_all(std::io::Cursor::new(data), lvl)
         .unwrap_or_else(|_| data.to_vec());
     maybe_wrap_compressed(data, &compressed)
 }
 
 #[cfg(feature = "compression")]
 fn maybe_wrap_compressed(original: &[u8], compressed: &[u8]) -> Vec<u8> {
-    // Prefer a robust ASCII magic header; support legacy header on read
-    const COMPRESSION_MAGIC_NEW: &[u8; 12] = b"UHZS\x00ZSTD\x00v1";
     if compressed.len() < original.len() {
         let mut out = Vec::with_capacity(compressed.len() + COMPRESSION_MAGIC_NEW.len());
         out.extend_from_slice(COMPRESSION_MAGIC_NEW);
@@ -252,8 +396,6 @@ fn maybe_wrap_compressed(original: &[u8], compressed: &[u8]) -> Vec<u8> {
 fn maybe_decompress(data: &[u8]) -> Result<Vec<u8>> {
     #[cfg(feature = "compression")]
     {
-        const COMPRESSION_MAGIC_NEW: &[u8; 12] = b"UHZS\x00ZSTD\x00v1";
-        const COMPRESSION_MAGIC_OLD: &[u8; 8] = b"UHZS\x00\xF0\x9F\xA6";
         if data.len() > 12 && &data[..12] == COMPRESSION_MAGIC_NEW {
             return zstd::decode_all(std::io::Cursor::new(&data[12..]))
                 .context("Failed to decompress blob");
@@ -308,24 +450,30 @@ pub fn normalize_path(path: &Path) -> String {
 /// Otherwise, base64-encode the raw platform bytes with a "b64:" prefix.
 pub fn encode_relpath(rel: &Path) -> String {
     if let Some(s) = rel.to_str() {
-        return normalize_path(Path::new(s));
+        if !s.starts_with("b64:") {
+            return normalize_path(Path::new(s));
+        }
     }
+    encode_relpath_bytes(rel)
+}
+
+fn encode_relpath_bytes(rel: &Path) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
         let bytes = rel.as_os_str().as_bytes();
-        return format!("b64:{}", base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes));
+        format!("b64:{}", base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes))
     }
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
         let wide: Vec<u16> = rel.as_os_str().encode_wide().collect();
         let bytes: &[u8] = unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
-        return format!("b64:{}", base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes));
+        format!("b64:{}", base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes))
     }
     #[cfg(not(any(unix, windows)))]
     {
-        normalize_path(rel)
+        normalize_path(Path::new(&rel.to_string_lossy().to_string()))
     }
 }
 
@@ -390,9 +538,8 @@ fn create_restricted_file(path: &Path) -> std::io::Result<std::fs::File> {
 pub fn blob_disk_usage(blob_path: &Path) -> u64 {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         if let Ok(meta) = std::fs::metadata(blob_path) {
-            return if meta.nlink() > 1 { meta.len() / meta.nlink() } else { meta.len() };
+            return meta.len();
         }
         0
     }
@@ -414,7 +561,7 @@ pub fn cleanup_stale_temp_files(blob_root: &Path, max_age: std::time::Duration) 
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with(".tmp.") {
+                if name.starts_with(".tmp.") || name.starts_with(".blob.") {
                     if let Ok(meta) = std::fs::metadata(&path) {
                         if let Ok(mtime) = meta.modified() {
                             if let Ok(age) = now.duration_since(mtime) {
@@ -462,7 +609,7 @@ mod tests {
         std::fs::create_dir_all(&blob_root).unwrap();
 
         let content = b"hello, uhoh!";
-        let hash = store_blob(&blob_root, content).unwrap();
+        let (hash, _) = store_blob(&blob_root, content).unwrap();
 
         let read_back = read_blob(&blob_root, &hash).unwrap().unwrap();
         assert_eq!(read_back, content);
@@ -475,9 +622,11 @@ mod tests {
         std::fs::create_dir_all(&blob_root).unwrap();
 
         let content = b"duplicate content";
-        let h1 = store_blob(&blob_root, content).unwrap();
-        let h2 = store_blob(&blob_root, content).unwrap();
+        let (h1, w1) = store_blob(&blob_root, content).unwrap();
+        let (h2, w2) = store_blob(&blob_root, content).unwrap();
         assert_eq!(h1, h2);
+        assert!(w1 > 0);
+        assert_eq!(w2, 0);
     }
 
     #[test]

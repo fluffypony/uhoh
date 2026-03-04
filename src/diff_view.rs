@@ -218,32 +218,57 @@ fn build_current_file_list_readonly(
     for entry in walker {
         let entry = match entry { Ok(e) => e, Err(_) => continue };
         let path = entry.path();
-        if !path.is_file() { continue; }
         if path.file_name().map_or(false, |n| n == ".uhoh") { continue; }
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let ft = meta.file_type();
+        if !ft.is_file() && !ft.is_symlink() {
+            continue;
+        }
         let rel_path = match path.strip_prefix(project_path) { Ok(r) => cas::encode_relpath(r), Err(_) => continue };
-        // Hash only, do not store in CAS
-        let (hash, size) = {
-            let mut hasher = blake3::Hasher::new();
-            let mut f = std::fs::File::open(path)?;
-            let mut buf = [0u8; 64 * 1024];
-            let mut total = 0u64;
-            loop {
-                let n = std::io::Read::read(&mut f, &mut buf)?;
-                if n == 0 { break; }
-                hasher.update(&buf[..n]);
-                total += n as u64;
-            }
-            (hasher.finalize().to_hex().to_string(), total)
+        let (hash, size, is_symlink, executable) = if ft.is_symlink() {
+            let target = std::fs::read_link(path)?;
+            #[cfg(unix)]
+            let target_bytes = {
+                use std::os::unix::ffi::OsStrExt;
+                target.as_os_str().as_bytes().to_vec()
+            };
+            #[cfg(not(unix))]
+            let target_bytes = target.to_string_lossy().into_owned().into_bytes();
+
+            (
+                blake3::hash(&target_bytes).to_hex().to_string(),
+                target_bytes.len() as u64,
+                true,
+                false,
+            )
+        } else {
+            let (hash, size) = {
+                let mut hasher = blake3::Hasher::new();
+                let mut f = std::fs::File::open(path)?;
+                let mut buf = [0u8; 64 * 1024];
+                let mut total = 0u64;
+                loop {
+                    let n = std::io::Read::read(&mut f, &mut buf)?;
+                    if n == 0 { break; }
+                    hasher.update(&buf[..n]);
+                    total += n as u64;
+                }
+                (hasher.finalize().to_hex().to_string(), total)
+            };
+            (hash, size, false, cas::is_executable(path))
         };
         entries.push(crate::db::FileEntryRow {
             path: rel_path,
             hash,
             size,
             stored: false,
-            executable: cas::is_executable(path),
+            executable,
             mtime: None,
             storage_method: 0,
-            is_symlink: false,
+            is_symlink,
         });
     }
     Ok(entries)

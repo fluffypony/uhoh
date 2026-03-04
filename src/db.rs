@@ -88,123 +88,140 @@ impl Database {
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         match self.conn.lock() {
             Ok(guard) => guard,
-            Err(_poisoned) => {
-                tracing::error!("Database mutex poisoned. Aborting to avoid inconsistent state.");
-                std::process::abort();
+            Err(poisoned) => {
+                tracing::error!(
+                    "Database mutex was poisoned (a thread panicked while holding the lock). Recovering guard."
+                );
+                poisoned.into_inner()
             }
         }
     }
 
     fn migrate(&self) -> Result<()> {
         let conn = self.conn();
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);",
-        )?;
-        let version: u32 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-                [],
-                |row| row.get(0),
-            )
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap_or(0);
-        if version >= 5 { return Ok(()); }
-        conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION;")?;
-        conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS projects (
-                hash TEXT PRIMARY KEY,
-                current_path TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                next_snapshot_id INTEGER NOT NULL DEFAULT 1
-            );
 
-            CREATE TABLE IF NOT EXISTS project_history (
-                project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
-                old_path TEXT NOT NULL,
-                changed_at TEXT NOT NULL
-            );
+        if version < 1 {
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS projects (
+                    hash TEXT PRIMARY KEY,
+                    current_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    next_snapshot_id INTEGER NOT NULL DEFAULT 1
+                );
 
-            CREATE TABLE IF NOT EXISTS snapshots (
-                rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
-                snapshot_id INTEGER NOT NULL CHECK (snapshot_id > 0),
-                timestamp TEXT NOT NULL,
-                trigger TEXT NOT NULL,
-                message TEXT NOT NULL DEFAULT '',
-                pinned INTEGER NOT NULL DEFAULT 0,
-                ai_summary TEXT,
-                file_count INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(project_hash, snapshot_id)
-            );
+                CREATE TABLE IF NOT EXISTS project_history (
+                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
+                    old_path TEXT NOT NULL,
+                    changed_at TEXT NOT NULL
+                );
 
-            CREATE TABLE IF NOT EXISTS snapshot_files (
-                snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                path TEXT NOT NULL,
-                hash TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                stored INTEGER NOT NULL DEFAULT 1,
-                executable INTEGER NOT NULL DEFAULT 0,
-                mtime INTEGER,
-                storage_method INTEGER NOT NULL DEFAULT 1,
-                is_symlink INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (snapshot_rowid, path)
-            );
+                CREATE TABLE IF NOT EXISTS snapshots (
+                    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
+                    snapshot_id INTEGER NOT NULL CHECK (snapshot_id > 0),
+                    timestamp TEXT NOT NULL,
+                    trigger TEXT NOT NULL,
+                    message TEXT NOT NULL DEFAULT '',
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(project_hash, snapshot_id)
+                );
 
-            CREATE TABLE IF NOT EXISTS snapshot_deleted (
-                snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                path TEXT NOT NULL,
-                hash TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                stored INTEGER NOT NULL DEFAULT 1,
-                storage_method INTEGER NOT NULL DEFAULT 1,
-                PRIMARY KEY (snapshot_rowid, path)
-            );
+                CREATE TABLE IF NOT EXISTS snapshot_files (
+                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                    path TEXT NOT NULL,
+                    hash TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    stored INTEGER NOT NULL DEFAULT 1,
+                    executable INTEGER NOT NULL DEFAULT 0,
+                    mtime INTEGER,
+                    storage_method INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (snapshot_rowid, path)
+                );
 
-            CREATE TABLE IF NOT EXISTS snapshot_tree (
-                snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                dir_path TEXT NOT NULL,
-                tree_hash TEXT NOT NULL,
-                PRIMARY KEY (snapshot_rowid, dir_path)
-            );
+                CREATE TABLE IF NOT EXISTS snapshot_deleted (
+                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                    path TEXT NOT NULL,
+                    hash TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    stored INTEGER NOT NULL DEFAULT 1,
+                    storage_method INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (snapshot_rowid, path)
+                );
 
-            CREATE TABLE IF NOT EXISTS operations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
-                label TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                ended_at TEXT,
-                first_snapshot_id INTEGER,
-                last_snapshot_id INTEGER
-            );
+                CREATE TABLE IF NOT EXISTS snapshot_tree (
+                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                    dir_path TEXT NOT NULL,
+                    tree_hash TEXT NOT NULL,
+                    PRIMARY KEY (snapshot_rowid, dir_path)
+                );
 
-            CREATE TABLE IF NOT EXISTS pending_ai_summaries (
-                snapshot_rowid INTEGER PRIMARY KEY REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                project_hash   TEXT NOT NULL,
-                queued_at      TEXT NOT NULL,
-                attempts       INTEGER NOT NULL DEFAULT 0
-            );
+                CREATE INDEX IF NOT EXISTS idx_snapshot_project ON snapshots(project_hash, timestamp);
+                CREATE INDEX IF NOT EXISTS idx_snapshot_files_hash ON snapshot_files(hash);
+                CREATE INDEX IF NOT EXISTS idx_snapshot_deleted_hash ON snapshot_deleted(hash);
+                CREATE INDEX IF NOT EXISTS idx_file_path ON snapshot_files(path, snapshot_rowid);
 
-            CREATE TABLE IF NOT EXISTS stats (
-                key   TEXT PRIMARY KEY,
-                value INTEGER NOT NULL DEFAULT 0
-            );
+                PRAGMA user_version = 1;
+                "
+            )?;
+        }
 
-            CREATE INDEX IF NOT EXISTS idx_snapshot_project
-                ON snapshots(project_hash, timestamp);
-            CREATE INDEX IF NOT EXISTS idx_snapshot_files_hash
-                ON snapshot_files(hash);
-            CREATE INDEX IF NOT EXISTS idx_snapshot_deleted_hash
-                ON snapshot_deleted(hash);
-            CREATE INDEX IF NOT EXISTS idx_file_path
-                ON snapshot_files(path, snapshot_rowid);
-            CREATE INDEX IF NOT EXISTS idx_operations_project
-                ON operations(project_hash);
-            CREATE INDEX IF NOT EXISTS idx_ai_queue_time ON pending_ai_summaries(queued_at);
-            ",
-        )?;
-        conn.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('blob_bytes', 0)", [])?;
-        conn.execute_batch("DELETE FROM schema_version; INSERT INTO schema_version (version) VALUES (5);")?;
-        conn.execute_batch("COMMIT;")?;
+        if version < 2 {
+            let _ = conn.execute_batch("ALTER TABLE snapshots ADD COLUMN ai_summary TEXT;");
+            conn.execute_batch("PRAGMA user_version = 2;")?;
+        }
+
+        if version < 3 {
+            let _ = conn.execute_batch("ALTER TABLE snapshots ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;");
+            let _ = conn.execute_batch("ALTER TABLE snapshot_files ADD COLUMN is_symlink INTEGER NOT NULL DEFAULT 0;");
+            conn.execute_batch("PRAGMA user_version = 3;")?;
+        }
+
+        if version < 4 {
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS operations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
+                    label TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    first_snapshot_id INTEGER,
+                    last_snapshot_id INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS pending_ai_summaries (
+                    snapshot_rowid INTEGER PRIMARY KEY REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                    project_hash   TEXT NOT NULL,
+                    queued_at      TEXT NOT NULL,
+                    attempts       INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_operations_project ON operations(project_hash);
+                CREATE INDEX IF NOT EXISTS idx_ai_queue_time ON pending_ai_summaries(queued_at);
+
+                PRAGMA user_version = 4;
+                "
+            )?;
+        }
+
+        if version < 5 {
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS stats (
+                    key   TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT OR IGNORE INTO stats (key, value) VALUES ('blob_bytes', 0);
+                PRAGMA user_version = 5;
+                "
+            )?;
+        }
+
         Ok(())
     }
 

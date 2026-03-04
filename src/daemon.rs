@@ -42,18 +42,6 @@ pub fn spawn_detached_daemon() -> Result<()> {
 
     #[cfg(windows)]
     {
-        // Enforce singleton via Named Mutex to avoid PID reuse issues
-        use winapi::um::synchapi::CreateMutexW;
-        use winapi::um::winnt::LPWSTR;
-        use winapi::shared::minwindef::FALSE;
-        use std::ptr::null_mut;
-        let name: Vec<u16> = "Global\\uhoh-daemon".encode_utf16().chain(std::iter::once(0)).collect();
-        unsafe {
-            let handle = CreateMutexW(null_mut(), FALSE, name.as_ptr() as LPWSTR);
-            if handle.is_null() {
-                anyhow::bail!("Failed to create named mutex for singleton enforcement");
-            }
-        }
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x00000008;
         std::process::Command::new(&exe)
@@ -112,6 +100,32 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let uhoh_dir = uhoh_dir.to_path_buf();
     let config_path = uhoh_dir.join("config.toml");
     let mut config = Config::load(&config_path)?;
+
+    #[cfg(windows)]
+    let _daemon_mutex = {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        let name: Vec<u16> = OsStr::new("Global\\uhoh-daemon\0")
+            .encode_wide()
+            .collect();
+        unsafe {
+            let handle = winapi::um::synchapi::CreateMutexW(
+                std::ptr::null_mut(),
+                winapi::shared::minwindef::FALSE,
+                name.as_ptr(),
+            );
+            if handle.is_null() {
+                anyhow::bail!("Failed to create daemon mutex");
+            }
+            if winapi::um::errhandlingapi::GetLastError()
+                == winapi::shared::winerror::ERROR_ALREADY_EXISTS
+            {
+                winapi::um::handleapi::CloseHandle(handle);
+                anyhow::bail!("Another uhoh daemon is already running");
+            }
+            handle
+        }
+    };
 
     // Write PID file with exclusive lock to avoid races
     let pid_path = uhoh_dir.join("daemon.pid");
@@ -238,6 +252,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let mut update_check_interval = tokio::time::interval(Duration::from_secs(config.update.check_interval_hours * 3600));
     let mut debounce_interval = tokio::time::interval(Duration::from_secs(config.watch.debounce_quiet_secs));
     let update_trigger = uhoh_dir.join(".update-ready");
+    let mut compaction_index: usize = 0;
 
     tracing::info!("Daemon running, watching {} projects", projects.len());
 
@@ -330,25 +345,37 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     }
                     config = new_cfg;
                 }
-                // Periodic tasks: check for moved folders, expire emergency snapshots
-                check_moved_folders(&*database, &mut watcher_handle, &mut project_states);
-                // Discover newly added projects and watch them
-                check_for_new_projects(&*database, &mut watcher_handle, &mut project_states);
+                // Periodic DB polling runs in blocking task to avoid stalling the async loop.
+                let db_for_poll = database.clone();
+                let db_projects = match tokio::task::spawn_blocking(move || db_for_poll.list_projects()).await {
+                    Ok(Ok(v)) => v,
+                    Ok(Err(e)) => {
+                        tracing::warn!("Failed to poll projects on tick: {}", e);
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to join periodic project polling task: {:?}", e);
+                        Vec::new()
+                    }
+                };
+
+                // Periodic tasks: check for moved folders and watcher registration.
+                check_moved_folders(&db_projects, &*database, &mut watcher_handle, &mut project_states);
+                check_for_new_projects(&db_projects, &mut watcher_handle, &mut project_states);
+
                 // Remove watchers and state for projects removed from DB
-                if let Ok(db_projects) = (&*database).list_projects() {
-                    use std::collections::HashSet;
-                    let db_paths: HashSet<String> = db_projects.into_iter().map(|p| p.current_path).collect();
-                    let mut to_remove: Vec<String> = Vec::new();
-                    for key in project_states.keys() {
-                        if !db_paths.contains(key) {
-                            to_remove.push(key.clone());
-                        }
+                use std::collections::HashSet;
+                let db_paths: HashSet<String> = db_projects.iter().map(|p| p.current_path.clone()).collect();
+                let mut to_remove: Vec<String> = Vec::new();
+                for key in project_states.keys() {
+                    if !db_paths.contains(key) {
+                        to_remove.push(key.clone());
                     }
-                    for key in to_remove {
-                        let _ = watcher_handle.unwatch(std::path::Path::new(&key));
-                        project_states.remove(&key);
-                        tracing::info!("Stopped watching removed project: {}", key);
-                    }
+                }
+                for key in to_remove {
+                    let _ = watcher_handle.unwatch(std::path::Path::new(&key));
+                    project_states.remove(&key);
+                    tracing::info!("Stopped watching removed project: {}", key);
                 }
                 // Attempt to recover watcher if it died earlier
                 // Attempt watcher recovery only when we get WatcherDied events; here keep lightweight
@@ -386,10 +413,12 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     break;
                 }
                 let _total_freed = 0u64; // unused placeholder; freed reported inside task
-                if let Ok(current_projects) = (&*database).list_projects() {
+                let current_projects = db_projects;
+                if !current_projects.is_empty() {
                     // Run compaction as a detached task; don't await inside main select loop
                     let db_path = uhoh_dir.join("uhoh.db");
                     let cfg = config.compaction.clone();
+                    let local_compaction_index = compaction_index;
                     tokio::spawn({
                         let db_path_for_gc = db_path.clone();
                         async move {
@@ -398,7 +427,9 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                             let mut freed = 0u64;
                             if let Some(d) = db {
                                 // Stagger compaction: run for a single project per tick to reduce contention
-                                if let Some(project) = current_projects.first() {
+                                if !current_projects.is_empty() {
+                                    let idx = local_compaction_index % current_projects.len();
+                                    let project = &current_projects[idx];
                                     if let Ok(f) = crate::compaction::compact_project(&d, &project.hash, &cfg) { freed = freed.saturating_add(f); }
                                 }
                             }
@@ -426,6 +457,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                             });
                         }
                     }});
+                    compaction_index = compaction_index.wrapping_add(1);
                 }
                 // GC is handled within the detached task when needed
 
@@ -459,6 +491,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                         if let Ok(mut last) = LAST_BACKUP.lock() { *last = Some(std::time::Instant::now()); }
                     }
                 }
+
+                let _ = database.prune_ai_queue_ttl(7);
 
                 // Process deferred AI summaries when conditions allow (cache sysinfo per tick)
                 let mut tick_sys = sysinfo::System::new();
@@ -591,10 +625,12 @@ async fn process_pending_snapshots(
             let project_hash = state.hash.clone();
             let proj_path = Path::new(project_path).to_path_buf();
             let cfg = config.clone();
-            let changed: Vec<PathBuf> = state.pending_changes.iter().cloned().collect();
+            let changed: Vec<PathBuf> = state.pending_changes.drain().collect();
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             // Move minimal state needed; clear after join completes below
             let db_for_task = database.clone();
+            state.first_change_at = None;
+            state.last_change_at = None;
             join.spawn(async move {
                 let proj_hash_for_log = project_hash.clone();
                 let res = tokio::task::spawn_blocking(move || {
@@ -632,9 +668,6 @@ async fn process_ai_summary_queue(uhoh_dir: &Path, database: &Database, config: 
     // Limit per tick to avoid overwhelming the sidecar
     const MAX_PER_TICK: u32 = 2;
     const MAX_ATTEMPTS: i64 = 5;
-    // TTL cleanup best-effort
-    let _ = database.prune_ai_queue_ttl(7);
-
     if let Ok(jobs) = database.dequeue_pending_ai(MAX_PER_TICK) {
         for (rowid, project_hash, attempts, _queued_at) in jobs {
             if attempts >= MAX_ATTEMPTS { let _ = database.delete_pending_ai(rowid); continue; }
@@ -710,6 +743,7 @@ async fn process_ai_summary_queue(uhoh_dir: &Path, database: &Database, config: 
 }
 
 fn check_moved_folders(
+    projects: &[crate::db::ProjectEntry],
     database: &Database,
     watcher: &mut notify::RecommendedWatcher,
     states: &mut HashMap<String, ProjectDaemonState>,
@@ -718,55 +752,55 @@ fn check_moved_folders(
     use std::sync::Mutex;
     static FAILURES: Lazy<Mutex<std::collections::HashMap<String, u32>>> = Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
     let mut failures = FAILURES.lock().unwrap();
-    if let Ok(projects) = database.list_projects() {
-        for project in &projects {
-            let path = Path::new(&project.current_path);
-            if !path.exists() {
-                // Try to relocate by scanning common parent directories for the .uhoh marker
-                let count = failures.entry(project.hash.clone()).or_insert(0);
-                *count = count.saturating_add(1);
-                // Exponential backoff: only scan on powers of two up to a cap
-                if *count > 32 && (*count & (*count - 1)) != 0 { continue; }
+    for project in projects {
+        let path = Path::new(&project.current_path);
+        if !path.exists() {
+            // Try to relocate by scanning common parent directories for the .uhoh marker
+            let count = failures.entry(project.hash.clone()).or_insert(0);
+            *count = count.saturating_add(1);
+            // Exponential backoff: only scan on powers of two up to a cap
+            if *count > 32 && (*count & (*count - 1)) != 0 {
+                continue;
+            }
 
-                let mut candidates: Vec<PathBuf> = Vec::new();
-                if let Some(parent) = Path::new(&project.current_path).parent() {
-                    // Only scan immediate parent to limit scope
-                    let _ = std::fs::read_dir(parent).map(|iter| {
-                        for e in iter.flatten() {
-                            if e.file_type().map_or(false, |ft| ft.is_dir()) {
-                                candidates.push(e.path());
-                            }
+            let mut candidates: Vec<PathBuf> = Vec::new();
+            if let Some(parent) = Path::new(&project.current_path).parent() {
+                // Only scan immediate parent to limit scope
+                let _ = std::fs::read_dir(parent).map(|iter| {
+                    for e in iter.flatten() {
+                        if e.file_type().map_or(false, |ft| ft.is_dir()) {
+                            candidates.push(e.path());
                         }
-                    });
-                }
-                let found = crate::marker::scan_for_markers(&candidates);
-                for (hash, new_path) in found {
-                    if hash == project.hash {
-                        if new_path.to_string_lossy() != project.current_path {
-                            // Update watcher: unwatch old, watch new
-                            let _ = watcher.unwatch(Path::new(&project.current_path));
-                            let _ = watcher.watch(&new_path, RecursiveMode::Recursive);
-                            // Update in-memory state key
-                            if let Some(state) = states.remove(&project.current_path) {
-                                states.insert(new_path.to_string_lossy().to_string(), ProjectDaemonState { last_change_at: None, ..state });
-                            }
-                            let _ = database.update_project_path(&project.hash, &new_path.to_string_lossy());
-                            tracing::info!("Relocated project {} -> {}", &project.hash[..project.hash.len().min(12)], new_path.display());
-                        }
-                        break;
                     }
+                });
+            }
+            let found = crate::marker::scan_for_markers(&candidates);
+            for (hash, new_path) in found {
+                if hash == project.hash {
+                    if new_path.to_string_lossy() != project.current_path {
+                        // Update watcher: unwatch old, watch new
+                        let _ = watcher.unwatch(Path::new(&project.current_path));
+                        let _ = watcher.watch(&new_path, RecursiveMode::Recursive);
+                        // Update in-memory state key
+                        if let Some(state) = states.remove(&project.current_path) {
+                            states.insert(new_path.to_string_lossy().to_string(), ProjectDaemonState { last_change_at: None, ..state });
+                        }
+                        let _ = database.update_project_path(&project.hash, &new_path.to_string_lossy());
+                        tracing::info!("Relocated project {} -> {}", &project.hash[..project.hash.len().min(12)], new_path.display());
+                    }
+                    break;
                 }
+            }
 
-                // If still not found, warn once per tick; also remove orphaned state
-                if !Path::new(&project.current_path).exists() {
-                    tracing::warn!(
-                        "Project {} path missing: {}",
-                        &project.hash[..project.hash.len().min(12)],
-                        project.current_path
-                    );
-                    // Remove from in-memory state to avoid crashes
-                    states.remove(&project.current_path);
-                }
+            // If still not found, warn once per tick; also remove orphaned state
+            if !Path::new(&project.current_path).exists() {
+                tracing::warn!(
+                    "Project {} path missing: {}",
+                    &project.hash[..project.hash.len().min(12)],
+                    project.current_path
+                );
+                // Remove from in-memory state to avoid crashes
+                states.remove(&project.current_path);
             }
         }
     }
@@ -792,35 +826,33 @@ fn check_inotify_limit() {
 fn check_inotify_limit() {}
 
 fn check_for_new_projects(
-    database: &Database,
+    projects: &[crate::db::ProjectEntry],
     watcher: &mut notify::RecommendedWatcher,
     states: &mut HashMap<String, ProjectDaemonState>,
 ) {
-    if let Ok(projects) = database.list_projects() {
-        for p in projects {
-            let key = p.current_path.clone();
-            if !states.contains_key(&key) {
-                let path = PathBuf::from(&p.current_path);
-                if path.exists() {
-                    if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
-                        tracing::error!(
-                            "Failed to watch project {}: {}. Changes won't be detected until next tick.",
-                            path.display(), e
-                        );
-                        continue;
-                    } else {
-                        states.insert(
-                            key,
-                            ProjectDaemonState {
-                                hash: p.hash,
-                                last_snapshot: Instant::now() - Duration::from_secs(60),
-                                pending_changes: std::collections::HashSet::new(),
-                                first_change_at: None,
-                                last_change_at: None,
-                            },
-                        );
-                        tracing::info!("Started watching new project: {}", path.display());
-                    }
+    for p in projects {
+        let key = p.current_path.clone();
+        if !states.contains_key(&key) {
+            let path = PathBuf::from(&p.current_path);
+            if path.exists() {
+                if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
+                    tracing::error!(
+                        "Failed to watch project {}: {}. Changes won't be detected until next tick.",
+                        path.display(), e
+                    );
+                    continue;
+                } else {
+                    states.insert(
+                        key,
+                        ProjectDaemonState {
+                            hash: p.hash.clone(),
+                            last_snapshot: Instant::now() - Duration::from_secs(60),
+                            pending_changes: std::collections::HashSet::new(),
+                            first_change_at: None,
+                            last_change_at: None,
+                        },
+                    );
+                    tracing::info!("Started watching new project: {}", path.display());
                 }
             }
         }

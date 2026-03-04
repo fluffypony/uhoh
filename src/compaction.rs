@@ -65,7 +65,7 @@ pub fn compact_project(
 
         let dominated = if age < Duration::days(config.keep_5min_days as i64) {
             let bucket_secs = if is_manual_with_msg { 86400i64 } else { 300 };
-            let bucket = ts.timestamp() / bucket_secs;
+            let bucket = ts.timestamp().div_euclid(bucket_secs);
             if is_manual_with_msg {
                 !buckets_daily.insert(bucket)
             } else {
@@ -73,17 +73,17 @@ pub fn compact_project(
             }
         } else if age < Duration::days(config.keep_hourly_days as i64) {
             let bucket_secs = if is_manual_with_msg { 86400i64 } else { 3600 };
-            let bucket = ts.timestamp() / bucket_secs;
+            let bucket = ts.timestamp().div_euclid(bucket_secs);
             if is_manual_with_msg {
                 !buckets_daily.insert(bucket)
             } else {
                 !buckets_hourly.insert(bucket)
             }
         } else if age < Duration::days(config.keep_daily_days as i64) {
-            let bucket = ts.timestamp() / 86400;
+            let bucket = ts.timestamp().div_euclid(86400);
             !buckets_daily.insert(bucket)
         } else if config.keep_weekly_beyond {
-            let bucket = ts.timestamp() / 604800;
+            let bucket = ts.timestamp().div_euclid(604800);
             !buckets_weekly.insert(bucket)
         } else {
             true // No weekly retention: drop everything older
@@ -110,10 +110,10 @@ fn register_in_buckets(
 ) {
     let ts = parse_timestamp(&snapshot.timestamp)
         .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
-    b5.insert(ts.timestamp() / 300);
-    bh.insert(ts.timestamp() / 3600);
-    bd.insert(ts.timestamp() / 86400);
-    bw.insert(ts.timestamp() / 604800);
+    b5.insert(ts.timestamp().div_euclid(300));
+    bh.insert(ts.timestamp().div_euclid(3600));
+    bd.insert(ts.timestamp().div_euclid(86400));
+    bw.insert(ts.timestamp().div_euclid(604800));
 }
 
 fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
