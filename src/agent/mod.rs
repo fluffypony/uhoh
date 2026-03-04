@@ -28,7 +28,8 @@ pub struct AgentSubsystem {
     background_failures: std::sync::Arc<std::sync::atomic::AtomicU64>,
     intercept_task: Option<tokio::task::JoinHandle<()>>,
     fanotify_task: Option<tokio::task::JoinHandle<()>>,
-    proxy_task: Option<tokio::task::JoinHandle<()>>,
+    proxy_task: Option<tokio::task::JoinHandle<Result<()>>>,
+    proxy_shutdown: Option<CancellationToken>,
 }
 
 impl AgentSubsystem {
@@ -42,6 +43,7 @@ impl AgentSubsystem {
             intercept_task: None,
             fanotify_task: None,
             proxy_task: None,
+            proxy_shutdown: None,
         }
     }
 }
@@ -102,6 +104,12 @@ impl Subsystem for AgentSubsystem {
     }
 
     async fn shutdown(&mut self) -> Result<()> {
+        if let Some(token) = self.proxy_shutdown.take() {
+            token.cancel();
+        }
+        if let Some(task) = self.proxy_task.take() {
+            let _ = task.await;
+        }
         Ok(())
     }
 
@@ -151,13 +159,23 @@ impl AgentSubsystem {
             .unwrap_or(false)
         {
             if let Some(task) = self.proxy_task.take() {
-                if let Err(err) = task.await {
-                    self.background_failures
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    self.healthy = false;
-                    tracing::error!("mcp proxy task panicked: {err}");
+                match task.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        self.background_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.healthy = false;
+                        tracing::error!("mcp proxy task failed: {err}");
+                    }
+                    Err(err) => {
+                        self.background_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.healthy = false;
+                        tracing::error!("mcp proxy task panicked: {err}");
+                    }
                 }
             }
+            self.proxy_shutdown = None;
             self.proxy_started = false;
         }
 
@@ -216,12 +234,11 @@ impl AgentSubsystem {
             if !self.proxy_started {
                 self.proxy_started = true;
                 let ctx_cl = ctx.clone();
-                let failures = self.background_failures.clone();
-                self.proxy_task = Some(tokio::task::spawn_blocking(move || {
-                    if let Err(err) = mcp_proxy::run_proxy(&ctx_cl) {
-                        failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::error!("mcp proxy thread failed: {err}");
-                    }
+                let token = CancellationToken::new();
+                let token_cl = token.clone();
+                self.proxy_shutdown = Some(token);
+                self.proxy_task = Some(tokio::spawn(async move {
+                    mcp_proxy::run_proxy(ctx_cl, token_cl).await
                 }));
             }
         }

@@ -153,6 +153,9 @@ winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi
 default = []
 compression = ["zstd"]
 keyring = ["dep:keyring"]
+audit-trail = []
+pg-replication = []
+mysql-cdc = []
 
 [profile.release]
 lto = true

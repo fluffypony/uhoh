@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
 use tokio_postgres::NoTls;
+use tokio_util::sync::CancellationToken;
 
 use crate::db::DbGuardEntry;
 use crate::db::NewEventLedgerEntry;
@@ -14,12 +15,15 @@ use crate::subsystem::SubsystemContext;
 
 const GUARD_TICK_SECS: i64 = 30;
 static PG_DDL_CURSOR: Lazy<Mutex<HashMap<String, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-static PG_LISTEN_PAYLOADS: Lazy<Mutex<HashMap<String, std::sync::Arc<Mutex<Vec<String>>>>>> =
+struct ListenWorker {
+    queue: std::sync::Arc<Mutex<Vec<String>>>,
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+static PG_LISTEN_WORKERS: Lazy<Mutex<HashMap<String, ListenWorker>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub fn tick_postgres_guard(ctx: &SubsystemContext, guard: &DbGuardEntry) -> Result<()> {
-    ensure_listen_worker(&guard.connection_ref)?;
-
     let baseline_interval = std::time::Duration::from_secs(
         ctx.config
             .db_guard
@@ -149,6 +153,63 @@ pub fn tick_postgres_guard(ctx: &SubsystemContext, guard: &DbGuardEntry) -> Resu
     Ok(())
 }
 
+pub fn reconcile_listen_workers(guards: &[DbGuardEntry], shutdown: &CancellationToken) -> Result<()> {
+    let required: HashSet<String> = guards
+        .iter()
+        .filter(|g| g.engine == "postgres")
+        .map(|g| g.connection_ref.clone())
+        .collect();
+
+    let mut workers = PG_LISTEN_WORKERS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Postgres LISTEN worker map lock poisoned"))?;
+
+    let stale = workers
+        .keys()
+        .filter(|dsn| !required.contains(*dsn))
+        .cloned()
+        .collect::<Vec<_>>();
+    for dsn in stale {
+        if let Some(worker) = workers.remove(&dsn) {
+            worker.cancel.cancel();
+            worker.task.abort();
+        }
+    }
+
+    for dsn in required {
+        if workers.contains_key(&dsn) {
+            continue;
+        }
+        let queue = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let cancel = shutdown.child_token();
+        let queue_cl = queue.clone();
+        let dsn_cl = dsn.clone();
+        let cancel_cl = cancel.clone();
+        let task = tokio::spawn(async move {
+            run_listen_worker(dsn_cl, queue_cl, cancel_cl).await;
+        });
+        workers.insert(
+            dsn,
+            ListenWorker {
+                queue,
+                cancel,
+                task,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+pub fn shutdown_all_listen_workers() {
+    if let Ok(mut workers) = PG_LISTEN_WORKERS.lock() {
+        for (_, worker) in workers.drain() {
+            worker.cancel.cancel();
+            worker.task.abort();
+        }
+    }
+}
+
 fn poll_delete_count(connection_ref: &str, window_seconds: i64) -> Result<i64> {
     run_postgres_task(async move {
         let (client, connection) = tokio_postgres::connect(connection_ref, NoTls)
@@ -225,104 +286,136 @@ fn poll_ddl_events(connection_ref: &str, max_rows: i64) -> Result<Vec<String>> {
     }
 }
 
-fn ensure_listen_worker(connection_ref: &str) -> Result<()> {
-    let mut workers = PG_LISTEN_PAYLOADS
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Postgres LISTEN worker map lock poisoned"))?;
-    if workers.contains_key(connection_ref) {
-        return Ok(());
-    }
+async fn run_listen_worker(
+    connection_ref: String,
+    queue: std::sync::Arc<Mutex<Vec<String>>>,
+    shutdown: CancellationToken,
+) {
+    let mut backoff = std::time::Duration::from_secs(1);
+    let max_backoff = std::time::Duration::from_secs(30);
+    let mut last_seen_id = match PG_DDL_CURSOR.lock() {
+        Ok(cache) => cache.get(&connection_ref).copied().unwrap_or(0),
+        Err(_) => 0,
+    };
 
-    let buffer = std::sync::Arc::new(Mutex::new(Vec::new()));
-    workers.insert(connection_ref.to_string(), buffer.clone());
-    let dsn = connection_ref.to_string();
-    std::thread::spawn(move || {
-        if let Err(err) = run_listen_loop(&dsn, buffer) {
-            tracing::warn!("postgres LISTEN worker exited for {}: {}", scrub_ref(&dsn), err);
+    loop {
+        if shutdown.is_cancelled() {
+            return;
         }
-    });
-    Ok(())
-}
 
-fn run_listen_loop(connection_ref: &str, queue: std::sync::Arc<Mutex<Vec<String>>>) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Failed to build runtime for postgres LISTEN worker")?;
-    rt.block_on(async move {
-        let (client, connection) = tokio_postgres::connect(connection_ref, NoTls)
-            .await
-            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
-        client
-            .batch_execute("LISTEN uhoh_events;")
-            .await
-            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
-
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-
-        let mut last_seen_id = {
-            let cache = PG_DDL_CURSOR
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Postgres DDL cursor lock poisoned"))?;
-            cache.get(connection_ref).copied().unwrap_or(0)
+        let (client, connection) = match tokio_postgres::connect(&connection_ref, NoTls).await {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(
+                    "postgres LISTEN connect failed for {}: {}",
+                    scrub_ref(&connection_ref),
+                    credentials::scrub_error_message(&err.to_string())
+                );
+                if sleep_or_cancel(backoff, &shutdown).await {
+                    return;
+                }
+                backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
+                continue;
+            }
         };
 
+        if let Err(err) = client.batch_execute("LISTEN uhoh_events;").await {
+            tracing::warn!(
+                "postgres LISTEN setup failed for {}: {}",
+                scrub_ref(&connection_ref),
+                credentials::scrub_error_message(&err.to_string())
+            );
+            if sleep_or_cancel(backoff, &shutdown).await {
+                return;
+            }
+            backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
+            continue;
+        }
+
+        let connection_task = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        backoff = std::time::Duration::from_secs(1);
+
         loop {
-            let rows = client
-                .query(
-                    "SELECT id, payload::text
-                     FROM _uhoh_ddl_events
-                     WHERE id > $1
-                     ORDER BY id ASC LIMIT 64",
-                    &[&last_seen_id],
-                )
-                .await;
-            match rows {
-                Ok(values) => {
-                    if !values.is_empty() {
-                        let mut fresh = Vec::with_capacity(values.len());
-                        for row in values {
-                            let id: i64 = row.get(0);
-                            let payload: String = row.get(1);
-                            last_seen_id = last_seen_id.max(id);
-                            fresh.push(payload);
-                        }
-
-                        if let Ok(mut cache) = PG_DDL_CURSOR.lock() {
-                            cache.insert(connection_ref.to_string(), last_seen_id);
-                        }
-
-                        if let Ok(mut pending) = queue.lock() {
-                            pending.extend(fresh);
-                            if pending.len() > 1024 {
-                                let drain = pending.len().saturating_sub(1024);
-                                pending.drain(0..drain);
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    connection_task.abort();
+                    return;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    let rows = client
+                        .query(
+                            "SELECT id, payload::text
+                             FROM _uhoh_ddl_events
+                             WHERE id > $1
+                             ORDER BY id ASC
+                             LIMIT 64",
+                            &[&last_seen_id],
+                        )
+                        .await;
+                    match rows {
+                        Ok(values) => {
+                            if !values.is_empty() {
+                                let mut fresh = Vec::with_capacity(values.len());
+                                for row in values {
+                                    let id: i64 = row.get(0);
+                                    let payload: String = row.get(1);
+                                    last_seen_id = last_seen_id.max(id);
+                                    fresh.push(payload);
+                                }
+                                if let Ok(mut cache) = PG_DDL_CURSOR.lock() {
+                                    cache.insert(connection_ref.clone(), last_seen_id);
+                                }
+                                if let Ok(mut pending) = queue.lock() {
+                                    pending.extend(fresh);
+                                    if pending.len() > 1024 {
+                                        let drain = pending.len().saturating_sub(1024);
+                                        pending.drain(0..drain);
+                                    }
+                                }
                             }
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                "postgres LISTEN poll failed for {}: {}",
+                                scrub_ref(&connection_ref),
+                                credentials::scrub_error_message(&err.to_string())
+                            );
+                            connection_task.abort();
+                            break;
                         }
                     }
                 }
-                Err(e) => {
-                    return Err(anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())));
-                }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-    })
+
+        if sleep_or_cancel(backoff, &shutdown).await {
+            return;
+        }
+        backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
+    }
 }
 
 fn drain_listen_payloads(connection_ref: &str) -> Result<Vec<String>> {
-    let workers = PG_LISTEN_PAYLOADS
+    let workers = PG_LISTEN_WORKERS
         .lock()
         .map_err(|_| anyhow::anyhow!("Postgres LISTEN worker map lock poisoned"))?;
-    let Some(queue) = workers.get(connection_ref) else {
+    let Some(worker) = workers.get(connection_ref) else {
         return Ok(Vec::new());
     };
-    let mut pending = queue
+    let mut pending = worker
+        .queue
         .lock()
         .map_err(|_| anyhow::anyhow!("Postgres LISTEN payload queue lock poisoned"))?;
     Ok(std::mem::take(&mut *pending))
+}
+
+async fn sleep_or_cancel(duration: std::time::Duration, shutdown: &CancellationToken) -> bool {
+    tokio::select! {
+        _ = shutdown.cancelled() => true,
+        _ = tokio::time::sleep(duration) => false,
+    }
 }
 
 fn run_postgres_task<T, F>(fut: F) -> Result<T>

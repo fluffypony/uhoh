@@ -9,19 +9,12 @@ use zeroize::Zeroize;
 
 use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
+use tokio_util::sync::CancellationToken;
 
 const PROXY_TOKEN_FILE: &str = "server.token";
 const APPROVAL_RESPONSE_FILE_SUFFIX: &str = ".approved.json";
 
-pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Failed to build async runtime for MCP proxy")?;
-    runtime.block_on(run_proxy_async(ctx.clone()))
-}
-
-async fn run_proxy_async(ctx: SubsystemContext) -> Result<()> {
+pub async fn run_proxy(ctx: SubsystemContext, shutdown: CancellationToken) -> Result<()> {
     let _ = ensure_proxy_token(&ctx.uhoh_dir)?;
     let addr = format!("127.0.0.1:{}", ctx.config.agent.mcp_proxy_port);
     let listener = TcpListener::bind(&addr)
@@ -35,7 +28,9 @@ async fn run_proxy_async(ctx: SubsystemContext) -> Result<()> {
     }
 
     loop {
-        match listener.accept().await {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            accept = listener.accept() => match accept {
             Ok((stream, addr)) => {
                 let peer = stream
                     .peer_addr()
@@ -78,6 +73,7 @@ async fn run_proxy_async(ctx: SubsystemContext) -> Result<()> {
                     tracing::error!("failed to append mcp_proxy_accept_failed event: {err}");
                 }
                 break;
+            }
             }
         }
     }

@@ -283,6 +283,11 @@ fn mcp_proxy_dangerous_patterns_use_exact_match_semantics() {
 fn postgres_listen_worker_queries_use_monotonic_id_cursor() {
     let source = std::fs::read_to_string("src/db_guard/postgres.rs")
         .expect("read postgres guard implementation");
+    assert!(source.contains("async fn run_listen_worker"));
+    assert!(source.contains("reconcile_listen_workers"));
+    assert!(source.contains("shutdown: CancellationToken"));
+    assert!(source.contains("let mut backoff = std::time::Duration::from_secs(1);"));
+    assert!(source.contains("sleep_or_cancel"));
     assert!(source.contains("SELECT id, payload::text"));
     assert!(source.contains("WHERE id > $1"));
     assert!(source.contains("last_seen_id = last_seen_id.max(id);"));
@@ -302,4 +307,30 @@ fn db_recover_apply_output_clarifies_manual_sql_execution() {
     let source = std::fs::read_to_string("src/main.rs").expect("read main command handler");
     assert!(source.contains("Validated and decrypted recovery artifact"));
     assert!(source.contains("no automatic SQL execution performed"));
+}
+
+#[test]
+fn mcp_proxy_runs_as_async_task_with_shutdown_token() {
+    let proxy = std::fs::read_to_string("src/agent/mcp_proxy.rs").expect("read mcp proxy");
+    assert!(proxy.contains("pub async fn run_proxy"));
+    assert!(proxy.contains("shutdown: CancellationToken"));
+    assert!(proxy.contains("tokio::select!"));
+    assert!(proxy.contains("listener.accept()"));
+
+    let agent = std::fs::read_to_string("src/agent/mod.rs").expect("read agent subsystem");
+    assert!(agent.contains("proxy_shutdown: Option<CancellationToken>"));
+    assert!(agent.contains("mcp_proxy::run_proxy(ctx_cl, token_cl).await"));
+}
+
+#[test]
+fn cargo_features_include_replication_and_cdc_gates() {
+    let cargo = std::fs::read_to_string("Cargo.toml").expect("read Cargo.toml");
+    assert!(cargo.contains("audit-trail = []"));
+    assert!(cargo.contains("pg-replication = []"));
+    assert!(cargo.contains("mysql-cdc = []"));
+    assert!(cargo.contains("keyring = [\"dep:keyring\"]"));
+
+    let db_main = std::fs::read_to_string("src/main.rs").expect("read db command handler");
+    assert!(db_main.contains("requires building with --features pg-replication"));
+    assert!(db_main.contains("requires building with --features mysql-cdc"));
 }

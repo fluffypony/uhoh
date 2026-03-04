@@ -29,6 +29,7 @@ pub struct DbGuardSubsystem {
     healthy: bool,
     sqlite_versions: HashMap<String, i64>,
     mysql_states: HashMap<String, mysql::MysqlGuardState>,
+    shutdown: Option<CancellationToken>,
 }
 
 impl DbGuardSubsystem {
@@ -37,6 +38,7 @@ impl DbGuardSubsystem {
             healthy: true,
             sqlite_versions: HashMap::new(),
             mysql_states: HashMap::new(),
+            shutdown: None,
         }
     }
 }
@@ -48,6 +50,7 @@ impl Subsystem for DbGuardSubsystem {
     }
 
     async fn run(&mut self, shutdown: CancellationToken, ctx: SubsystemContext) -> Result<()> {
+        self.shutdown = Some(shutdown.clone());
         if !ctx.config.db_guard.enabled {
             tracing::info!("db_guard disabled by config");
             shutdown.cancelled().await;
@@ -73,10 +76,12 @@ impl Subsystem for DbGuardSubsystem {
                 }
             }
         }
+        postgres::shutdown_all_listen_workers();
         Ok(())
     }
 
     async fn shutdown(&mut self) -> Result<()> {
+        postgres::shutdown_all_listen_workers();
         Ok(())
     }
 
@@ -91,15 +96,51 @@ impl Subsystem for DbGuardSubsystem {
 
 impl DbGuardSubsystem {
     fn tick_guards(&mut self, ctx: &SubsystemContext, guards: &[DbGuardEntry]) -> Result<()> {
+        if let Some(token) = self.shutdown.as_ref() {
+            postgres::reconcile_listen_workers(guards, token)?;
+        }
+
         for guard in guards {
             match guard.engine.as_str() {
                 "sqlite" => {
                     sqlite_guard::tick_sqlite_guard(ctx, guard, &mut self.sqlite_versions)?;
                 }
                 "postgres" => {
+                    #[cfg(not(feature = "pg-replication"))]
+                    if guard.mode.eq_ignore_ascii_case("replication") {
+                        let mut event = new_event("db_guard", "pg_replication_mode_unsupported", "warn");
+                        event.guard_name = Some(guard.name.clone());
+                        event.detail = Some(
+                            "guard mode is replication but uhoh was built without pg-replication feature"
+                                .to_string(),
+                        );
+                        if let Err(err) = ctx.event_ledger.append(event) {
+                            tracing::error!(
+                                "failed to append pg_replication_mode_unsupported event: {err}"
+                            );
+                        }
+                        continue;
+                    }
                     postgres::tick_postgres_guard(ctx, guard)?;
                 }
                 "mysql" => {
+                    #[cfg(not(feature = "mysql-cdc"))]
+                    if guard.mode.eq_ignore_ascii_case("cdc")
+                        || guard.mode.eq_ignore_ascii_case("binlog")
+                    {
+                        let mut event = new_event("db_guard", "mysql_cdc_mode_unsupported", "warn");
+                        event.guard_name = Some(guard.name.clone());
+                        event.detail = Some(
+                            "guard mode requests mysql CDC but uhoh was built without mysql-cdc feature"
+                                .to_string(),
+                        );
+                        if let Err(err) = ctx.event_ledger.append(event) {
+                            tracing::error!(
+                                "failed to append mysql_cdc_mode_unsupported event: {err}"
+                            );
+                        }
+                        continue;
+                    }
                     let state = self.mysql_states.entry(guard.name.clone()).or_default();
                     mysql::tick_mysql_guard(ctx, guard, state)?;
                 }
