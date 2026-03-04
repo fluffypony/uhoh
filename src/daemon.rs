@@ -100,7 +100,8 @@ impl DaemonMaintenanceSubsystem {
             self.compaction_index = self.compaction_index.wrapping_add(1);
         }
 
-        let backup_interval = std::time::Duration::from_secs(ctx.config.update.check_interval_hours * 3600);
+        let backup_interval =
+            std::time::Duration::from_secs(ctx.config.update.check_interval_hours * 3600);
         let do_backup = self
             .last_backup
             .map(|t| t.elapsed() >= backup_interval)
@@ -112,8 +113,10 @@ impl DaemonMaintenanceSubsystem {
             let backup_path = backups_dir.join(format!("uhoh-{ts}.db"));
             let db_for_backup = ctx.database.clone();
             let backup_path_cl = backup_path.clone();
-            let backup_res =
-                tokio::task::spawn_blocking(move || database_backup_to(&db_for_backup, &backup_path_cl)).await;
+            let backup_res = tokio::task::spawn_blocking(move || {
+                database_backup_to(&db_for_backup, &backup_path_cl)
+            })
+            .await;
             if let Err(e) = backup_res.unwrap_or_else(|e| Err(anyhow::anyhow!("{e:?}"))) {
                 tracing::warn!("Database backup failed: {}", e);
             } else {
@@ -136,8 +139,13 @@ impl DaemonMaintenanceSubsystem {
         let mut tick_sys = sysinfo::System::new();
         tick_sys.refresh_memory();
         if crate::ai::should_run_ai_with(&ctx.config.ai, &tick_sys) {
-            process_ai_summary_queue(&ctx.uhoh_dir, &ctx.database, &ctx.config, &ctx.server_event_tx)
-                .await;
+            process_ai_summary_queue(
+                &ctx.uhoh_dir,
+                &ctx.database,
+                &ctx.config,
+                &ctx.server_event_tx,
+            )
+            .await;
         }
 
         self.sidecar_check_interval =
@@ -154,7 +162,8 @@ impl DaemonMaintenanceSubsystem {
                 let pin = ctx.config.sidecar_update.pin_version.clone();
                 let event_tx = ctx.server_event_tx.clone();
                 tokio::task::spawn_blocking(move || {
-                    let before = crate::ai::sidecar_update::read_manifest(&sidecar_dir).map(|m| m.version);
+                    let before =
+                        crate::ai::sidecar_update::read_manifest(&sidecar_dir).map(|m| m.version);
                     match crate::ai::sidecar_update::run_update_check(
                         &sidecar_dir,
                         &repo,
@@ -167,10 +176,11 @@ impl DaemonMaintenanceSubsystem {
                             let after = crate::ai::sidecar_update::read_manifest(&sidecar_dir)
                                 .map(|m| m.version)
                                 .unwrap_or_else(|| "unknown".to_string());
-                            let _ = event_tx.send(crate::server::events::ServerEvent::SidecarUpdated {
-                                old_version: before,
-                                new_version: after,
-                            });
+                            let _ =
+                                event_tx.send(crate::server::events::ServerEvent::SidecarUpdated {
+                                    old_version: before,
+                                    new_version: after,
+                                });
                         }
                         Ok(false) => {}
                         Err(e) => tracing::warn!("Sidecar update check failed: {}", e),
@@ -621,58 +631,28 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 ).await;
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                // Live-reload configuration and update relevant timers
-                if let Ok(new_cfg) = Config::load(&config_path) {
-                    // Update live-safe fields
-                    if new_cfg.watch.debounce_quiet_secs != config.watch.debounce_quiet_secs {
-                        debounce_interval = tokio::time::interval(Duration::from_secs(new_cfg.watch.debounce_quiet_secs));
-                    }
-                    if new_cfg.update.check_interval_hours != config.update.check_interval_hours {
-                        update_check_interval = tokio::time::interval(Duration::from_secs(new_cfg.update.check_interval_hours * 3600));
-                    }
-                    config = new_cfg;
-                }
-                // Periodic DB polling runs in blocking task to avoid stalling the async loop.
-                let db_for_poll = database.clone();
-                let db_projects = match tokio::task::spawn_blocking(move || db_for_poll.list_projects()).await {
-                    Ok(Ok(v)) => v,
-                    Ok(Err(e)) => {
-                        tracing::warn!("Failed to poll projects on tick: {}", e);
-                        Vec::new()
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to join periodic project polling task: {:?}", e);
-                        Vec::new()
-                    }
-                };
+                let tick = run_tick_maintenance(
+                    &config,
+                    &config_path,
+                    &update_trigger,
+                    &database,
+                    &event_ledger,
+                    &subsystem_manager,
+                    &uhoh_dir,
+                    &server_event_tx,
+                    &mut watcher_handle,
+                    &mut project_states,
+                ).await;
 
-                // Periodic tasks: check for moved folders and watcher registration.
-                check_moved_folders(&db_projects, &database, &mut watcher_handle, &mut project_states);
-                check_for_new_projects(&db_projects, &mut watcher_handle, &mut project_states, &server_event_tx);
+                if let Some(new_debounce) = tick.updated_debounce {
+                    debounce_interval = new_debounce;
+                }
+                if let Some(new_update_interval) = tick.updated_update_interval {
+                    update_check_interval = new_update_interval;
+                }
+                config = tick.updated_config;
 
-                // Remove watchers and state for projects removed from DB
-                use std::collections::HashSet;
-                let db_paths: HashSet<String> = db_projects.iter().map(|p| p.current_path.clone()).collect();
-                let mut to_remove: Vec<String> = Vec::new();
-                for key in project_states.keys() {
-                    if !db_paths.contains(key) {
-                        to_remove.push(key.clone());
-                    }
-                }
-                for key in to_remove {
-                    if let Some(state) = project_states.get(&key) {
-                        let _ = server_event_tx.send(crate::server::events::ServerEvent::ProjectRemoved {
-                            project_hash: state.hash.clone(),
-                        });
-                    }
-                    let _ = watcher_handle.unwatch(std::path::Path::new(&key));
-                    project_states.remove(&key);
-                    tracing::info!("Stopped watching removed project: {}", key);
-                }
-                // Attempt to recover watcher if it died earlier
-                // Attempt watcher recovery only when we get WatcherDied events; here keep lightweight
-                // If an update has been applied (trigger file present), restart like binary change
-                if update_trigger.exists() {
+                if tick.should_restart_for_update {
                     tracing::info!("Update ready trigger detected; restarting daemon");
                     let _ = std::fs::remove_file(&update_trigger);
                     #[cfg(unix)]
@@ -703,16 +683,6 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                         }
                     }
                     break;
-                }
-                {
-                    let ctx = SubsystemContext {
-                        database: database.clone(),
-                        event_ledger: event_ledger.clone(),
-                        config: config.clone(),
-                        uhoh_dir: uhoh_dir.clone(),
-                        server_event_tx: server_event_tx.clone(),
-                    };
-                    subsystem_manager.lock().await.tick_restart(ctx).await;
                 }
             }
             _ = update_check_interval.tick() => {
@@ -761,6 +731,13 @@ struct ProjectDaemonState {
     last_change_at: Option<Instant>,
 }
 
+struct TickOutcome {
+    updated_config: Config,
+    updated_debounce: Option<tokio::time::Interval>,
+    updated_update_interval: Option<tokio::time::Interval>,
+    should_restart_for_update: bool,
+}
+
 fn handle_watch_event(
     states: &mut HashMap<String, ProjectDaemonState>,
     event: &WatchEvent,
@@ -801,6 +778,93 @@ fn handle_watch_event(
             state.last_change_at = Some(now);
             break;
         }
+    }
+}
+
+async fn run_tick_maintenance(
+    config: &Config,
+    config_path: &Path,
+    update_trigger: &Path,
+    database: &Arc<Database>,
+    event_ledger: &EventLedger,
+    subsystem_manager: &Arc<Mutex<SubsystemManager>>,
+    uhoh_dir: &Path,
+    server_event_tx: &broadcast::Sender<crate::server::events::ServerEvent>,
+    watcher_handle: &mut notify::RecommendedWatcher,
+    project_states: &mut HashMap<String, ProjectDaemonState>,
+) -> TickOutcome {
+    let mut next_config = config.clone();
+    let mut next_debounce = None;
+    let mut next_update = None;
+
+    if let Ok(new_cfg) = Config::load(config_path) {
+        if new_cfg.watch.debounce_quiet_secs != config.watch.debounce_quiet_secs {
+            next_debounce = Some(tokio::time::interval(Duration::from_secs(
+                new_cfg.watch.debounce_quiet_secs,
+            )));
+        }
+        if new_cfg.update.check_interval_hours != config.update.check_interval_hours {
+            next_update = Some(tokio::time::interval(Duration::from_secs(
+                new_cfg.update.check_interval_hours * 3600,
+            )));
+        }
+        next_config = new_cfg;
+    }
+
+    let db_for_poll = database.clone();
+    let db_projects = match tokio::task::spawn_blocking(move || db_for_poll.list_projects()).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::warn!("Failed to poll projects on tick: {}", e);
+            Vec::new()
+        }
+        Err(e) => {
+            tracing::warn!("Failed to join periodic project polling task: {:?}", e);
+            Vec::new()
+        }
+    };
+
+    check_moved_folders(&db_projects, database, watcher_handle, project_states);
+    check_for_new_projects(
+        &db_projects,
+        watcher_handle,
+        project_states,
+        server_event_tx,
+    );
+
+    use std::collections::HashSet;
+    let db_paths: HashSet<String> = db_projects.iter().map(|p| p.current_path.clone()).collect();
+    let mut to_remove: Vec<String> = Vec::new();
+    for key in project_states.keys() {
+        if !db_paths.contains(key) {
+            to_remove.push(key.clone());
+        }
+    }
+    for key in to_remove {
+        if let Some(state) = project_states.get(&key) {
+            let _ = server_event_tx.send(crate::server::events::ServerEvent::ProjectRemoved {
+                project_hash: state.hash.clone(),
+            });
+        }
+        let _ = watcher_handle.unwatch(std::path::Path::new(&key));
+        project_states.remove(&key);
+        tracing::info!("Stopped watching removed project: {}", key);
+    }
+
+    let ctx = SubsystemContext {
+        database: database.clone(),
+        event_ledger: event_ledger.clone(),
+        config: next_config.clone(),
+        uhoh_dir: uhoh_dir.to_path_buf(),
+        server_event_tx: server_event_tx.clone(),
+    };
+    subsystem_manager.lock().await.tick_restart(ctx).await;
+
+    TickOutcome {
+        updated_config: next_config,
+        updated_debounce: next_debounce,
+        updated_update_interval: next_update,
+        should_restart_for_update: update_trigger.exists(),
     }
 }
 

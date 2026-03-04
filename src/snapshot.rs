@@ -554,8 +554,13 @@ pub fn create_snapshot(
                     // Enforce size cap and skip binary
                     if prev.size > MAX_AI_DIFF_FILE_SIZE {
                         let note = format!("--- {path}\n[File too large for AI diff]\n");
-                        diff_chars = diff_chars.saturating_add(note.len());
-                        diff_chunks.push_str(&note);
+                        append_diff_chunk(
+                            &mut diff_chunks,
+                            &mut diff_chars,
+                            max_diff_chars,
+                            &mut diff_truncated,
+                            &note,
+                        );
                         if diff_chars >= max_diff_chars {
                             if !diff_truncated {
                                 diff_chunks.push_str("\n[Diff truncated]\n");
@@ -573,8 +578,13 @@ pub fn create_snapshot(
                             || content_inspector::inspect(head_new).is_binary()
                         {
                             let note = format!("--- {path}\n[Binary file]\n");
-                            diff_chars = diff_chars.saturating_add(note.len());
-                            diff_chunks.push_str(&note);
+                            append_diff_chunk(
+                                &mut diff_chunks,
+                                &mut diff_chars,
+                                max_diff_chars,
+                                &mut diff_truncated,
+                                &note,
+                            );
                             if diff_chars >= max_diff_chars {
                                 if !diff_truncated {
                                     diff_chunks.push_str("\n[Diff truncated]\n");
@@ -588,8 +598,13 @@ pub fn create_snapshot(
                         {
                             let d = similar::TextDiff::from_lines(&old_s, &new_s);
                             let header = format!("--- a/{path}\n+++ b/{path}\n");
-                            diff_chars = diff_chars.saturating_add(header.len());
-                            diff_chunks.push_str(&header);
+                            append_diff_chunk(
+                                &mut diff_chunks,
+                                &mut diff_chars,
+                                max_diff_chars,
+                                &mut diff_truncated,
+                                &header,
+                            );
                             for hunk in d.unified_diff().context_radius(2).iter_hunks() {
                                 if diff_chars >= max_diff_chars {
                                     if !diff_truncated {
@@ -599,8 +614,13 @@ pub fn create_snapshot(
                                     break;
                                 }
                                 let hunk_header = format!("{}\n", hunk.header());
-                                diff_chars = diff_chars.saturating_add(hunk_header.len());
-                                diff_chunks.push_str(&hunk_header);
+                                append_diff_chunk(
+                                    &mut diff_chunks,
+                                    &mut diff_chars,
+                                    max_diff_chars,
+                                    &mut diff_truncated,
+                                    &hunk_header,
+                                );
                                 for change in hunk.iter_changes() {
                                     if diff_chars >= max_diff_chars {
                                         if !diff_truncated {
@@ -614,10 +634,14 @@ pub fn create_snapshot(
                                         similar::ChangeTag::Insert => '+',
                                         similar::ChangeTag::Equal => ' ',
                                     };
-                                    diff_chars =
-                                        diff_chars.saturating_add(1 + change.to_string().len());
-                                    diff_chunks.push(sign);
-                                    diff_chunks.push_str(&change.to_string());
+                                    let line = format!("{}{}", sign, change);
+                                    append_diff_chunk(
+                                        &mut diff_chunks,
+                                        &mut diff_chars,
+                                        max_diff_chars,
+                                        &mut diff_truncated,
+                                        &line,
+                                    );
                                 }
                                 if diff_truncated {
                                     break;
@@ -680,6 +704,41 @@ pub fn create_snapshot(
     Ok(Some(snapshot_id))
 }
 
+fn append_diff_chunk(
+    out: &mut String,
+    chars_used: &mut usize,
+    max_chars: usize,
+    truncated: &mut bool,
+    chunk: &str,
+) {
+    if *truncated || chunk.is_empty() {
+        return;
+    }
+    if *chars_used >= max_chars {
+        out.push_str("\n[Diff truncated]\n");
+        *truncated = true;
+        return;
+    }
+
+    let remaining = max_chars.saturating_sub(*chars_used);
+    if chunk.len() <= remaining {
+        out.push_str(chunk);
+        *chars_used = chars_used.saturating_add(chunk.len());
+        return;
+    }
+
+    let mut cut = remaining;
+    while cut > 0 && !chunk.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    if cut > 0 {
+        out.push_str(&chunk[..cut]);
+        *chars_used = chars_used.saturating_add(cut);
+    }
+    out.push_str("\n[Diff truncated]\n");
+    *truncated = true;
+}
+
 pub fn mtime_to_i64(t: SystemTime) -> i64 {
     match t.duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs() as i64,
@@ -701,6 +760,17 @@ pub fn i64_to_mtime(secs: i64) -> SystemTime {
     } else {
         let abs_secs = (secs as i128).unsigned_abs().min(u64::MAX as u128) as u64;
         std::time::UNIX_EPOCH - std::time::Duration::from_secs(abs_secs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ai_diff_truncation_marker_present() {
+        let source = std::fs::read_to_string("src/snapshot.rs").expect("read snapshot source");
+        assert!(source.contains("[Diff truncated]"));
+        assert!(source.contains("is_char_boundary"));
+        assert!(source.contains("max_context_tokens.saturating_mul(4)"));
     }
 }
 
