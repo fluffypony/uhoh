@@ -305,13 +305,15 @@ async fn main() -> Result<()> {
                     std::process::Command::new(&editor).arg(&config_path).status()?;
                 }
                 Some("set") => {
-                    let mut args = std::env::args().skip_while(|a| a != "config").collect::<Vec<_>>();
                     // Expect: uhoh config set <key> <value>
-                    if args.len() < 4 {
+                    let args: Vec<String> = std::env::args().collect();
+                    // Find the position of "set" and read two following tokens
+                    let set_pos = args.iter().position(|a| a == "set");
+                    if set_pos.is_none() || args.len() <= set_pos.unwrap() + 2 {
                         println!("Usage: uhoh config set <key> <value>");
                     } else {
-                        let key = args[2].clone();
-                        let value = args[3].clone();
+                        let key = args[set_pos.unwrap() + 1].clone();
+                        let value = args[set_pos.unwrap() + 2].clone();
                         let content = if config_path.exists() { std::fs::read_to_string(&config_path)? } else { String::new() };
                         let mut doc: toml_edit::DocumentMut = content.parse().unwrap_or_else(|_| toml_edit::DocumentMut::new());
                         let parts: Vec<&str> = key.split('.').collect();
@@ -469,6 +471,9 @@ fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bool, re
                         let dst = uhoh_dir.join("uhoh.db");
                         std::fs::copy(&src, &dst)?;
                         println!("Restored database from {}", src.display());
+                        // Remove WAL/SHM to avoid carrying corruption state
+                        let _ = std::fs::remove_file(uhoh_dir.join("uhoh.db-wal"));
+                        let _ = std::fs::remove_file(uhoh_dir.join("uhoh.db-shm"));
                     } else {
                         eprintln!("No backups found to restore.");
                     }

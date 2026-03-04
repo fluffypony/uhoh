@@ -53,7 +53,17 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
             let name_str = name.to_string_lossy();
 
             // Skip temp files
-            if name_str.contains(".tmp.") {
+            if name_str.starts_with(".tmp.") {
+                // clean up stale temp files in prefix dirs (>10 min)
+                if let Ok(meta) = blob_entry.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if let Ok(age) = modified.elapsed() {
+                            if age > std::time::Duration::from_secs(600) {
+                                let _ = std::fs::remove_file(blob_entry.path());
+                            }
+                        }
+                    }
+                }
                 continue;
             }
 

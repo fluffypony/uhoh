@@ -4,6 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 #[derive(Clone, Debug)]
@@ -111,7 +112,8 @@ struct GlobalSidecar {
     last_used: Instant,
 }
 
-static GLOBAL_SIDECAR: Lazy<Mutex<Option<GlobalSidecar>>> = Lazy::new(|| Mutex::new(None));
+pub static GLOBAL_SIDECAR: Lazy<Mutex<Option<GlobalSidecar>>> = Lazy::new(|| Mutex::new(None));
+static SIDECAR_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Get or spawn a persistent sidecar and return its port.
 pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs: u64) -> Result<u16> {
@@ -146,9 +148,14 @@ pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs:
         *guard = Some(GlobalSidecar { child, port, last_used: Instant::now() });
     }
 
+    // Bump instance id so any old monitor thread exits
+    let my_instance_id = SIDECAR_INSTANCE_ID.fetch_add(1, Ordering::SeqCst) + 1;
     let idle = idle_shutdown_secs.max(60);
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(30));
+        // If a newer sidecar instance was spawned, exit this monitor thread
+        let current_id = SIDECAR_INSTANCE_ID.load(Ordering::SeqCst);
+        if current_id != my_instance_id { return; }
         let mut kill = false;
         {
             let guard = GLOBAL_SIDECAR.lock().unwrap();
@@ -171,6 +178,16 @@ pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs:
     });
 
     Ok(port)
+}
+
+/// Shutdown and clean up the global sidecar if running.
+pub fn shutdown_global_sidecar() {
+    if let Ok(mut guard) = GLOBAL_SIDECAR.lock() {
+        if let Some(mut gs) = guard.take() {
+            let _ = gs.child.kill();
+            let _ = gs.child.wait();
+        }
+    }
 }
 
 fn detect_backend(uhoh_dir: &Path) -> Result<Backend> {

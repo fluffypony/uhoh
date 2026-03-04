@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+const MARKER_MAGIC: &[u8; 4] = b"UHOH";
+const MARKER_VERSION: u8 = 1;
+
 /// Create a marker file with a unique random project identity.
 /// Returns the hex-encoded project hash (64 chars).
 pub fn create_marker(project_path: &Path) -> Result<String> {
@@ -13,7 +16,12 @@ pub fn create_marker(project_path: &Path) -> Result<String> {
     if let Some(parent) = marker_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&marker_path, &id_bytes)
+    // Write with magic + version + id
+    let mut buf = Vec::with_capacity(37);
+    buf.extend_from_slice(MARKER_MAGIC);
+    buf.push(MARKER_VERSION);
+    buf.extend_from_slice(&id_bytes);
+    std::fs::write(&marker_path, &buf)
         .with_context(|| format!("Failed to write marker: {}", marker_path.display()))?;
 
     Ok(id_hex)
@@ -24,7 +32,10 @@ pub fn read_marker(project_path: &Path) -> Result<Option<String>> {
     let marker_path = marker_path_for(project_path);
     match std::fs::read(&marker_path) {
         Ok(bytes) => {
-            if bytes.len() == 32 {
+            if bytes.len() == 37 && &bytes[..4] == MARKER_MAGIC && bytes[4] == MARKER_VERSION {
+                Ok(Some(hex::encode(&bytes[5..37])))
+            } else if bytes.len() == 32 {
+                // Legacy
                 Ok(Some(hex::encode(&bytes)))
             } else {
                 tracing::warn!(

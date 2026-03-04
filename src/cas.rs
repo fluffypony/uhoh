@@ -80,7 +80,8 @@ pub fn store_blob(blob_root: &Path, content: &[u8]) -> Result<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&blob_path, std::fs::Permissions::from_mode(0o600)).ok();
+        // Standardize on read-only
+        std::fs::set_permissions(&blob_path, std::fs::Permissions::from_mode(0o400)).ok();
     }
 
     Ok(hash)
@@ -128,6 +129,14 @@ pub fn store_blob_from_file(
         return Ok((hash, file_size, StorageMethod::Copy));
     }
 
+    // Enforce size limits: decide if we should store or hash-only based on type
+    let is_binary = {
+        let head = &first_chunk[..first_chunk.len().min(8192)];
+        content_inspector::inspect(head).is_binary()
+    };
+    let cfg_limit = if is_binary { crate::config::default_max_binary_blob_bytes() } else { crate::config::default_max_text_blob_bytes() } as u64;
+    let effective_limit = std::cmp::min(cfg_limit, max_copy_blob_bytes);
+
     // Try reflink
     if reflink_copy::reflink(file_path, &blob_path).is_ok() {
         set_blob_readonly(&blob_path);
@@ -135,7 +144,7 @@ pub fn store_blob_from_file(
     }
 
     // Try full copy if within size limit
-    if file_size <= max_copy_blob_bytes {
+    if file_size <= effective_limit {
         // Write to temp then rename for atomicity
         let tmp_dir = blob_root.join("tmp");
         std::fs::create_dir_all(&tmp_dir)?;
@@ -175,8 +184,8 @@ pub fn store_blob_from_file(
 
     // Could not store, return hash only
     tracing::debug!(
-        "Not storing {} ({} bytes): reflink/hardlink/copy failed or size exceeds limit",
-        file_path.display(), file_size
+        "Not storing {} ({} bytes): reflink/copy failed or size exceeds limit ({} bytes)",
+        file_path.display(), file_size, effective_limit
     );
     Ok((hash, file_size, StorageMethod::None))
 }
@@ -238,7 +247,18 @@ fn maybe_compress(data: &[u8]) -> Vec<u8> {
     {
         // Prefix with a robust magic header to avoid collisions with raw data
         const COMPRESSION_MAGIC: &[u8; 4] = b"UHZS"; // "UH" + "ZS" (zstd)
-        let compressed = zstd::encode_all(std::io::Cursor::new(data), 3)
+        // Read config compress level if available; otherwise default to 3
+        let level = {
+            if let Some(home) = dirs::home_dir() {
+                let cfg_path = home.join(".uhoh").join("config.toml");
+                if let Ok(cfg_str) = std::fs::read_to_string(&cfg_path) {
+                    if let Ok(conf) = toml::from_str::<crate::config::Config>(&cfg_str) {
+                        conf.storage.compress_level
+                    } else { 3 }
+                } else { 3 }
+            } else { 3 }
+        };
+        let compressed = zstd::encode_all(std::io::Cursor::new(data), level)
             .unwrap_or_else(|_| data.to_vec());
         if compressed.len() < data.len() {
             let mut out = Vec::with_capacity(compressed.len() + 4);

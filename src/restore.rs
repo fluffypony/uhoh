@@ -127,16 +127,11 @@ pub fn cmd_restore(
         anyhow::bail!("Cannot restore: required blobs missing");
     }
 
-    // Delete files (only those tracked by uhoh, not untracked)
-    for path in &to_delete {
-        let full = project_path.join(path);
-        if full.exists() {
-            std::fs::remove_file(&full)
-                .with_context(|| format!("Failed to delete: {}", full.display()))?;
-        }
-    }
+    // Non-atomic deletions replaced by staged restore into temp dir followed by atomic renames
+    let restore_tmp = project_path.join(".uhoh-restore-tmp");
+    std::fs::create_dir_all(&restore_tmp)?;
 
-    // Restore files
+    // Stage restored files into temp directory
     let bar = indicatif::ProgressBar::new(to_restore.len() as u64);
     bar.set_style(
         indicatif::ProgressStyle::default_bar()
@@ -151,8 +146,8 @@ pub fn cmd_restore(
             tracing::warn!("Skipping suspicious path: {}", path);
             continue;
         }
-        // Join relative path directly under project root
-        let full_path = project_path.join(path);
+        // Stage under temp dir
+        let full_path = restore_tmp.join(path);
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -172,6 +167,22 @@ pub fn cmd_restore(
         bar.inc(1);
     }
     bar.finish_and_clear();
+    // Phase 2: Apply staged files atomically and delete tracked files missing from target
+    for path in &to_delete {
+        let dst = project_path.join(path);
+        if dst.exists() { let _ = std::fs::remove_file(&dst); }
+    }
+    for (path, _, _) in &to_restore {
+        let staged = restore_tmp.join(path);
+        let final_dest = project_path.join(path);
+        if let Some(parent) = final_dest.parent() { std::fs::create_dir_all(parent)?; }
+        // If a file with same name exists (not in to_delete), replace it
+        if final_dest.exists() { let _ = std::fs::remove_file(&final_dest); }
+        std::fs::rename(&staged, &final_dest)
+            .with_context(|| format!("Failed to move {} -> {}", staged.display(), final_dest.display()))?;
+    }
+    // Cleanup staging
+    let _ = std::fs::remove_dir_all(&restore_tmp);
 
     let snap_id_str = cas::id_to_base58(snap.snapshot_id);
     println!(

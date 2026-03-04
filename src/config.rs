@@ -151,8 +151,8 @@ fn default_keep_hourly_days() -> u64 { 30 }
 fn default_keep_daily_days() -> u64 { 180 }
 fn default_keep_weekly_beyond() -> bool { true }
 fn default_emergency_expire_hours() -> u64 { 48 }
-fn default_max_binary_blob_bytes() -> u64 { 1_048_576 }
-fn default_max_text_blob_bytes() -> u64 { 52_428_800 }
+pub fn default_max_binary_blob_bytes() -> u64 { 1_048_576 }
+pub fn default_max_text_blob_bytes() -> u64 { 52_428_800 }
 fn default_max_copy_blob_bytes() -> u64 { 50 * 1024 * 1024 }
 fn default_storage_limit_fraction() -> f64 { 0.15 }
 fn default_storage_min_bytes() -> u64 { 524_288_000 } // 500MB floor

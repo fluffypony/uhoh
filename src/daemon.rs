@@ -26,7 +26,9 @@ pub fn spawn_detached_daemon() -> Result<()> {
         // Detach from controlling terminal
         unsafe {
             cmd.pre_exec(|| {
-                libc::setsid();
+                if libc::setsid() == -1 {
+                    eprintln!("Warning: setsid() failed; daemon may not fully detach");
+                }
                 Ok(())
             });
         }
@@ -74,11 +76,17 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
 
     #[cfg(windows)]
     {
-        // On Windows, use taskkill
-        std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .status()
-            .ok();
+        // Try graceful termination first
+        let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string()]).status();
+        // Wait briefly for process to end
+        for _ in 0..50 {
+            if !crate::platform::is_uhoh_process_alive(pid) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if crate::platform::is_uhoh_process_alive(pid) {
+            // Force kill as fallback
+            let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).status();
+        }
     }
 
     std::fs::remove_file(&pid_path).ok();
@@ -91,9 +99,28 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
     let uhoh_dir = uhoh_dir.to_path_buf();
     let config = Config::load(&uhoh_dir.join("config.toml"))?;
 
-    // Write PID file
+    // Write PID file with exclusive lock to avoid races
     let pid_path = uhoh_dir.join("daemon.pid");
-    std::fs::write(&pid_path, std::process::id().to_string())?;
+    let pid_file = std::fs::OpenOptions::new().write(true).create(true).open(&pid_path)?;
+    #[cfg(unix)]
+    {
+        use fs2::FileExt;
+        // If another daemon holds the lock, this will fail
+        pid_file.try_lock_exclusive()?;
+    }
+    // Truncate and write PID
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt as _;
+        let _ = pid_file.set_len(0);
+        let _ = pid_file.write_at(std::process::id().to_string().as_bytes(), 0);
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::Write as _;
+        let mut f = &pid_file;
+        let _ = f.write_all(std::process::id().to_string().as_bytes());
+    }
 
     // Set up logging to file
     let log_path = uhoh_dir.join("daemon.log");
@@ -174,6 +201,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
+        unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN); } // ignore SIGHUP
         let mut sigterm = signal(SignalKind::terminate())?;
         let shutdown_tx2 = shutdown_tx.clone();
         tokio::spawn(async move {
@@ -344,6 +372,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
             }
             _ = shutdown_rx.recv() => {
                 tracing::info!("Shutdown signal received");
+                // Attempt to shutdown AI sidecar if running
+                crate::ai::sidecar::shutdown_global_sidecar();
                 break;
             }
         }
@@ -401,6 +431,12 @@ fn handle_watch_event(
     // Find which project this path belongs to
     for (project_path, state) in states.iter_mut() {
         if path.starts_with(project_path) {
+            // Ignore files matched by ignore rules to avoid event storms
+            let matcher = crate::ignore_rules::build_walker(Path::new(project_path));
+            // Quick check: if parent .git directory or obvious ignores
+            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                if name == ".git" || name == "node_modules" || name == "target" { continue; }
+            }
             state.pending_changes.insert(path.clone());
             let now = Instant::now();
             if state.first_change_at.is_none() { state.first_change_at = Some(now); }
@@ -492,28 +528,28 @@ fn check_moved_folders(
     watcher: &mut notify::RecommendedWatcher,
     states: &mut HashMap<String, ProjectDaemonState>,
 ) {
+    static mut FAILURES: Option<std::collections::HashMap<String, u32>> = None;
+    let failures = unsafe { FAILURES.get_or_insert_with(Default::default) };
     if let Ok(projects) = database.list_projects() {
         for project in &projects {
             let path = Path::new(&project.current_path);
             if !path.exists() {
                 // Try to relocate by scanning common parent directories for the .uhoh marker
+                let count = failures.entry(project.hash.clone()).or_insert(0);
+                *count = count.saturating_add(1);
+                // Exponential backoff: only scan on powers of two up to a cap
+                if *count > 32 && (*count & (*count - 1)) != 0 { continue; }
+
                 let mut candidates: Vec<PathBuf> = Vec::new();
                 if let Some(parent) = Path::new(&project.current_path).parent() {
-                    // Scan parent bounded to depth 3
-                    use ignore::WalkBuilder;
-                    let walker = WalkBuilder::new(parent)
-                        .max_depth(Some(3))
-                        .hidden(false)
-                        .build();
-                    let mut seen = std::collections::HashSet::new();
-                    for entry in walker.flatten() {
-                        let p = entry.path().to_path_buf();
-                        if entry.file_type().map_or(false, |ft| ft.is_dir()) {
-                            if seen.insert(p.clone()) {
-                                candidates.push(p);
+                    // Only scan immediate parent to limit scope
+                    let _ = std::fs::read_dir(parent).map(|iter| {
+                        for e in iter.flatten() {
+                            if e.file_type().map_or(false, |ft| ft.is_dir()) {
+                                candidates.push(e.path());
                             }
                         }
-                    }
+                    });
                 }
                 let found = crate::marker::scan_for_markers(&candidates);
                 for (hash, new_path) in found {
@@ -533,13 +569,15 @@ fn check_moved_folders(
                     }
                 }
 
-                // If still not found, warn once per tick
+                // If still not found, warn once per tick; also remove orphaned state
                 if !Path::new(&project.current_path).exists() {
                     tracing::warn!(
                         "Project {} path missing: {}",
                         &project.hash[..project.hash.len().min(12)],
                         project.current_path
                     );
+                    // Remove from in-memory state to avoid crashes
+                    states.remove(&project.current_path);
                 }
             }
         }

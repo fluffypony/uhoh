@@ -198,7 +198,19 @@ pub fn create_snapshot(
         {
             // Check if this looks like a git branch switch (suppress false positives)
             if !is_likely_git_operation(project_path) {
-                "emergency-delete"
+                // Apply a short cooldown to avoid repeated emergency snapshots
+                static mut LAST_EMERGENCY_AT: Option<std::time::Instant> = None;
+                let now = std::time::Instant::now();
+                let fire = unsafe {
+                    match LAST_EMERGENCY_AT {
+                        Some(t) => now.duration_since(t) > std::time::Duration::from_secs(30),
+                        None => true,
+                    }
+                };
+                if fire {
+                    unsafe { LAST_EMERGENCY_AT = Some(now); }
+                    "emergency-delete"
+                } else { trigger }
             } else {
                 trigger
             }
@@ -218,7 +230,7 @@ pub fn create_snapshot(
     let msg = message.unwrap_or("");
     let pinned = false;
 
-    let rowid = database.create_snapshot(
+    let (rowid, snapshot_id) = database.create_snapshot(
         project_hash,
         snapshot_id,
         &timestamp,
@@ -229,15 +241,6 @@ pub fn create_snapshot(
         &deleted_for_manifest,
         &tree_hashes,
     )?;
-
-    // Resolve actual snapshot_id from DB for logging and operations
-    let snapshot_id: u64 = {
-        let conn = database;
-        // small helper query
-        if let Ok(snaps) = conn.list_snapshots(project_hash) {
-            if let Some(s) = snaps.iter().find(|s| s.rowid == rowid) { s.snapshot_id } else { 0 }
-        } else { 0 }
-    };
 
     // If there is an active operation for this project and this was not a pre-restore snapshot,
     // keep last_snapshot_id updated so undo has a clear end.

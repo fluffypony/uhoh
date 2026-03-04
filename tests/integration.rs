@@ -62,7 +62,7 @@ fn test_snapshot_creation_and_query() {
         ("README.md".to_string(), "hash2".to_string(), 50u64, true, false, None, 1),
     ];
 
-    let rowid = db
+    let (rowid, _sid) = db
         .create_snapshot("proj1", snap_id, "2025-01-01T00:00:00Z", "manual", "test", false, &files, &[], &[])
         .unwrap();
 

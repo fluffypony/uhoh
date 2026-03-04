@@ -89,7 +89,10 @@ impl Database {
             .lock()
             .unwrap_or_else(|poisoned| {
                 tracing::warn!("Database mutex was poisoned, recovering");
-                poisoned.into_inner()
+                let mut inner = poisoned.into_inner();
+                // Attempt to rollback any in-progress transaction
+                let _ = inner.execute_batch("ROLLBACK");
+                inner
             })
     }
 
@@ -387,7 +390,7 @@ impl Database {
         files: &[SnapFile],
         deleted: &[DeletedFile],
         tree_hashes: &[TreeHash],
-    ) -> Result<i64> {
+    ) -> Result<(i64, u64)> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
@@ -460,7 +463,7 @@ impl Database {
         );
 
         tx.commit()?;
-        Ok(rowid)
+        Ok((rowid, snapshot_id))
     }
 
     pub fn list_snapshots(&self, project_hash: &str) -> Result<Vec<SnapshotRow>> {

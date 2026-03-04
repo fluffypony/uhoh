@@ -95,10 +95,16 @@ pub fn cmd_gitstash(
     if let Some(mut sin) = upd.stdin.take() {
         use std::io::Write as _;
         for (path, blob_hash) in &tree_entries {
+            // Path traversal guard
+            let p = std::path::Path::new(path);
+            if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                tracing::warn!("Skipping suspicious path in git stash: {}", path);
+                continue;
+            }
             let mode = if exec_map.contains(path.as_str()) { "100755" } else { "100644" };
             // Format: "<mode> <hash>\t<path>\n"
             writeln!(sin, "{} {}\t{}", mode, blob_hash, path)?;
-        }
+    }
     }
     let status = upd.wait()?;
     if !status.success() {
@@ -111,25 +117,33 @@ pub fn cmd_gitstash(
     let head_output = run_git_output(project_path, &["rev-parse", "HEAD"])?;
     let head_commit = head_output.trim().to_string();
 
-    // Step 4: Create a commit object for the stash
+    // Step 4: Create a proper two-parent stash structure (HEAD + index commit)
     let msg = format!("uhoh: snapshot {} ({})", id_str, snap.timestamp);
-    let commit_output = Command::new("git")
+    // Create index commit first
+    let index_commit_out = Command::new("git")
         .current_dir(project_path)
-        .args(["commit-tree", &tree_hash, "-p", &head_commit, "-m", &msg])
+        .args(["commit-tree", &tree_hash, "-p", &head_commit, "-m", &format!("index on {}", id_str)])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
-        .context("Failed to create stash commit")?;
-
-    if !commit_output.status.success() {
-        bail!(
-            "git commit-tree failed: {}",
-            String::from_utf8_lossy(&commit_output.stderr)
-        );
+        .context("Failed to create index commit for stash")?;
+    if !index_commit_out.status.success() {
+        bail!("git commit-tree (index) failed: {}", String::from_utf8_lossy(&index_commit_out.stderr));
     }
-    let stash_commit = String::from_utf8(commit_output.stdout)?
-        .trim()
-        .to_string();
+    let index_commit = String::from_utf8(index_commit_out.stdout)?.trim().to_string();
+
+    // Create the stash commit with two parents
+    let stash_commit_out = Command::new("git")
+        .current_dir(project_path)
+        .args(["commit-tree", &tree_hash, "-p", &head_commit, "-p", &index_commit, "-m", &msg])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .context("Failed to create two-parent stash commit")?;
+    if !stash_commit_out.status.success() {
+        bail!("git commit-tree (stash) failed: {}", String::from_utf8_lossy(&stash_commit_out.stderr));
+    }
+    let stash_commit = String::from_utf8(stash_commit_out.stdout)?.trim().to_string();
 
     // Step 5: Store as a stash entry
     run_git(project_path, &["stash", "store", "-m", &msg, &stash_commit])?;

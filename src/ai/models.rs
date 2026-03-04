@@ -2,7 +2,7 @@ use crate::config::{AiConfig, ModelTierConfig};
 use anyhow::Result;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use sysinfo::System;
+use sysinfo::{System, RefreshKind, MemoryRefreshKind};
 
 /// Default model tiers (used when config has none).
 /// Updated to Qwen3.5 tiers.
@@ -23,8 +23,7 @@ pub fn select_model(config: &AiConfig) -> Option<ModelTierConfig> {
     } else {
         config.models.clone()
     };
-    let mut sys = System::new();
-    sys.refresh_memory();
+    let mut sys = System::new_with_specifics(RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()));
     let total_ram_gb = sys.total_memory() / (1024 * 1024 * 1024);
     let available_ram_gb = sys.available_memory() / (1024 * 1024 * 1024);
     let min_available_margin = 2; // consistent 2GB margin

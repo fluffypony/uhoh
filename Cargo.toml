@@ -87,6 +87,7 @@ indicatif = "0.17"
 semver = "1.0"
 
 # Cross-platform file locking (removed)
+fs2 = "0.4"
 
 # Windows path canonicalization
 dunce = "1.0"
