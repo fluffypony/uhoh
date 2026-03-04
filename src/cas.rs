@@ -156,6 +156,7 @@ pub fn store_blob_from_file(
         };
         if ok {
             set_blob_readonly(&blob_path);
+            fsync_parent_dir(&blob_path);
             return Ok((hash, file_size, StorageMethod::Reflink));
         } else {
             let _ = std::fs::remove_file(&blob_path);
@@ -165,6 +166,7 @@ pub fn store_blob_from_file(
     // Try hardlink before full copy
     if std::fs::hard_link(file_path, &blob_path).is_ok() {
         set_blob_readonly(&blob_path);
+        fsync_parent_dir(&blob_path);
         return Ok((hash, file_size, StorageMethod::Hardlink));
     }
 
@@ -194,7 +196,7 @@ pub fn store_blob_from_file(
                 f.sync_all()?;
             }
             match std::fs::rename(&tmp_path, &blob_path) {
-                Ok(()) => { set_blob_readonly(&blob_path); return Ok((hash, file_size, StorageMethod::Copy)); }
+                Ok(()) => { set_blob_readonly(&blob_path); fsync_parent_dir(&blob_path); return Ok((hash, file_size, StorageMethod::Copy)); }
                 Err(_) => { let _ = std::fs::remove_file(&tmp_path); if blob_path.exists() { return Ok((hash, file_size, StorageMethod::Copy)); } }
             }
         }
@@ -226,7 +228,7 @@ pub fn store_blob_from_file(
             }
             set_blob_readonly(&tmp_path);
             match std::fs::rename(&tmp_path, &blob_path) {
-                Ok(()) => return Ok((hash, file_size, StorageMethod::Copy)),
+                Ok(()) => { fsync_parent_dir(&blob_path); return Ok((hash, file_size, StorageMethod::Copy)); },
                 Err(_) => {
                     // Race: someone else wrote it
                     let _ = std::fs::remove_file(&tmp_path);
@@ -564,5 +566,10 @@ mod tests {
     fn test_normalize_path() {
         let p = Path::new("src/main.rs");
         assert_eq!(normalize_path(p), "src/main.rs");
+    }
+}
+fn fsync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::OpenOptions::new().read(true).open(parent).and_then(|f| f.sync_all());
     }
 }

@@ -83,6 +83,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 # Progress bars
 indicatif = "0.17"
+atty = "0.2"
 
 # Semantic versioning for updates
 semver = "1.0"

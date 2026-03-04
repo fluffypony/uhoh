@@ -52,12 +52,13 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
     // Open file for append/create
     let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&tmp)?;
     // Show a progress bar if total known
-    let pb = total.map(|t| {
+    let is_tty = atty::is(atty::Stream::Stderr);
+    let pb = if is_tty { total.map(|t| {
         let bar = indicatif::ProgressBar::new(t);
         bar.set_position(start);
         bar.set_style(indicatif::ProgressStyle::default_bar().template("{spinner:.green} [{bar:40}] {bytes}/{total_bytes} ({eta})").unwrap());
         bar
-    });
+    }) } else { None };
     // Download loop with Range
     let mut pos = start;
     loop {

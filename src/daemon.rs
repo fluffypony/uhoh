@@ -415,7 +415,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 }
                 // GC is handled within the detached task when needed
 
-                // Periodic database backup (hourly by default)
+                // Periodic database backup (daily by default, tied to update.check_interval_hours)
                 static LAST_BACKUP: Lazy<StdMutex<Option<std::time::Instant>>> = Lazy::new(|| StdMutex::new(None));
                 let backup_interval = std::time::Duration::from_secs(config.update.check_interval_hours * 3600);
                 let do_backup = {
@@ -446,8 +446,10 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     }
                 }
 
-                // Process deferred AI summaries when conditions allow
-                if crate::ai::should_run_ai(&config.ai) {
+                // Process deferred AI summaries when conditions allow (cache sysinfo per tick)
+                let mut tick_sys = sysinfo::System::new();
+                tick_sys.refresh_memory();
+                if crate::ai::should_run_ai_with(&config.ai, &tick_sys) {
                     process_ai_summary_queue(&uhoh_dir, &*database, &config).await;
                 }
             }

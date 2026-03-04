@@ -3,6 +3,7 @@ pub mod sidecar;
 pub mod summary;
 
 use crate::config::AiConfig;
+use sysinfo as _; // ensure sysinfo available in this module
 
 /// Check if AI features should run right now.
 pub fn should_run_ai(config: &AiConfig) -> bool {
@@ -21,6 +22,14 @@ pub fn should_run_ai(config: &AiConfig) -> bool {
     }
 
     true
+}
+
+/// Like should_run_ai, but reuse a provided sysinfo::System snapshot.
+pub fn should_run_ai_with(config: &AiConfig, sys: &sysinfo::System) -> bool {
+    if !config.enabled { return false; }
+    if config.skip_on_battery && !on_ac_power() { return false; }
+    let available_gb = sys.available_memory() / (1024 * 1024 * 1024);
+    available_gb >= config.min_available_memory_gb
 }
 
 /// Check if on AC power. Defaults to true (assume AC) on any error.
