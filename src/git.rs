@@ -84,6 +84,8 @@ pub fn cmd_gitstash(
     let mut exec_map = std::collections::HashSet::new();
     let snap_files = database.get_snapshot_files(snap.rowid)?;
     for f in &snap_files { if f.executable { exec_map.insert(f.path.as_str()); } }
+    let mut symlink_map = std::collections::HashSet::new();
+    for f in &snap_files { if f.is_symlink { symlink_map.insert(f.path.as_str()); } }
 
     // Use a single git update-index --index-info process and stream entries to stdin
     let mut upd = Command::new("git")
@@ -103,7 +105,7 @@ pub fn cmd_gitstash(
                 continue;
             }
             // Symlink mode handling (120000) if snapshot recorded it as non-executable and content looks like link
-            let mode = if exec_map.contains(path.as_str()) { "100755" } else { "100644" };
+            let mode = if symlink_map.contains(path.as_str()) { "120000" } else if exec_map.contains(path.as_str()) { "100755" } else { "100644" };
             // Write NUL-terminated entries: "<mode> <hash>\t<path>\0"
             use std::io::Write as _;
             write!(sin, "{} {}\t{}\0", mode, blob_hash, path)?;

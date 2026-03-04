@@ -112,8 +112,11 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
     );
 
     for path in &orphaned {
+        let sz = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         std::fs::remove_file(path)
             .with_context(|| format!("Failed to delete: {}", path.display()))?;
+        // Decrement cached blob bytes counter if available
+        let _ = database.add_blob_bytes(-(sz as i64));
         bar.inc(1);
     }
     bar.finish_and_clear();

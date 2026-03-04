@@ -68,7 +68,9 @@ pub fn cmd_restore(
         if !file.stored {
             continue; // Skip unstored large binaries
         }
-        to_restore.push((file.path.clone(), file.hash.clone(), file.executable));
+        // Decode stored path for non-UTF8 names
+        let os = crate::cas::decode_relpath_to_os(&file.path);
+        to_restore.push((os.to_string_lossy().into_owned(), file.hash.clone(), file.executable));
     }
 
     if dry_run {

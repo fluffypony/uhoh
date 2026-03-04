@@ -42,6 +42,18 @@ pub fn spawn_detached_daemon() -> Result<()> {
 
     #[cfg(windows)]
     {
+        // Enforce singleton via Named Mutex to avoid PID reuse issues
+        use winapi::um::synchapi::CreateMutexW;
+        use winapi::um::winnt::LPWSTR;
+        use winapi::shared::minwindef::FALSE;
+        use std::ptr::null_mut;
+        let name: Vec<u16> = "Global\\uhoh-daemon".encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            let handle = CreateMutexW(null_mut(), FALSE, name.as_ptr() as LPWSTR);
+            if handle.is_null() {
+                anyhow::bail!("Failed to create named mutex for singleton enforcement");
+            }
+        }
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x00000008;
         std::process::Command::new(&exe)
@@ -400,6 +412,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                         let _ = tokio::task::spawn_blocking(move || {
                             if let Ok(db) = crate::db::Database::open(&db_path_for_gc2) {
                                 let _ = crate::gc::run_gc(&uhoh_dir_cl2, &db);
+                                // After GC, VACUUM to reclaim free pages
+                                let _ = db.vacuum();
                             }
                         });
                             // Run VACUUM after large deletions to reclaim space
@@ -532,6 +546,12 @@ fn handle_watch_event(
     }
 }
 
+#[derive(Debug)]
+enum SnapshotResult {
+    Created(u64),
+    NoChanges,
+}
+
 async fn process_pending_snapshots(
     uhoh_dir: &Path,
     database: Arc<Database>,
@@ -544,7 +564,7 @@ async fn process_pending_snapshots(
     let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
     let concurrency = std::cmp::max(1, (logical / 2).max(1));
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
-    let mut join: tokio::task::JoinSet<anyhow::Result<Option<u64>>> = tokio::task::JoinSet::new();
+    let mut join: tokio::task::JoinSet<anyhow::Result<Option<SnapshotResult>>> = tokio::task::JoinSet::new();
     for (project_path, state) in states.iter_mut() {
         if state.pending_changes.is_empty() {
             continue;
@@ -578,7 +598,11 @@ async fn process_pending_snapshots(
             join.spawn(async move {
                 let proj_hash_for_log = project_hash.clone();
                 let res = tokio::task::spawn_blocking(move || {
-                    snapshot::create_snapshot(&uhoh_dir_buf, &db_for_task, &project_hash, &proj_path, "auto", None, &cfg, Some(&changed))
+                    match snapshot::create_snapshot(&uhoh_dir_buf, &db_for_task, &project_hash, &proj_path, "auto", None, &cfg, Some(&changed)) {
+                        Ok(Some(id)) => Ok(Some(SnapshotResult::Created(id))),
+                        Ok(None) => Ok(Some(SnapshotResult::NoChanges)),
+                        Err(e) => Err(e),
+                    }
                 }).await;
                 drop(permit);
                 match res {
@@ -591,7 +615,9 @@ async fn process_pending_snapshots(
     }
     while let Some(res) = join.join_next().await {
         match res.unwrap_or(Ok(None)) {
-            Ok(Some(_)) | Ok(None) => { /* success or no-op */ }
+            Ok(Some(SnapshotResult::Created(_id))) => { /* snapshot created */ }
+            Ok(Some(SnapshotResult::NoChanges)) => { /* no-op */ }
+            Ok(None) => { /* error already logged; do not clear pending */ }
             Err(e) => { tracing::error!("Auto-snapshot task error: {}", e); }
         }
     }

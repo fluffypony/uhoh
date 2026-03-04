@@ -20,6 +20,7 @@ pub struct CachedFileState {
     pub stored: bool,
     pub executable: bool,
     pub storage_method: i64,
+    pub is_symlink: bool,
 }
 
 /// Create a snapshot for a project. Returns the snapshot ID if one was created.
@@ -63,7 +64,7 @@ pub fn create_snapshot(
         for p in paths {
             if !p.starts_with(project_path) { continue; }
             if let Ok(rel) = p.strip_prefix(project_path) {
-                let rel_s = cas::normalize_path(rel);
+                let rel_s = cas::encode_relpath(rel);
                 rel_changed.insert(rel_s);
             }
         }
@@ -71,7 +72,7 @@ pub fn create_snapshot(
         let mut inserted: HashSet<String> = HashSet::new();
         // Process only changed files
         for rel_path in rel_changed.iter() {
-            let abs_path = project_path.join(rel_path);
+            let abs_path = project_path.join(cas::decode_relpath_to_os(rel_path));
             let exists = abs_path.is_file();
             if exists {
                 // Skip marker file
@@ -79,11 +80,12 @@ pub fn create_snapshot(
                 // Skip non-UTF-8
                 if abs_path.to_str().is_none() { tracing::warn!("Skipping non-UTF-8 path: {:?}", abs_path); continue; }
 
-                match abs_path.metadata() {
+                match std::fs::symlink_metadata(&abs_path) {
                     Ok(meta) => {
                         let size = meta.len();
                         let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                         let executable = cas::is_executable(&abs_path);
+                        let is_symlink = meta.file_type().is_symlink();
                         if let Some(cached) = prev_files.get(rel_path) {
                             let fs_mtime_secs = mtime_to_i64(mtime);
                             let cached_secs = mtime_to_i64(cached.mtime);
@@ -96,35 +98,63 @@ pub fn create_snapshot(
                                     executable: cached.executable,
                                     mtime: Some(cached_secs),
                                     storage_method: cached.storage_method,
+                                    is_symlink: cached.is_symlink,
                                 });
                                 inserted.insert(rel_path.clone());
                                 continue;
                             }
                         }
 
-                        match cas::store_blob_from_file(
-                            &blob_root,
-                            &abs_path,
-                            config.storage.max_copy_blob_bytes,
-                            config.storage.max_binary_blob_bytes,
-                            config.storage.max_text_blob_bytes,
-                            cfg!(feature = "compression") && config.storage.compress,
-                            config.storage.compress_level,
-                        ) {
-                            Ok((hash, size, method)) => {
-                                let is_new_or_changed = prev_files.get(rel_path).map_or(true, |prev| prev.hash != hash);
-                                if is_new_or_changed { has_changes = true; new_files.push(rel_path.clone()); }
-                                let mtime_i = mtime_to_i64(mtime);
-                                let stored = method.is_recoverable();
-                                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored, executable, mtime: Some(mtime_i), storage_method: method.to_db() });
-                                current_hashes.insert(rel_path.clone(), (hash, stored));
-                                inserted.insert(rel_path.clone());
+                        if is_symlink {
+                            match std::fs::read_link(&abs_path) {
+                                Ok(target) => {
+                                    #[cfg(unix)]
+                                    let bytes: Vec<u8> = { use std::os::unix::ffi::OsStrExt; target.as_os_str().as_bytes().to_vec() };
+                                    #[cfg(not(unix))]
+                                    let bytes: Vec<u8> = target.to_string_lossy().into_owned().into_bytes();
+                                    match cas::store_blob(&blob_root, &bytes) {
+                                        Ok(hash) => {
+                                            let size = bytes.len() as u64;
+                                            let mtime_i = mtime_to_i64(mtime);
+                                            files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored: true, executable, mtime: Some(mtime_i), storage_method: cas::StorageMethod::Copy.to_db(), is_symlink: true });
+                                            current_hashes.insert(rel_path.clone(), (hash, true));
+                                            inserted.insert(rel_path.clone());
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to store symlink for {}: {}", rel_path, e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("read_link failed for {}: {}", abs_path.display(), e);
+                                }
                             }
-                            Err(e) => {
-                                tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
-                                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: String::new(), size, stored: false, executable, mtime: Some(mtime_to_i64(mtime)), storage_method: cas::StorageMethod::None.to_db() });
-                                current_hashes.insert(rel_path.clone(), (String::new(), false));
-                                inserted.insert(rel_path.clone());
+                        } else {
+                            match cas::store_blob_from_file(
+                                &blob_root,
+                                &abs_path,
+                                config.storage.max_copy_blob_bytes,
+                                config.storage.max_binary_blob_bytes,
+                                config.storage.max_text_blob_bytes,
+                                cfg!(feature = "compression") && config.storage.compress,
+                                config.storage.compress_level,
+                            ) {
+                                Ok((hash, size, method, bytes_written)) => {
+                                    let is_new_or_changed = prev_files.get(rel_path).map_or(true, |prev| prev.hash != hash);
+                                    if is_new_or_changed { has_changes = true; new_files.push(rel_path.clone()); }
+                                    let mtime_i = mtime_to_i64(mtime);
+                                    let stored = method.is_recoverable();
+                                    files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored, executable, mtime: Some(mtime_i), storage_method: method.to_db(), is_symlink: false });
+                                    current_hashes.insert(rel_path.clone(), (hash, stored));
+                                    inserted.insert(rel_path.clone());
+                                    if bytes_written > 0 { let _ = database.add_blob_bytes(bytes_written as i64); }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
+                                    files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: String::new(), size, stored: false, executable, mtime: Some(mtime_to_i64(mtime)), storage_method: cas::StorageMethod::None.to_db(), is_symlink: false });
+                                    current_hashes.insert(rel_path.clone(), (String::new(), false));
+                                    inserted.insert(rel_path.clone());
+                                }
                             }
                         }
                     }
@@ -154,8 +184,9 @@ pub fn create_snapshot(
                 size: cached.size,
                 stored: cached.stored,
                 executable: cached.executable,
-                mtime: Some(cached.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
+                mtime: Some(mtime_to_i64(cached.mtime)),
                 storage_method: cached.storage_method,
+                is_symlink: cached.is_symlink,
             });
         }
     } else {
@@ -178,9 +209,8 @@ pub fn create_snapshot(
             let path = entry.path();
             if !path.is_file() { if let Some(pb) = &pb { pb.inc(1); } continue; }
             if path.file_name().map_or(false, |n| n == ".uhoh") { if let Some(pb) = &pb { pb.inc(1); } continue; }
-            let rel_path = match path.strip_prefix(project_path) { Ok(r) => cas::normalize_path(r), Err(_) => continue };
-            if path.to_str().is_none() { tracing::warn!("Skipping non-UTF-8 path: {:?}", path); continue; }
-            match path.metadata() {
+            let rel_path = match path.strip_prefix(project_path) { Ok(r) => cas::encode_relpath(r), Err(_) => continue };
+            match std::fs::symlink_metadata(path) {
                 Ok(meta) => { current_files.insert(rel_path, (path.to_path_buf(), meta)); }
                 Err(e) => { tracing::warn!("Cannot stat {}: {}", path.display(), e); }
             }
@@ -192,30 +222,53 @@ pub fn create_snapshot(
             let size = meta.len();
             let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             let executable = cas::is_executable(abs_path);
+            let is_symlink = meta.file_type().is_symlink();
             if let Some(cached) = prev_files.get(rel_path) {
                 let fs_mtime_secs = mtime_to_i64(mtime);
                 let cached_secs = mtime_to_i64(cached.mtime);
                 if cached.size == size && cached_secs == fs_mtime_secs {
                     files_for_manifest.push(crate::db::SnapFileEntry {
                         path: rel_path.clone(), hash: cached.hash.clone(), size: cached.size, stored: cached.stored,
-                        executable: cached.executable, mtime: Some(cached_secs), storage_method: cached.storage_method,
+                        executable: cached.executable, mtime: Some(cached_secs), storage_method: cached.storage_method, is_symlink: cached.is_symlink,
                     });
                     continue;
                 }
             }
-            match cas::store_blob_from_file(&blob_root, abs_path, config.storage.max_copy_blob_bytes, config.storage.max_binary_blob_bytes, config.storage.max_text_blob_bytes, cfg!(feature = "compression") && config.storage.compress, config.storage.compress_level) {
-                Ok((hash, size, method)) => {
-                    let is_new_or_changed = prev_files.get(rel_path).map_or(true, |prev| prev.hash != hash);
-                    if is_new_or_changed { has_changes = true; new_files.push(rel_path.clone()); }
-                    let mtime_i = mtime_to_i64(mtime);
-                    let stored = method.is_recoverable();
-                    files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored, executable, mtime: Some(mtime_i), storage_method: method.to_db() });
-                    current_hashes.insert(rel_path.clone(), (hash, stored));
+            if is_symlink {
+                match std::fs::read_link(&abs_path) {
+                    Ok(target) => {
+                        #[cfg(unix)]
+                        let bytes: Vec<u8> = { use std::os::unix::ffi::OsStrExt; target.as_os_str().as_bytes().to_vec() };
+                        #[cfg(not(unix))]
+                        let bytes: Vec<u8> = target.to_string_lossy().into_owned().into_bytes();
+                        match cas::store_blob(&blob_root, &bytes) {
+                            Ok(hash) => {
+                                let size = bytes.len() as u64;
+                                let mtime_i = mtime_to_i64(mtime);
+                                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored: true, executable, mtime: Some(mtime_i), storage_method: cas::StorageMethod::Copy.to_db(), is_symlink: true });
+                                current_hashes.insert(rel_path.clone(), (hash, true));
+                            }
+                            Err(e) => tracing::warn!("Failed to store symlink for {}: {}", rel_path, e),
+                        }
+                    }
+                    Err(e) => tracing::warn!("read_link failed for {}: {}", abs_path.display(), e),
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
-                    files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: String::new(), size, stored: false, executable, mtime: Some(mtime_to_i64(mtime)), storage_method: cas::StorageMethod::None.to_db() });
-                    current_hashes.insert(rel_path.clone(), (String::new(), false));
+            } else {
+                match cas::store_blob_from_file(&blob_root, abs_path, config.storage.max_copy_blob_bytes, config.storage.max_binary_blob_bytes, config.storage.max_text_blob_bytes, cfg!(feature = "compression") && config.storage.compress, config.storage.compress_level) {
+                    Ok((hash, size, method, bytes_written)) => {
+                        let is_new_or_changed = prev_files.get(rel_path).map_or(true, |prev| prev.hash != hash);
+                        if is_new_or_changed { has_changes = true; new_files.push(rel_path.clone()); }
+                        let mtime_i = mtime_to_i64(mtime);
+                        let stored = method.is_recoverable();
+                        files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored, executable, mtime: Some(mtime_i), storage_method: method.to_db(), is_symlink: false });
+                        current_hashes.insert(rel_path.clone(), (hash, stored));
+                        if bytes_written > 0 { let _ = database.add_blob_bytes(bytes_written as i64); }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
+                        files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: String::new(), size, stored: false, executable, mtime: Some(mtime_to_i64(mtime)), storage_method: cas::StorageMethod::None.to_db(), is_symlink: false });
+                        current_hashes.insert(rel_path.clone(), (String::new(), false));
+                    }
                 }
             }
         }
@@ -234,38 +287,8 @@ pub fn create_snapshot(
         return Ok(None);
     }
 
-    // Check emergency delete threshold
-    let actual_trigger = if trigger == "auto" && !deleted_for_manifest.is_empty() {
-        let prev_count = prev_files.len();
-        let del_count = deleted_for_manifest.len();
-        if prev_count > 0
-            && del_count >= config.watch.emergency_delete_min_files
-            && (del_count as f64 / prev_count as f64) > config.watch.emergency_delete_threshold
-        {
-            // Check if this looks like a git branch switch (suppress false positives)
-            if !is_likely_git_operation(project_path) {
-                // Apply a short cooldown to avoid repeated emergency snapshots
-                use once_cell::sync::Lazy;
-                use std::sync::Mutex;
-                static LAST_EMERGENCY_AT: Lazy<Mutex<Option<std::time::Instant>>> = Lazy::new(|| Mutex::new(None));
-                let now = std::time::Instant::now();
-                let fire = {
-                    let last = LAST_EMERGENCY_AT.lock().unwrap();
-                    last.map(|t| now.duration_since(t) > std::time::Duration::from_secs(30)).unwrap_or(true)
-                };
-                if fire {
-                    if let Ok(mut last) = LAST_EMERGENCY_AT.lock() { *last = Some(now); }
-                    "emergency-delete"
-                } else { trigger }
-            } else {
-                trigger
-            }
-        } else {
-            trigger
-        }
-    } else {
-        trigger
-    };
+    // Removed emergency-delete dead code; use provided trigger.
+    let actual_trigger = trigger;
 
     // Tree hashes removed to reduce per-snapshot overhead; left table exists for potential future use
     let tree_hashes: Vec<(String, String)> = Vec::new();
@@ -449,6 +472,7 @@ fn load_previous_snapshot_files(
                     stored: f.stored,
                     executable: f.executable,
                     storage_method: f.storage_method,
+                    is_symlink: f.is_symlink,
                 },
             );
         }

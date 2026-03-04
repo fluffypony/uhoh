@@ -354,13 +354,8 @@ async fn main() -> Result<()> {
             println!("Projects: {}", projects.len());
             let total: u64 = projects.iter().filter_map(|p| database.snapshot_count(&p.hash).ok()).sum();
             println!("Snapshots: {}", total);
-            let blobs = uhoh.join("blobs");
-            if blobs.exists() {
-                let size = tokio::task::spawn_blocking({ let blobs = blobs.clone(); move || dir_size(&blobs) })
-                    .await
-                    .unwrap_or(0);
-                println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0);
-            }
+            let size = database.get_blob_bytes().unwrap_or_else(|_| 0);
+            println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0);
             let cfg = config::Config::load(&uhoh.join("config.toml")).unwrap_or_default();
             println!("AI: {}", if cfg.ai.enabled { "enabled" } else { "disabled" });
             // Inception loop guard: warn if project includes ~/.uhoh

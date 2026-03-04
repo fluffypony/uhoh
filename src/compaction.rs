@@ -43,14 +43,7 @@ pub fn compact_project(
             .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
         let age = now.signed_duration_since(ts);
 
-        // Emergency-delete snapshots expire after configured hours
-        if snapshot.trigger == "emergency-delete"
-            && age > Duration::hours(config.emergency_expire_hours as i64)
-        {
-            freed_bytes += database.estimate_snapshot_blob_size(snapshot.rowid)?;
-            database.delete_snapshot(snapshot.rowid)?;
-            continue;
-        }
+        // Emergency-delete trigger path was removed as dead code; regular retention applies.
 
         // Keep everything within keep_all_minutes
         if age < Duration::minutes(config.keep_all_minutes as i64) {

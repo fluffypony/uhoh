@@ -8,21 +8,27 @@ const CURRENT_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_schema_version")]
+    /// Schema version of the config file (restart not required)
     pub schema_version: u32,
 
     #[serde(default)]
+    /// Watch configuration. Hot-reload applies to debounce_quiet_secs only; other fields require daemon restart.
     pub watch: WatchConfig,
 
     #[serde(default)]
+    /// Compaction configuration (requires daemon restart to take effect).
     pub compaction: CompactionConfig,
 
     #[serde(default)]
+    /// Storage configuration (requires daemon restart to take effect).
     pub storage: StorageConfig,
 
     #[serde(default)]
+    /// AI configuration. Hot-reload does not reconfigure models or sidecar; restart recommended for changes.
     pub ai: AiConfig,
 
     #[serde(default)]
+    /// Update configuration. Hot-reload applies to check_interval_hours; other fields require restart.
     pub update: UpdateConfig,
 }
 
@@ -38,18 +44,22 @@ pub struct WatchConfig {
 
     /// Minimum seconds between snapshots per project
     #[serde(default = "default_min_snapshot_interval_secs")]
+    /// Requires daemon restart to take effect.
     pub min_snapshot_interval_secs: u64,
 
     /// Maximum seconds to wait during continuous changes before forcing a snapshot
     #[serde(default = "default_max_debounce_secs")]
+    /// Requires daemon restart to take effect.
     pub max_debounce_secs: u64,
 
     /// Fraction of tracked files deleted to trigger emergency snapshot
     #[serde(default = "default_emergency_delete_threshold")]
+    /// Requires daemon restart to take effect.
     pub emergency_delete_threshold: f64,
 
     /// Minimum number of deleted files to trigger emergency (avoids small-project false positives)
     #[serde(default = "default_emergency_delete_min_files")]
+    /// Requires daemon restart to take effect.
     pub emergency_delete_min_files: usize,
 }
 
@@ -73,51 +83,64 @@ pub struct CompactionConfig {
 pub struct StorageConfig {
     /// Max size (bytes) for binary files to store in CAS. Larger binaries get hash recorded only.
     #[serde(default = "default_max_binary_blob_bytes")]
+    /// Requires daemon restart to take effect.
     pub max_binary_blob_bytes: u64,
 
     /// Max size (bytes) for text files to store in CAS.
     #[serde(default = "default_max_text_blob_bytes")]
+    /// Requires daemon restart to take effect.
     pub max_text_blob_bytes: u64,
 
     /// Maximum file size (bytes) that will be fully copied into the blob store
     /// when reflink and hardlink are unavailable. Larger files will not be copied.
     #[serde(default = "default_max_copy_blob_bytes")]
+    /// Requires daemon restart to take effect.
     pub max_copy_blob_bytes: u64,
 
     /// Storage limit as fraction of watched folder size
     #[serde(default = "default_storage_limit_fraction")]
+    /// Requires daemon restart to take effect.
     pub storage_limit_fraction: f64,
 
     /// Minimum absolute storage floor (bytes) so small projects aren't starved
     #[serde(default = "default_storage_min_bytes")]
+    /// Requires daemon restart to take effect.
     pub storage_min_bytes: u64,
 
     /// Enable zstd compression for blobs (requires 'compression' feature)
     #[serde(default)]
+    /// Requires daemon restart to take effect.
     pub compress: bool,
 
     /// Zstd compression level (1-22, default 3)
     #[serde(default = "default_compress_level")]
+    /// Requires daemon restart to take effect.
     pub compress_level: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiConfig {
     #[serde(default)]
+    /// Enable AI (requires daemon restart to change the sidecar/model state)
     pub enabled: bool,
     #[serde(default = "default_skip_on_battery")]
+    /// Skip on battery (restart recommended)
     pub skip_on_battery: bool,
     /// Max tokens of diff context to send to local model
     #[serde(default = "default_max_context_tokens")]
+    /// Restart recommended to apply widely
     pub max_context_tokens: usize,
     /// Shut down model server after N seconds idle
     #[serde(default = "default_idle_shutdown_secs")]
+    /// Restart recommended
     pub idle_shutdown_secs: u64,
     /// Don't start AI if less than this many GB of RAM available
     #[serde(default = "default_min_available_memory_gb")]
+    /// Restart recommended
     pub min_available_memory_gb: u64,
     /// Configurable model tiers (override defaults)
     #[serde(default)]
+    /// Requires daemon restart to take effect.
     pub models: Vec<ModelTierConfig>,
 }
 
@@ -133,9 +156,11 @@ pub struct ModelTierConfig {
 pub struct UpdateConfig {
     /// Enable auto-update checks
     #[serde(default = "default_auto_update")]
+    /// Requires daemon restart to take effect.
     pub auto_check: bool,
     /// Hours between update checks
     #[serde(default = "default_update_interval_hours")]
+    /// Hot-reload applies to this field; others require restart.
     pub check_interval_hours: u64,
 }
 

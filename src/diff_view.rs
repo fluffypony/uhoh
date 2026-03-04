@@ -102,8 +102,12 @@ pub fn cmd_diff(
             continue;
         }
 
-        writeln!(stdout, "\n--- {}/{}", label1, path)?;
-        writeln!(stdout, "+++ {}/{}", label2, path)?;
+        let display_path = if let Some(rest) = path.strip_prefix("b64:") {
+            let os = crate::cas::decode_relpath_to_os(path);
+            os.to_string_lossy().into_owned()
+        } else { path.to_string() };
+        writeln!(stdout, "\n--- {}/{}", label1, display_path)?;
+        writeln!(stdout, "+++ {}/{}", label2, display_path)?;
 
         let diff = TextDiff::from_lines(&old_content, &new_content);
         // Try to detect syntax
@@ -166,7 +170,13 @@ pub fn cmd_cat(
     let files = database.get_snapshot_files(snap.rowid)?;
     let entry = files
         .iter()
-        .find(|f| f.path == file_path)
+        .find(|f| {
+            if f.path == file_path { return true; }
+            if let Some(_) = file_path.strip_prefix("b64:") { return f.path == file_path; }
+            // Try decoding stored path for non-UTF8 encoding
+            let stored_os = crate::cas::decode_relpath_to_os(&f.path);
+            stored_os.to_string_lossy() == file_path
+        })
         .ok_or_else(|| anyhow::anyhow!("File '{}' not in snapshot {}", file_path, id_str))?;
 
     if !entry.stored {
@@ -210,7 +220,7 @@ fn build_current_file_list_readonly(
         let path = entry.path();
         if !path.is_file() { continue; }
         if path.file_name().map_or(false, |n| n == ".uhoh") { continue; }
-        let rel_path = match path.strip_prefix(project_path) { Ok(r) => cas::normalize_path(r), Err(_) => continue };
+        let rel_path = match path.strip_prefix(project_path) { Ok(r) => cas::encode_relpath(r), Err(_) => continue };
         // Hash only, do not store in CAS
         let (hash, size) = {
             let mut hasher = blake3::Hasher::new();
@@ -233,6 +243,7 @@ fn build_current_file_list_readonly(
             executable: cas::is_executable(path),
             mtime: None,
             storage_method: 0,
+            is_symlink: false,
         });
     }
     Ok(entries)

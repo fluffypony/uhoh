@@ -99,154 +99,69 @@ pub fn store_blob_from_file(
     max_text_blob_bytes: u64,
     #[allow(unused_variables)] compress_enabled: bool,
     #[allow(unused_variables)] compress_level: i32,
-) -> Result<(String, u64, StorageMethod)> {
-    let metadata = std::fs::metadata(file_path)
+) -> Result<(String, u64, StorageMethod, u64)> {
+    let metadata = std::fs::symlink_metadata(file_path)
         .with_context(|| format!("Cannot stat: {}", file_path.display()))?;
     let file_size = metadata.len();
 
-    let file = std::fs::File::open(file_path)
-        .with_context(|| format!("Cannot open: {}", file_path.display()))?;
-    let mut reader = std::io::BufReader::new(file);
+    // Single-pass streaming hash+write: stream file once into a temp file while hashing
+    let mut reader = std::io::BufReader::new(std::fs::File::open(file_path)?);
     let mut hasher = blake3::Hasher::new();
-
-    let mut first_chunk = vec![0u8; 8192.min(file_size as usize)];
-    let first_n = reader.read(&mut first_chunk)?;
-    first_chunk.truncate(first_n);
-    hasher.update(&first_chunk);
-
-    // We'll compute the hash regardless of storage method
-    // Decide storage after hashing by trying reflink/hardlink/copy
-
+    let mut first_chunk: Vec<u8> = Vec::new();
+let mut is_binary = false;
+    let tmp_dir = blob_root.join("tmp");
+    std::fs::create_dir_all(&tmp_dir)?;
+    let tmp_path = tmp_dir.join(format!(
+        ".tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+let mut tmp_file = create_restricted_file(&tmp_path)?;
+    let mut written = 0u64;
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = reader.read(&mut buf)?;
         if n == 0 { break; }
+        if first_chunk.len() < 8192 { first_chunk.extend_from_slice(&buf[..n.min(8192 - first_chunk.len())]); }
         hasher.update(&buf[..n]);
-        // Just hashing here
+        tmp_file.write_all(&buf[..n])?;
+        written += n as u64;
     }
-
-    let hash = hasher.finalize().to_hex().to_string();
+    tmp_file.sync_all()?;
+    if !first_chunk.is_empty() { is_binary = content_inspector::inspect(&first_chunk).is_binary(); }
+let hash = hasher.finalize().to_hex().to_string();
     let dir = blob_root.join(&hash[..hash.len().min(2)]);
     std::fs::create_dir_all(&dir)?;
     let blob_path = dir.join(&hash);
-
-    // If already exists, treat as stored via Copy for compatibility
+    
+// If already exists, discard temp and report no write
     if blob_path.exists() {
-        return Ok((hash, file_size, StorageMethod::Copy));
+        let _ = std::fs::remove_file(&tmp_path);
+        return Ok((hash, file_size, StorageMethod::Copy, 0));
     }
-
+    
     // Enforce size limits: decide if we should store or hash-only based on type
-    let is_binary = {
-        let head = &first_chunk[..first_chunk.len().min(8192)];
-        content_inspector::inspect(head).is_binary()
-    };
     let cfg_limit = if is_binary { max_binary_blob_bytes } else { max_text_blob_bytes } as u64;
-    let effective_limit = std::cmp::min(cfg_limit, max_copy_blob_bytes);
-
-    // Try reflink, then verify integrity by re-hashing destination bytes
-    if reflink_copy::reflink(file_path, &blob_path).is_ok() {
-        // Verify content matches expected hash to avoid TOCTOU issues
-        let ok = match std::fs::File::open(&blob_path) {
-            Ok(mut f) => {
-                let mut hasher = blake3::Hasher::new();
-                let _ = std::io::copy(&mut f, &mut hasher);
-                hasher.finalize().to_hex().to_string() == hash
-            }
-            Err(_) => false,
-        };
-        if ok {
-            set_blob_readonly(&blob_path);
-            fsync_parent_dir(&blob_path);
-            return Ok((hash, file_size, StorageMethod::Reflink));
-        } else {
-            let _ = std::fs::remove_file(&blob_path);
-        }
-    }
-
-    // Try hardlink before full copy
-    if std::fs::hard_link(file_path, &blob_path).is_ok() {
-        set_blob_readonly(&blob_path);
-        fsync_parent_dir(&blob_path);
-        return Ok((hash, file_size, StorageMethod::Hardlink));
-    }
-
-    // Try full copy if within size limit; apply compression when enabled and beneficial
+let effective_limit = std::cmp::min(cfg_limit, max_copy_blob_bytes);
+    
     if file_size <= effective_limit {
-        // If compression is enabled (feature + runtime), try compressing in-memory for moderately sized files (<= 8 MiB)
-        #[cfg(feature = "compression")]
-        if compress_enabled && file_size <= 8 * 1024 * 1024 {
-            let data = std::fs::read(file_path)?;
-            // Verify content hash matches expected to avoid TOCTOU
-            if blake3::hash(&data).to_hex().to_string() != hash {
-                tracing::warn!("File changed during snapshot: {}", file_path.display());
-                return Ok((hash, file_size, StorageMethod::None));
-            }
-            let compressed = maybe_compress_with_level(&data, compress_level);
-            let to_write = if compressed.len() < data.len() { compressed } else { data };
-            let dir = blob_root.join(&hash[..hash.len().min(2)]);
-            std::fs::create_dir_all(&dir)?;
-            let tmp_path = dir.join(format!(
-                ".tmp.{}.{}",
-                std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-            ));
-            {
-                let mut f = create_restricted_file(&tmp_path)?;
-                f.write_all(&to_write)?;
-                f.sync_all()?;
-            }
-            match std::fs::rename(&tmp_path, &blob_path) {
-                Ok(()) => { set_blob_readonly(&blob_path); fsync_parent_dir(&blob_path); return Ok((hash, file_size, StorageMethod::Copy)); }
-                Err(_) => { let _ = std::fs::remove_file(&tmp_path); if blob_path.exists() { return Ok((hash, file_size, StorageMethod::Copy)); } }
-            }
-        }
-        #[cfg(not(feature = "compression"))]
-        {
-            // Write to temp then rename for atomicity
-            let tmp_dir = blob_root.join("tmp");
-            std::fs::create_dir_all(&tmp_dir)?;
-            let tmp_path = tmp_dir.join(format!(
-                ".tmp.{}.{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::copy(file_path, &tmp_path)?;
-            // TOCTOU guard: re-hash the stored bytes to ensure match
-            let stored_hash = {
-                let mut hasher = blake3::Hasher::new();
-                let mut f = std::fs::File::open(&tmp_path)?;
-                let _ = std::io::copy(&mut f, &mut hasher)?;
-                hasher.finalize().to_hex().to_string()
-            };
-            if stored_hash != hash {
+        set_blob_readonly(&tmp_path);
+        match std::fs::rename(&tmp_path, &blob_path) {
+            Ok(()) => { fsync_parent_dir(&blob_path); return Ok((hash, file_size, StorageMethod::Copy, written)); },
+            Err(_) => {
                 let _ = std::fs::remove_file(&tmp_path);
-                tracing::warn!("File changed during snapshot: {}", file_path.display());
-                return Ok((hash, file_size, StorageMethod::None));
-            }
-            set_blob_readonly(&tmp_path);
-            match std::fs::rename(&tmp_path, &blob_path) {
-                Ok(()) => { fsync_parent_dir(&blob_path); return Ok((hash, file_size, StorageMethod::Copy)); },
-                Err(_) => {
-                    // Race: someone else wrote it
-                    let _ = std::fs::remove_file(&tmp_path);
-                    if blob_path.exists() {
-                        return Ok((hash, file_size, StorageMethod::Copy));
-                    }
-                }
+                if blob_path.exists() { return Ok((hash, file_size, StorageMethod::Copy, 0)); }
             }
         }
     }
-
-    // Could not store, return hash only
+    // Size exceeds configured limits or rename failed: remove temp and return None storage
+    let _ = std::fs::remove_file(&tmp_path);
     tracing::debug!(
-        "Not storing {} ({} bytes): reflink/copy failed or size exceeds limit ({} bytes)",
+        "Not storing {} ({} bytes): size exceeds limit ({} bytes)",
         file_path.display(), file_size, effective_limit
     );
-    Ok((hash, file_size, StorageMethod::None))
-}
+    Ok((hash, file_size, StorageMethod::None, 0))
+    }
 
 /// Read a blob from the CAS with integrity verification.
 pub fn read_blob(blob_root: &Path, hash: &str) -> Result<Option<Vec<u8>>> {

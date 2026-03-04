@@ -37,6 +37,7 @@ pub struct FileEntryRow {
     pub executable: bool,
     pub mtime: Option<i64>,
     pub storage_method: i64,
+    pub is_symlink: bool,
 }
 
 impl Database {
@@ -96,13 +97,9 @@ impl Database {
 
     fn migrate(&self) -> Result<()> {
         let conn = self.conn();
-
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS schema_version (
-                version INTEGER PRIMARY KEY
-            );",
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);",
         )?;
-
         let version: u32 = conn
             .query_row(
                 "SELECT COALESCE(MAX(version), 0) FROM schema_version",
@@ -110,138 +107,104 @@ impl Database {
                 |row| row.get(0),
             )
             .unwrap_or(0);
+        if version >= 5 { return Ok(()); }
+        conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION;")?;
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS projects (
+                hash TEXT PRIMARY KEY,
+                current_path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                next_snapshot_id INTEGER NOT NULL DEFAULT 1
+            );
 
-        if version < 1 {
-            conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION;")?;
-            conn.execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS projects (
-                    hash TEXT PRIMARY KEY,
-                    current_path TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    next_snapshot_id INTEGER NOT NULL DEFAULT 1
-                );
+            CREATE TABLE IF NOT EXISTS project_history (
+                project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
+                old_path TEXT NOT NULL,
+                changed_at TEXT NOT NULL
+            );
 
-                CREATE TABLE IF NOT EXISTS project_history (
-                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
-                    old_path TEXT NOT NULL,
-                    changed_at TEXT NOT NULL
-                );
+            CREATE TABLE IF NOT EXISTS snapshots (
+                rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
+                snapshot_id INTEGER NOT NULL CHECK (snapshot_id > 0),
+                timestamp TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                message TEXT NOT NULL DEFAULT '',
+                pinned INTEGER NOT NULL DEFAULT 0,
+                ai_summary TEXT,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(project_hash, snapshot_id)
+            );
 
-                CREATE TABLE IF NOT EXISTS snapshots (
-                    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
-                    snapshot_id INTEGER NOT NULL CHECK (snapshot_id > 0),
-                    timestamp TEXT NOT NULL,
-                    trigger TEXT NOT NULL,
-                    message TEXT NOT NULL DEFAULT '',
-                    pinned INTEGER NOT NULL DEFAULT 0,
-                    ai_summary TEXT,
-                    UNIQUE(project_hash, snapshot_id)
-                );
+            CREATE TABLE IF NOT EXISTS snapshot_files (
+                snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                stored INTEGER NOT NULL DEFAULT 1,
+                executable INTEGER NOT NULL DEFAULT 0,
+                mtime INTEGER,
+                storage_method INTEGER NOT NULL DEFAULT 1,
+                is_symlink INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (snapshot_rowid, path)
+            );
 
-                CREATE TABLE IF NOT EXISTS snapshot_files (
-                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                    path TEXT NOT NULL,
-                    hash TEXT NOT NULL,
-                    size INTEGER NOT NULL,
-                    stored INTEGER NOT NULL DEFAULT 1,
-                    executable INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (snapshot_rowid, path)
-                );
+            CREATE TABLE IF NOT EXISTS snapshot_deleted (
+                snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                stored INTEGER NOT NULL DEFAULT 1,
+                storage_method INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (snapshot_rowid, path)
+            );
 
-                CREATE TABLE IF NOT EXISTS snapshot_deleted (
-                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                    path TEXT NOT NULL,
-                    hash TEXT NOT NULL,
-                    size INTEGER NOT NULL,
-                    stored INTEGER NOT NULL DEFAULT 1,
-                    PRIMARY KEY (snapshot_rowid, path)
-                );
+            CREATE TABLE IF NOT EXISTS snapshot_tree (
+                snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                dir_path TEXT NOT NULL,
+                tree_hash TEXT NOT NULL,
+                PRIMARY KEY (snapshot_rowid, dir_path)
+            );
 
-                CREATE TABLE IF NOT EXISTS snapshot_tree (
-                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                    dir_path TEXT NOT NULL,
-                    tree_hash TEXT NOT NULL,
-                    PRIMARY KEY (snapshot_rowid, dir_path)
-                );
+            CREATE TABLE IF NOT EXISTS operations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
+                label TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                first_snapshot_id INTEGER,
+                last_snapshot_id INTEGER
+            );
 
-                CREATE TABLE IF NOT EXISTS operations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
-                    label TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    ended_at TEXT,
-                    first_snapshot_id INTEGER,
-                    last_snapshot_id INTEGER
-                );
+            CREATE TABLE IF NOT EXISTS pending_ai_summaries (
+                snapshot_rowid INTEGER PRIMARY KEY REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                project_hash   TEXT NOT NULL,
+                queued_at      TEXT NOT NULL,
+                attempts       INTEGER NOT NULL DEFAULT 0
+            );
 
-                CREATE INDEX IF NOT EXISTS idx_snapshot_project
-                    ON snapshots(project_hash, timestamp);
-                CREATE INDEX IF NOT EXISTS idx_snapshot_files_hash
-                    ON snapshot_files(hash);
-                CREATE INDEX IF NOT EXISTS idx_snapshot_deleted_hash
-                    ON snapshot_deleted(hash);
-                CREATE INDEX IF NOT EXISTS idx_file_path
-                    ON snapshot_files(path, snapshot_rowid);
-                CREATE INDEX IF NOT EXISTS idx_operations_project
-                    ON operations(project_hash);
+            CREATE TABLE IF NOT EXISTS stats (
+                key   TEXT PRIMARY KEY,
+                value INTEGER NOT NULL DEFAULT 0
+            );
 
-                INSERT OR REPLACE INTO schema_version (version) VALUES (1);
-                ",
-            )?;
-            conn.execute_batch("COMMIT;")?;
-        }
-
-        // Schema v2: add mtime to snapshot_files and denormalized file_count on snapshots
-        if version < 2 {
-            conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION;")?;
-            // Check column existence by preparing a dummy SELECT
-            let has_mtime = conn.prepare("SELECT mtime FROM snapshot_files LIMIT 0").is_ok();
-            if !has_mtime {
-                conn.execute_batch("ALTER TABLE snapshot_files ADD COLUMN mtime INTEGER;")?;
-            }
-            let has_file_count = conn.prepare("SELECT file_count FROM snapshots LIMIT 0").is_ok();
-            if !has_file_count {
-                conn.execute_batch("ALTER TABLE snapshots ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;")?;
-            }
-            conn.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (2);")?;
-            conn.execute_batch("COMMIT;")?;
-        }
-
-        // Schema v3: add storage_method columns and backfill from stored
-        if version < 3 {
-            conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION;")?;
-            let has_sf = conn.prepare("SELECT storage_method FROM snapshot_files LIMIT 0").is_ok();
-            if !has_sf {
-                conn.execute_batch("ALTER TABLE snapshot_files ADD COLUMN storage_method INTEGER NOT NULL DEFAULT 1;")?;
-                conn.execute_batch("UPDATE snapshot_files SET storage_method = CASE WHEN stored = 1 THEN 1 ELSE 0 END;")?;
-            }
-            let has_sd = conn.prepare("SELECT storage_method FROM snapshot_deleted LIMIT 0").is_ok();
-            if !has_sd {
-                conn.execute_batch("ALTER TABLE snapshot_deleted ADD COLUMN storage_method INTEGER NOT NULL DEFAULT 1;")?;
-                conn.execute_batch("UPDATE snapshot_deleted SET storage_method = CASE WHEN stored = 1 THEN 1 ELSE 0 END;")?;
-            }
-            conn.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (3);")?;
-            conn.execute_batch("COMMIT;")?;
-        }
-
-        // Schema v4: pending AI summaries queue
-        if version < 4 {
-            conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION;")?;
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS pending_ai_summaries (
-                    snapshot_rowid INTEGER PRIMARY KEY REFERENCES snapshots(rowid) ON DELETE CASCADE,
-                    project_hash   TEXT NOT NULL,
-                    queued_at      TEXT NOT NULL,
-                    attempts       INTEGER NOT NULL DEFAULT 0
-                );",
-            )?;
-            conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_ai_queue_time ON pending_ai_summaries(queued_at);")?;
-            conn.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (4);")?;
-            conn.execute_batch("COMMIT;")?;
-        }
-
+            CREATE INDEX IF NOT EXISTS idx_snapshot_project
+                ON snapshots(project_hash, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_snapshot_files_hash
+                ON snapshot_files(hash);
+            CREATE INDEX IF NOT EXISTS idx_snapshot_deleted_hash
+                ON snapshot_deleted(hash);
+            CREATE INDEX IF NOT EXISTS idx_file_path
+                ON snapshot_files(path, snapshot_rowid);
+            CREATE INDEX IF NOT EXISTS idx_operations_project
+                ON operations(project_hash);
+            CREATE INDEX IF NOT EXISTS idx_ai_queue_time ON pending_ai_summaries(queued_at);
+            ",
+        )?;
+        conn.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('blob_bytes', 0)", [])?;
+        conn.execute_batch("DELETE FROM schema_version; INSERT INTO schema_version (version) VALUES (5);")?;
+        conn.execute_batch("COMMIT;")?;
         Ok(())
     }
 
@@ -438,10 +401,10 @@ impl Database {
 
         {
             let mut file_stmt = tx.prepare(
-                "INSERT INTO snapshot_files (snapshot_rowid, path, hash, size, stored, executable, mtime, storage_method)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO snapshot_files (snapshot_rowid, path, hash, size, stored, executable, mtime, storage_method, is_symlink)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
-            for SnapFileEntry { path, hash, size, stored, executable, mtime, storage_method } in files {
+            for SnapFileEntry { path, hash, size, stored, executable, mtime, storage_method, is_symlink } in files {
                 file_stmt.execute(params![
                     rowid,
                     path,
@@ -451,6 +414,7 @@ impl Database {
                     *executable as i32,
                     mtime,
                     storage_method,
+                    *is_symlink as i32,
                 ])?;
             }
         }
@@ -588,19 +552,19 @@ impl Database {
     pub fn get_snapshot_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT path, hash, size, stored, executable, mtime, storage_method
+            "SELECT path, hash, size, stored, executable, mtime, storage_method, COALESCE(is_symlink, 0)
              FROM snapshot_files WHERE snapshot_rowid = ?1",
         )?;
         let rows = stmt.query_map(params![snapshot_rowid], |row| {
-            Ok(FileEntryRow {
-                path: row.get(0)?,
-                hash: row.get(1)?,
-                size: row.get::<_, i64>(2)? as u64,
-                stored: row.get::<_, i32>(3)? != 0,
-                executable: row.get::<_, i32>(4)? != 0,
-                mtime: row.get::<_, Option<i64>>(5).ok().flatten(),
-                storage_method: row.get::<_, i64>(6).unwrap_or(1),
-            })
+            let path: String = row.get(0)?;
+            let hash: String = row.get(1)?;
+            let size = row.get::<_, i64>(2)? as u64;
+            let stored = row.get::<_, i32>(3)? != 0;
+            let executable = row.get::<_, i32>(4)? != 0;
+            let mtime = row.get::<_, Option<i64>>(5).ok().flatten();
+            let storage_method = row.get::<_, i64>(6).unwrap_or(1);
+            let is_symlink = row.get::<_, Option<i32>>(7).ok().flatten().unwrap_or(0) != 0;
+            Ok(FileEntryRow { path, hash, size, stored, executable, mtime, storage_method, is_symlink })
         })?;
         let mut entries = Vec::new();
         for row in rows {
@@ -615,15 +579,12 @@ impl Database {
             "SELECT path, hash, size, stored, storage_method FROM snapshot_deleted WHERE snapshot_rowid = ?1",
         )?;
         let rows = stmt.query_map(params![snapshot_rowid], |row| {
-            Ok(FileEntryRow {
-                path: row.get(0)?,
-                hash: row.get(1)?,
-                size: row.get::<_, i64>(2)? as u64,
-                stored: row.get::<_, i32>(3)? != 0,
-                executable: false,
-                mtime: None,
-                storage_method: row.get::<_, i64>(4).unwrap_or(1),
-            })
+            let path: String = row.get(0)?;
+            let hash: String = row.get(1)?;
+            let size = row.get::<_, i64>(2)? as u64;
+            let stored = row.get::<_, i32>(3)? != 0;
+            let storage_method = row.get::<_, i64>(4).unwrap_or(1);
+            Ok(FileEntryRow { path, hash, size, stored, executable: false, mtime: None, storage_method, is_symlink: false })
         })?;
         let mut entries = Vec::new();
         for row in rows {
@@ -970,6 +931,41 @@ impl Database {
         Ok(size as u64)
     }
 
+    /// Increment the cached blob bytes counter by delta (can be negative).
+    pub fn add_blob_bytes(&self, delta: i64) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO stats (key, value) VALUES ('blob_bytes', 0)
+             ON CONFLICT(key) DO UPDATE SET value = value + excluded.value",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE stats SET value = value + ?1 WHERE key = 'blob_bytes'",
+            params![delta],
+        )?;
+        Ok(())
+    }
+
+    /// Get the cached blob bytes total; returns 0 if missing.
+    pub fn get_blob_bytes(&self) -> Result<u64> {
+        let conn = self.conn();
+        let v: i64 = conn
+            .query_row(
+                "SELECT value FROM stats WHERE key = 'blob_bytes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(if v < 0 { 0 } else { v as u64 })
+    }
+
+    /// Run VACUUM to reclaim free pages; should be scheduled during idle.
+    pub fn vacuum(&self) -> Result<()> {
+        let conn = self.conn();
+        conn.execute_batch("VACUUM;")?;
+        Ok(())
+    }
+
     /// Estimate the total size of stored blobs referenced by a single snapshot
     pub fn estimate_snapshot_blob_size(&self, snapshot_rowid: i64) -> Result<u64> {
         let conn = self.conn();
@@ -991,6 +987,7 @@ pub struct SnapFileEntry {
     pub executable: bool,
     pub mtime: Option<i64>,
     pub storage_method: i64,
-}
+        pub is_symlink: bool,
+    }
 pub type DeletedFile = (String, String, u64, bool, i64); // (path, hash, size, stored, storage_method)
 pub type TreeHash = (String, String); // (dir_path, tree_hash)
