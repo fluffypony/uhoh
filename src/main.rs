@@ -1214,6 +1214,30 @@ fn extract_artifact_path(detail: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn write_secure_runtime_json(path: &std::path::Path, payload: &[u8]) -> Result<()> {
+    if path
+        .symlink_metadata()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        anyhow::bail!("Refusing to write approval response through symlink");
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, payload)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp, path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 fn apply_recovery_artifact(path: &str, uhoh_dir: &std::path::Path) -> Result<()> {
     let artifact_path = std::path::Path::new(path);
     if !artifact_path.exists() {
@@ -1403,9 +1427,9 @@ fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Resul
                     "approval_id": approval_id,
                     "response": response,
                 });
-                std::fs::write(
-                    runtime.join(format!("{stem}.approved.json")),
-                    serde_json::to_vec_pretty(&body)?,
+                write_secure_runtime_json(
+                    &runtime.join(format!("{stem}.approved.json")),
+                    &serde_json::to_vec_pretty(&body)?,
                 )?;
                 approved_any = true;
             }

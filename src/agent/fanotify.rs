@@ -201,8 +201,10 @@ fn flush_batch(ledger: EventLedger, batch: &mut VecDeque<PendingAudit>) -> Resul
         let mut event = new_event("agent", "fanotify_preimage", "info");
         event.path = Some(item.path.display().to_string());
         event.pre_state_ref = Some(item.pre_state_ref.clone());
+        let session_id = format!("pid:{}:{}", item.pid, item.pid_start_time_ticks);
         event.detail = Some(
             serde_json::json!({
+                "session_id": session_id,
                 "source": "fanotify_open_perm",
                 "pid": item.pid,
                 "pid_start_time_ticks": item.pid_start_time_ticks,
