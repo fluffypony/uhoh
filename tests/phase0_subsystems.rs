@@ -1,0 +1,186 @@
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use std::process::Command as TestCommand;
+use tempfile::TempDir;
+
+use uhoh::db::{Database, NewEventLedgerEntry};
+use uhoh::event_ledger::{new_event, EventLedger};
+use uhoh::subsystem::{Subsystem, SubsystemContext, SubsystemHealth, SubsystemManager};
+
+#[derive(Clone)]
+struct TestCounters {
+    run: Arc<AtomicUsize>,
+    shutdown: Arc<AtomicUsize>,
+}
+
+struct TestSubsystem {
+    counters: TestCounters,
+}
+
+#[async_trait::async_trait]
+impl Subsystem for TestSubsystem {
+    fn name(&self) -> &str {
+        "test"
+    }
+
+    async fn run(
+        &mut self,
+        _shutdown: tokio_util::sync::CancellationToken,
+        _ctx: SubsystemContext,
+    ) -> Result<()> {
+        self.counters.run.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        self.counters.shutdown.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn health_check(&self) -> SubsystemHealth {
+        SubsystemHealth::Healthy
+    }
+}
+
+fn temp_db() -> (TempDir, Arc<Database>) {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::open(&temp.path().join("uhoh.db")).unwrap());
+    (temp, db)
+}
+
+fn event(source: &str, event_type: &str, path: Option<&str>, causal_parent: Option<i64>) -> NewEventLedgerEntry {
+    let mut e = new_event(source, event_type, "info");
+    e.path = path.map(str::to_string);
+    e.causal_parent = causal_parent;
+    e
+}
+
+#[tokio::test]
+async fn subsystem_manager_starts_reports_health_and_shuts_down() {
+    let (tmp, db) = temp_db();
+    let ledger = EventLedger::new(db.clone());
+    let ctx = SubsystemContext {
+        database: db,
+        event_ledger: ledger,
+        config: uhoh::config::Config::default(),
+        uhoh_dir: tmp.path().to_path_buf(),
+    };
+
+    let counters = TestCounters {
+        run: Arc::new(AtomicUsize::new(0)),
+        shutdown: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let mut mgr = SubsystemManager::new(3, Duration::from_secs(60));
+    mgr.register(Box::new(TestSubsystem {
+        counters: counters.clone(),
+    }));
+
+    mgr.start_all(ctx.clone()).await;
+    for _ in 0..40 {
+        if counters.run.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(counters.run.load(Ordering::SeqCst), 1);
+    let health = mgr.health_snapshot().await;
+    assert_eq!(health.len(), 1);
+    assert_eq!(health[0].0, "test");
+    assert!(matches!(health[0].1, SubsystemHealth::Healthy));
+
+    mgr.shutdown_all().await;
+    assert_eq!(counters.shutdown.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn event_ledger_trace_and_resolve_roundtrip() {
+    let (_tmp, db) = temp_db();
+    let ledger = EventLedger::new(db.clone());
+
+    let root = ledger
+        .append(event("agent", "tool_call", Some("src/lib.rs"), None))
+        .unwrap();
+    let child = ledger
+        .append(event("fs", "file_write", Some("src/lib.rs"), Some(root)))
+        .unwrap();
+
+    let trace = ledger.trace(child).unwrap();
+    assert_eq!(trace.len(), 2);
+    assert_eq!(trace[0].id, child);
+    assert_eq!(trace[1].id, root);
+
+    ledger.mark_resolved(child).unwrap();
+    let updated = db.event_ledger_get(child).unwrap().unwrap();
+    assert!(updated.resolved);
+}
+
+fn make_cli_home_with_events() -> (TempDir, i64, i64) {
+    let home = tempfile::tempdir().unwrap();
+    let uhoh_dir = home.path().join(".uhoh");
+    std::fs::create_dir_all(&uhoh_dir).unwrap();
+
+    let db = Database::open(&uhoh_dir.join("uhoh.db")).unwrap();
+    let root = db
+        .insert_event_ledger(&event("agent", "pre_notify", Some("src/lib.rs"), None))
+        .unwrap();
+    let child = db
+        .insert_event_ledger(&event("fs", "file_write", Some("src/lib.rs"), Some(root)))
+        .unwrap();
+
+    (home, root, child)
+}
+
+fn apply_home_env(cmd: &mut TestCommand, home: &Path) {
+    cmd.env("HOME", home);
+    cmd.env("USERPROFILE", home);
+}
+
+fn run_cli(home: &Path, args: &[&str]) -> (bool, String, String) {
+    #[allow(deprecated)]
+    let exe = assert_cmd::cargo::cargo_bin("uhoh");
+    let mut cmd = TestCommand::new(exe);
+    apply_home_env(&mut cmd, home);
+    cmd.args(args);
+    let out = cmd.output().expect("failed to execute uhoh CLI");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+#[test]
+fn cli_trace_prints_causal_chain() {
+    let (home, root, child) = make_cli_home_with_events();
+    let (ok, stdout, _stderr) = run_cli(home.path(), &["trace", &child.to_string()]);
+    assert!(ok);
+    assert!(stdout.contains(&format!("#{child}")));
+    assert!(stdout.contains("fs"));
+    assert!(stdout.contains(&format!("#{root}")));
+    assert!(stdout.contains("agent"));
+}
+
+#[test]
+fn cli_blame_prints_chain_for_path() {
+    let (home, root, child) = make_cli_home_with_events();
+    let (ok, stdout, _stderr) = run_cli(home.path(), &["blame", "src/lib.rs"]);
+    assert!(ok);
+    assert!(stdout.contains("Blame chain for src/lib.rs"));
+    assert!(stdout.contains(&format!("#{child}")));
+    assert!(stdout.contains(&format!("#{root}")));
+}
+
+#[test]
+fn cli_blame_reports_when_path_not_found() {
+    let (home, _root, _child) = make_cli_home_with_events();
+    let (ok, stdout, _stderr) = run_cli(home.path(), &["blame", "missing/file.rs"]);
+    assert!(ok);
+    assert!(stdout.contains("No events found for path missing/file.rs"));
+}

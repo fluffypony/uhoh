@@ -542,12 +542,21 @@ async fn main() -> Result<()> {
         }
 
         Commands::Blame { path } => {
-            let events = database.event_ledger_recent(None, None, None, 200)?;
-            for e in events
-                .iter()
-                .filter(|e| e.path.as_deref() == Some(path.as_str()))
+            let events = database.event_ledger_recent(None, None, None, 500)?;
+            if let Some(seed) = events
+                .into_iter()
+                .find(|e| e.path.as_deref() == Some(path.as_str()))
             {
-                println!("#{} {} {} {}", e.id, e.ts, e.source, e.event_type);
+                let chain = database.event_ledger_trace(seed.id)?;
+                println!("Blame chain for {}", path);
+                for entry in chain {
+                    println!(
+                        "#{} {} {} [{}] {}",
+                        entry.id, entry.ts, entry.source, entry.severity, entry.event_type
+                    );
+                }
+            } else {
+                println!("No events found for path {}", path);
             }
         }
 
