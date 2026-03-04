@@ -441,11 +441,41 @@ fn validate_auth_line(line: &str, expected_token: &str) -> Result<bool> {
 }
 
 fn read_approval_response(path: &Path) -> Result<Option<ApprovalResponse>> {
-    if !path.exists() {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("Failed stating approval response: {}", path.display()));
+        }
+    };
+    if meta.file_type().is_symlink() {
+        let _ = std::fs::remove_file(path);
         return Ok(None);
     }
+
+    #[cfg(unix)]
+    let raw = {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+            .with_context(|| format!("Failed opening approval response: {}", path.display()))?;
+        let mut raw = Vec::new();
+        let mut reader = std::io::BufReader::new(file);
+        reader
+            .read_to_end(&mut raw)
+            .with_context(|| format!("Failed reading approval response: {}", path.display()))?;
+        raw
+    };
+
+    #[cfg(not(unix))]
     let raw = std::fs::read(path)
         .with_context(|| format!("Failed reading approval response: {}", path.display()))?;
+
     let parsed: ApprovalResponse = match serde_json::from_slice(&raw) {
         Ok(value) => value,
         Err(e) => {

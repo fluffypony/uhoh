@@ -861,11 +861,16 @@ fn handle_db_commands(
                 println!("-- artifact_path: {path}");
                 if *apply {
                     apply_recovery_artifact(&path, uhoh_dir)?;
-                    println!("Applied recovery artifact from {path}");
+                    println!(
+                        "Validated and decrypted recovery artifact from {path}; SQL execution remains manual"
+                    );
                 }
             }
             if *apply {
-                println!("Applied recovery marker for event #{}", entry.id);
+                println!(
+                    "Marked recovery marker for event #{} as resolved (no automatic SQL execution performed)",
+                    entry.id
+                );
                 database.event_ledger_mark_resolved(entry.id)?;
             } else {
                 println!("Use --apply to mark as resolved");

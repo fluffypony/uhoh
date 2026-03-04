@@ -288,3 +288,18 @@ fn postgres_listen_worker_queries_use_monotonic_id_cursor() {
     assert!(source.contains("last_seen_id = last_seen_id.max(id);"));
     assert!(!source.contains("WHERE id > COALESCE((SELECT MAX(id) FROM _uhoh_ddl_events WHERE 1=0), 0)"));
 }
+
+#[test]
+fn mcp_approval_reader_uses_nofollow_guards() {
+    let source = std::fs::read_to_string("src/agent/mcp_proxy.rs")
+        .expect("read mcp proxy implementation");
+    assert!(source.contains("symlink_metadata(path)"));
+    assert!(source.contains("libc::O_NOFOLLOW | libc::O_CLOEXEC"));
+}
+
+#[test]
+fn db_recover_apply_output_clarifies_manual_sql_execution() {
+    let source = std::fs::read_to_string("src/main.rs").expect("read main command handler");
+    assert!(source.contains("Validated and decrypted recovery artifact"));
+    assert!(source.contains("no automatic SQL execution performed"));
+}
