@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+#[cfg(target_os = "macos")]
+use chrono::TimeZone;
 use std::path::PathBuf;
 
 pub fn uhoh_dir() -> PathBuf {
@@ -256,6 +258,107 @@ pub fn is_uhoh_process_alive(pid: u32) -> bool {
 
     #[allow(unreachable_code)]
     false
+}
+
+/// Stronger daemon-process check that validates both process identity and start-time
+/// to defend against PID reuse after crashes/restarts.
+pub fn is_uhoh_process_alive_with_start(pid: u32, expected_start: Option<u64>) -> bool {
+    if !is_uhoh_process_alive(pid) {
+        return false;
+    }
+    if let Some(expected) = expected_start {
+        if expected == 0 {
+            return true;
+        }
+        return read_process_start_ticks(pid).is_some_and(|actual| actual == expected);
+    }
+    true
+}
+
+/// Capture OS process start time in kernel ticks for PID-reuse-safe identity checks.
+pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat_path = format!("/proc/{pid}/stat");
+        let stat = std::fs::read_to_string(stat_path).ok()?;
+        let close = stat.rfind(')')?;
+        let rest = stat.get(close + 2..)?;
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        return fields.get(19).and_then(|v| v.parse::<u64>().ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if raw.is_empty() {
+            return None;
+        }
+        let parsed = chrono::NaiveDateTime::parse_from_str(&raw, "%a %b %e %H:%M:%S %Y").ok()?;
+        let dt = chrono::Local.from_local_datetime(&parsed).single()?;
+        return Some(dt.timestamp() as u64);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use winapi::shared::minwindef::FILETIME;
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::processthreadsapi::{GetProcessTimes, OpenProcess};
+        use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
+
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return None;
+            }
+            let mut creation: FILETIME = std::mem::zeroed();
+            let mut exit_time: FILETIME = std::mem::zeroed();
+            let mut kernel: FILETIME = std::mem::zeroed();
+            let mut user: FILETIME = std::mem::zeroed();
+            let ok = GetProcessTimes(
+                handle,
+                &mut creation,
+                &mut exit_time,
+                &mut kernel,
+                &mut user,
+            );
+            CloseHandle(handle);
+            if ok == 0 {
+                return None;
+            }
+            let high = (creation.dwHighDateTime as u64) << 32;
+            let low = creation.dwLowDateTime as u64;
+            return Some((high | low) / 10_000);
+        }
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_uhoh_process_alive, is_uhoh_process_alive_with_start, read_process_start_ticks,
+    };
+
+    #[test]
+    fn process_start_ticks_support_pid_reuse_safe_checks() {
+        let pid = std::process::id();
+        let ticks = read_process_start_ticks(pid).unwrap_or(0);
+        assert!(is_uhoh_process_alive(pid));
+        assert!(is_uhoh_process_alive_with_start(pid, Some(ticks)));
+        assert!(!is_uhoh_process_alive_with_start(
+            pid,
+            Some(ticks.saturating_add(1))
+        ));
+    }
 }
 
 #[cfg(target_os = "windows")]

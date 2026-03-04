@@ -52,11 +52,15 @@ fn is_daemon_running(uhoh: &std::path::Path) -> bool {
     let pid_path = uhoh.join("daemon.pid");
     match std::fs::read_to_string(&pid_path) {
         Ok(pid_str) => {
-            if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                platform::is_uhoh_process_alive(pid)
-            } else {
-                false
-            }
+            let mut parts = pid_str.split_whitespace();
+            let Some(pid_raw) = parts.next() else {
+                return false;
+            };
+            let Ok(pid) = pid_raw.parse::<u32>() else {
+                return false;
+            };
+            let expected_start = parts.next().and_then(|v| v.parse::<u64>().ok());
+            platform::is_uhoh_process_alive_with_start(pid, expected_start)
         }
         Err(_) => false,
     }
@@ -794,9 +798,7 @@ fn handle_db_commands(
                 && (mode.eq_ignore_ascii_case("cdc") || mode.eq_ignore_ascii_case("binlog"))
             {
                 #[cfg(not(feature = "mysql-cdc"))]
-                anyhow::bail!(
-                    "MySQL CDC/binlog mode requires building with --features mysql-cdc"
-                );
+                anyhow::bail!("MySQL CDC/binlog mode requires building with --features mysql-cdc");
             }
 
             if engine == "postgres" {
@@ -814,7 +816,9 @@ fn handle_db_commands(
                         )
                     })?;
                 if engine == "postgres" {
-                    if let Err(err) = uhoh::db_guard::store_postgres_credentials_cli(&connection_ref, &creds) {
+                    if let Err(err) =
+                        uhoh::db_guard::store_postgres_credentials_cli(&connection_ref, &creds)
+                    {
                         tracing::warn!(
                             "Postgres keyring mirror failed for '{}': {}",
                             guard_name,
@@ -1032,7 +1036,8 @@ fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Re
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-            let table_names: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
+            let table_names: Vec<String> =
+                rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
             for table in table_names {
                 install_delete_counter_trigger(&client, &table).await?;
             }
@@ -1051,15 +1056,15 @@ async fn install_delete_counter_trigger(
     table: &str,
 ) -> Result<()> {
     let table_safe = table.replace('\'', "''");
-    let table_quoted = quote_pg_ident(table);
+    let table_quoted = quote_pg_ident(table)?;
     let fn_ident = quote_pg_ident(&format!(
         "_uhoh_count_deletes_{}",
         blake3::hash(table.as_bytes()).to_hex()
-    ));
+    ))?;
     let trigger_ident = quote_pg_ident(&format!(
         "uhoh_delete_counter_{}",
         blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
-    ));
+    ))?;
 
     let install_sql = format!(
         "
@@ -1102,19 +1107,18 @@ fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Resul
             let trigger_ident = quote_pg_ident(&format!(
                 "uhoh_delete_counter_{}",
                 blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
-            ));
+            ))?;
             let fn_ident = quote_pg_ident(&format!(
                 "_uhoh_count_deletes_{}",
                 blake3::hash(table.as_bytes()).to_hex()
-            ));
-            let table_quoted = quote_pg_ident(&table);
+            ))?;
+            let table_quoted = quote_pg_ident(&table)?;
             let sql = format!(
                 "DROP TRIGGER IF EXISTS {trigger_ident} ON {table_quoted}; DROP FUNCTION IF EXISTS {fn_ident}();"
             );
-            client
-                .batch_execute(&sql)
-                .await
-                .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+            client.batch_execute(&sql).await.map_err(|e| {
+                anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string()))
+            })?;
         }
 
         client
@@ -1194,8 +1198,42 @@ fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
         .collect()
 }
 
-fn quote_pg_ident(input: &str) -> String {
-    format!("\"{}\"", input.replace('"', "\"\""))
+fn quote_pg_ident(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Postgres identifier must not be empty");
+    }
+    if trimmed.contains('\0') {
+        anyhow::bail!("Postgres identifier contains NUL byte");
+    }
+
+    let mut out = Vec::new();
+    for part in trimmed.split('.') {
+        if part.is_empty() {
+            anyhow::bail!("Postgres identifier has empty qualified segment");
+        }
+        out.push(format!("\"{}\"", part.replace('"', "\"\"")));
+    }
+    Ok(out.join("."))
+}
+
+#[cfg(test)]
+mod identifier_tests {
+    use super::quote_pg_ident;
+
+    #[test]
+    fn quote_pg_ident_handles_qualified_names() {
+        let out = quote_pg_ident("public.users").expect("quoted");
+        assert_eq!(out, "\"public\".\"users\"");
+    }
+
+    #[test]
+    fn quote_pg_ident_rejects_empty_segments() {
+        let err = quote_pg_ident("public..users").expect_err("must reject");
+        assert!(err
+            .to_string()
+            .contains("Postgres identifier has empty qualified segment"));
+    }
 }
 
 fn extract_dsn_credentials(dsn: &str) -> Option<uhoh::db_guard::CredentialMaterial> {

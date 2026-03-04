@@ -286,9 +286,15 @@ pub fn spawn_detached_daemon() -> Result<()> {
 pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
     let pid_path = uhoh_dir.join("daemon.pid");
     let pid_str = std::fs::read_to_string(&pid_path).context("Daemon not running (no PID file)")?;
-    let pid: u32 = pid_str.trim().parse().context("Invalid PID file")?;
+    let mut parts = pid_str.split_whitespace();
+    let pid: u32 = parts
+        .next()
+        .context("Invalid PID file")?
+        .parse()
+        .context("Invalid PID file")?;
+    let expected_start = parts.next().and_then(|v| v.parse::<u64>().ok());
 
-    if !crate::platform::is_uhoh_process_alive(pid) {
+    if !crate::platform::is_uhoh_process_alive_with_start(pid, expected_start) {
         std::fs::remove_file(&pid_path).ok();
         println!("Daemon was not running (stale PID file cleaned up).");
         return Ok(());
@@ -307,12 +313,12 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
             .status();
         // Wait briefly for process to end
         for _ in 0..50 {
-            if !crate::platform::is_uhoh_process_alive(pid) {
+            if !crate::platform::is_uhoh_process_alive_with_start(pid, expected_start) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        if crate::platform::is_uhoh_process_alive(pid) {
+        if crate::platform::is_uhoh_process_alive_with_start(pid, expected_start) {
             // Force kill as fallback
             let _ = std::process::Command::new("taskkill")
                 .args(["/F", "/PID", &pid.to_string(), "/T"])
@@ -413,9 +419,14 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     // Truncate and write PID
     #[cfg(unix)]
     {
-        use std::os::unix::fs::FileExt as _;
+        use std::io::Write as _;
         let _ = pid_file.set_len(0);
-        let _ = pid_file.write_at(std::process::id().to_string().as_bytes(), 0);
+        let start_ticks =
+            crate::platform::read_process_start_ticks(std::process::id()).unwrap_or(0);
+        let record = format!("{} {}\n", std::process::id(), start_ticks);
+        let mut f = &pid_file;
+        let _ = f.write_all(record.as_bytes());
+        let _ = f.sync_all();
     }
     #[cfg(not(unix))]
     {
@@ -426,7 +437,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
         let mut f = &pid_file;
         let _ = f.set_len(0);
         let _ = f.seek(SeekFrom::Start(0));
-        let _ = f.write_all(std::process::id().to_string().as_bytes());
+        let start_ticks =
+            crate::platform::read_process_start_ticks(std::process::id()).unwrap_or(0);
+        let record = format!("{} {}\n", std::process::id(), start_ticks);
+        let _ = f.write_all(record.as_bytes());
+        let _ = f.sync_all();
     }
 
     // Set up logging to file
