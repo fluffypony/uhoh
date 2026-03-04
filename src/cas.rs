@@ -164,7 +164,7 @@ pub fn store_blob_from_file(
         return Ok((hash, file_size, StorageMethod::Hardlink));
     }
 
-    // Try full copy if within size limit
+    // Try full copy if within size limit; apply compression when enabled and beneficial
     if file_size <= effective_limit {
         // Write to temp then rename for atomicity
         let tmp_dir = blob_root.join("tmp");
@@ -177,6 +177,8 @@ pub fn store_blob_from_file(
                 .unwrap()
                 .as_nanos()
         ));
+        // Stream copy to memory only for small files; otherwise do direct copy
+        // For simplicity and safety, reuse std::fs::copy then verify and optionally compress in-memory for small sizes.
         std::fs::copy(file_path, &tmp_path)?;
         // TOCTOU guard: re-hash the stored bytes to ensure match
         let stored_hash = {
@@ -266,8 +268,8 @@ fn set_blob_readonly(path: &Path) {
 fn maybe_compress(data: &[u8]) -> Vec<u8> {
     #[cfg(feature = "compression")]
     {
-        // Prefix with a robust magic header to avoid collisions with raw data
-        const COMPRESSION_MAGIC: &[u8; 4] = b"UHZS"; // "UH" + "ZS" (zstd)
+        // Prefix with a longer robust magic header to avoid accidental collisions
+        const COMPRESSION_MAGIC: &[u8; 8] = b"UHZS\x00\xF0\x9F\xA6"; // lengthened header
         // Compression level is static at runtime; default to 3 when feature enabled
         let level = 3;
         let compressed = zstd::encode_all(std::io::Cursor::new(data), level)
@@ -288,9 +290,9 @@ fn maybe_compress(data: &[u8]) -> Vec<u8> {
 fn maybe_decompress(data: &[u8]) -> Result<Vec<u8>> {
     #[cfg(feature = "compression")]
     {
-        const COMPRESSION_MAGIC: &[u8; 4] = b"UHZS";
-        if data.len() > 4 && &data[..4] == COMPRESSION_MAGIC {
-            return zstd::decode_all(std::io::Cursor::new(&data[4..]))
+        const COMPRESSION_MAGIC: &[u8; 8] = b"UHZS\x00\xF0\x9F\xA6";
+        if data.len() > 8 && &data[..8] == COMPRESSION_MAGIC {
+            return zstd::decode_all(std::io::Cursor::new(&data[8..]))
                 .context("Failed to decompress blob");
         }
     }

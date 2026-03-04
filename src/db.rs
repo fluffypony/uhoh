@@ -292,7 +292,12 @@ impl Database {
 
     pub fn find_project_by_hash_prefix(&self, prefix: &str) -> Result<Option<ProjectEntry>> {
         let conn = self.conn();
-        let pattern = format!("{}%", prefix);
+        // Escape SQL wildcards in user-provided prefix
+        let mut esc = String::new();
+        for ch in prefix.chars() {
+            match ch { '%' | '_' => { esc.push('['); esc.push(ch); esc.push(']'); } _ => esc.push(ch) }
+        }
+        let pattern = format!("{}%", esc);
 
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM projects WHERE hash LIKE ?1",

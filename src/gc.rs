@@ -35,12 +35,13 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
 
     // Get all referenced hashes
     let referenced = database.all_referenced_blob_hashes()?;
+    // Include blobs recently written (temp files promoted within last grace period) by ignoring too-young files below
     println!("Referenced blobs: {}", referenced.len());
 
     // Walk blob directory
     let mut orphaned = Vec::new();
     let mut total_size = 0u64;
-    let grace_period = std::time::Duration::from_secs(600); // 10 minutes
+    let grace_period = std::time::Duration::from_secs(900); // 15 minutes to cover long snapshots
 
     for prefix_entry in std::fs::read_dir(&blob_root)? {
         let prefix_entry = prefix_entry?;

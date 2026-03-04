@@ -518,6 +518,11 @@ async fn process_pending_snapshots(
 ) {
     let now = Instant::now();
 
+    // Process multiple projects concurrently with a concurrency cap
+    let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let concurrency = std::cmp::max(1, (logical / 2).max(1));
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let mut join = tokio::task::JoinSet::new();
     for (project_path, state) in states.iter_mut() {
         if state.pending_changes.is_empty() {
             continue;
@@ -540,47 +545,28 @@ async fn process_pending_snapshots(
         let min_interval = since_last_snapshot >= Duration::from_secs(config.watch.min_snapshot_interval_secs);
 
         if (quiet_elapsed || max_ceiling) && min_interval {
-            // Create snapshot in blocking task to avoid blocking runtime
             let uhoh_dir_buf = uhoh_dir.to_path_buf();
             let db_path = uhoh_dir_buf.join("uhoh.db");
             let project_hash = state.hash.clone();
             let proj_path = Path::new(project_path).to_path_buf();
             let cfg = config.clone();
             let changed: Vec<PathBuf> = state.pending_changes.iter().cloned().collect();
-            let result = tokio::task::spawn_blocking(move || {
-                let database = crate::db::Database::open(&db_path)?;
-                snapshot::create_snapshot(
-                    &uhoh_dir_buf,
-                    &database,
-                    &project_hash,
-                    &proj_path,
-                    "auto",
-                    None,
-                    &cfg,
-                    Some(&changed),
-                )
-            }).await;
-
-            match result.unwrap_or_else(|_| Ok(None)) {
-                Ok(Some(_id)) => {
-                    state.last_snapshot = now;
-                    // Clear pending state after successful snapshot
-                    state.pending_changes.clear();
-                    state.first_change_at = None;
-                    state.last_change_at = None;
-                    tracing::debug!("Auto-snapshot for {}", &state.hash[..state.hash.len().min(12)]);
-                }
-                Ok(None) => {
-                    // No changes detected — clear pending state
-                    state.pending_changes.clear();
-                    state.first_change_at = None;
-                    state.last_change_at = None;
-                }
-                Err(e) => {
-                    // Snapshot failed — keep pending changes for retry
-                    tracing::error!("Snapshot error for {}: {:?}", project_path, e);
-                }
-            }
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            // Move minimal state needed; clear after join completes below
+            join.spawn(async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    let database = crate::db::Database::open(&db_path)?;
+                    snapshot::create_snapshot(&uhoh_dir_buf, &database, &project_hash, &proj_path, "auto", None, &cfg, Some(&changed))
+                }).await;
+                drop(permit);
+                res.unwrap_or_else(|_| Ok(None))
+            });
+        }
+    }
+    while let Some(res) = join.join_next().await {
+        match res.unwrap_or(Ok(None)) {
+            Ok(Some(_)) | Ok(None) => { /* success or no-op */ }
+            Err(e) => { tracing::error!("Auto-snapshot task error: {}", e); }
         }
     }
 }

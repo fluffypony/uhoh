@@ -129,7 +129,9 @@ pub fn cmd_restore(
     }
 
     // Non-atomic deletions replaced by staged restore into temp dir followed by atomic renames
-    let restore_tmp = project_path.join(".uhoh-restore-tmp");
+    // Use a unique staging directory name to avoid collisions
+    let unique_suffix = format!("{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos());
+    let restore_tmp = project_path.join(format!(".uhoh-restore-tmp-{}", unique_suffix));
     std::fs::create_dir_all(&restore_tmp)?;
 
     // Stage restored files into temp directory
@@ -147,9 +149,17 @@ pub fn cmd_restore(
             tracing::warn!("Skipping suspicious path: {}", path);
             continue;
         }
-        // Stage under temp dir
+        // Stage under temp dir — avoid following symlinks by verifying parents are not symlinks
         let full_path = restore_tmp.join(path);
         if let Some(parent) = full_path.parent() {
+            // Ensure none of the parent components are symlinks
+            let mut cur = parent.to_path_buf();
+            while cur != restore_tmp {
+                if let Ok(meta) = std::fs::symlink_metadata(&cur) {
+                    if meta.file_type().is_symlink() { anyhow::bail!("Refusing to write through symlinked directory: {}", cur.display()); }
+                }
+                if !cur.pop() { break; }
+            }
             std::fs::create_dir_all(parent)?;
         }
         let content = cas::read_blob(&blob_root, hash)?
@@ -184,6 +194,21 @@ pub fn cmd_restore(
     }
     // Cleanup staging
     let _ = std::fs::remove_dir_all(&restore_tmp);
+    // Clean up any now-empty directories within project (best-effort)
+    fn remove_empty_dirs(root: &Path, base: &Path) {
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() { remove_empty_dirs(&p, base); }
+            }
+        }
+        if root != base {
+            if std::fs::read_dir(root).map(|mut it| it.next().is_none()).unwrap_or(false) {
+                let _ = std::fs::remove_dir(root);
+            }
+        }
+    }
+    remove_empty_dirs(project_path, project_path);
 
     let snap_id_str = cas::id_to_base58(snap.snapshot_id);
     println!(

@@ -158,7 +158,7 @@ fn default_storage_limit_fraction() -> f64 { 0.15 }
 fn default_storage_min_bytes() -> u64 { 524_288_000 } // 500MB floor
 fn default_compress_level() -> i32 { 3 }
 fn default_skip_on_battery() -> bool { true }
-fn default_max_context_tokens() -> usize { 200_000 }
+fn default_max_context_tokens() -> usize { 8192 }
 fn default_idle_shutdown_secs() -> u64 { 300 }
 fn default_min_available_memory_gb() -> u64 { 4 }
 fn default_auto_update() -> bool { true }
@@ -221,7 +221,7 @@ impl Default for AiConfig {
         Self {
             enabled: false,
             skip_on_battery: default_skip_on_battery(),
-            max_context_tokens: 200_000,
+            max_context_tokens: default_max_context_tokens(),
             idle_shutdown_secs: default_idle_shutdown_secs(),
             min_available_memory_gb: default_min_available_memory_gb(),
             models: Vec::new(),

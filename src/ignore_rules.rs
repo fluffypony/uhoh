@@ -10,6 +10,7 @@ use std::path::Path;
 /// that were gitignored.
 pub fn build_walker(project_path: &Path) -> ignore::Walk {
     let mut builder = WalkBuilder::new(project_path);
+    let project_path_buf = project_path.to_path_buf();
 
     builder
         .hidden(false) // Don't skip hidden files by default (gitignore handles that)
@@ -31,10 +32,15 @@ pub fn build_walker(project_path: &Path) -> ignore::Walk {
     }
 
     // Always ignore common large/ephemeral directories that might slip through
-    builder.filter_entry(|entry| {
+    let base = project_path_buf.clone();
+    builder.filter_entry(move |entry| {
         let name = entry.file_name().to_string_lossy();
         // Skip .git internals (we handle .git/.uhoh separately)
         if name == ".git" {
+            return false;
+        }
+        // Always ignore the uhoh data directory to avoid inception loops
+        if name == ".uhoh" && entry.path().starts_with(&base) {
             return false;
         }
         true
