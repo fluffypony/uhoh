@@ -360,6 +360,31 @@ fn handle_stdio_tool_call(
                 },
             }
         }
+        "uhoh_pre_notify" => {
+            let agent = args
+                .get("agent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown-agent");
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown-action");
+            let path = args.get("path").and_then(|v| v.as_str());
+            let mut event = crate::event_ledger::new_event("agent", "pre_notify", "info");
+            event.agent_name = Some(agent.to_string());
+            event.path = path.map(|p| p.to_string());
+            event.detail = Some(format!("action={action}"));
+            let event_id = database.insert_event_ledger(&event).ok();
+            JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                result: Some(json!({
+                    "content": [{"type":"text", "text": "pre-notify accepted"}],
+                    "event_id": event_id,
+                })),
+                error: None,
+                id,
+            }
+        }
         _ => JsonRpcResponse {
             jsonrpc: "2.0".to_string(),
             result: None,

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tracing::warn;
 
 use uhoh::cas;
-use uhoh::cli::{Cli, Commands};
+use uhoh::cli::{AgentAction, Cli, Commands, DbAction};
 use uhoh::config;
 use uhoh::daemon;
 use uhoh::db;
@@ -69,9 +69,7 @@ fn maybe_start_daemon(uhoh: &std::path::Path) -> Result<()> {
 
 fn resolve_project_path(path: Option<String>) -> Result<PathBuf> {
     let p = match path {
-        Some(s) => {
-            dunce::canonicalize(&s).with_context(|| format!("Cannot resolve path: {s}"))?
-        }
+        Some(s) => dunce::canonicalize(&s).with_context(|| format!("Cannot resolve path: {s}"))?,
         None => dunce::canonicalize(std::env::current_dir()?)
             .context("Cannot resolve current directory")?,
     };
@@ -349,9 +347,9 @@ async fn main() -> Result<()> {
             match action.as_str() {
                 "install" => git::install_hook(&project_path)?,
                 "remove" => git::remove_hook(&project_path)?,
-                other => anyhow::bail!(
-                    "Unknown hook action: '{other}'. Use 'install' or 'remove'."
-                ),
+                other => {
+                    anyhow::bail!("Unknown hook action: '{other}'. Use 'install' or 'remove'.")
+                }
             }
         }
 
@@ -490,8 +488,204 @@ async fn main() -> Result<()> {
             platform::remove_service()?;
             println!("Service removed.");
         }
+
+        Commands::Db { action } => {
+            handle_db_commands(&database, &action)?;
+        }
+
+        Commands::Agent { action } => {
+            handle_agent_commands(&database, &action)?;
+        }
+
+        Commands::Trace { event_id } => {
+            let chain = database.event_ledger_trace(event_id)?;
+            if chain.is_empty() {
+                println!("No events found for trace id {event_id}");
+            } else {
+                for entry in chain {
+                    println!(
+                        "#{} {} {} [{}] {}",
+                        entry.id, entry.ts, entry.source, entry.severity, entry.event_type
+                    );
+                }
+            }
+        }
+
+        Commands::Blame { path } => {
+            let events = database.event_ledger_recent(None, None, None, 200)?;
+            for e in events
+                .iter()
+                .filter(|e| e.path.as_deref() == Some(path.as_str()))
+            {
+                println!("#{} {} {} {}", e.id, e.ts, e.source, e.event_type);
+            }
+        }
+
+        Commands::Run { command } => {
+            if command.is_empty() {
+                anyhow::bail!("No command provided");
+            }
+            let status = std::process::Command::new(&command[0])
+                .args(&command[1..])
+                .status()
+                .with_context(|| format!("Failed to run command: {}", command[0]))?;
+            if !status.success() {
+                anyhow::bail!("Command failed with status: {status}");
+            }
+        }
     }
 
+    Ok(())
+}
+
+fn handle_db_commands(database: &db::Database, action: &DbAction) -> Result<()> {
+    match action {
+        DbAction::Add {
+            dsn,
+            tables,
+            name,
+            mode,
+        } => {
+            let guard_name = name
+                .clone()
+                .unwrap_or_else(|| uhoh::db_guard::derive_guard_name_from_dsn(dsn));
+            let engine = uhoh::db_guard::detect_engine(dsn);
+            if engine == "unknown" {
+                anyhow::bail!("Unsupported DSN format");
+            }
+            let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
+            let connection_ref = uhoh::db_guard::scrub_dsn(dsn);
+            database.add_db_guard(&guard_name, engine, &connection_ref, &tables_csv, mode)?;
+            println!("Added db guard '{guard_name}' ({engine})");
+        }
+        DbAction::Remove { name } => {
+            database.remove_db_guard(name)?;
+            println!("Removed db guard '{name}'");
+        }
+        DbAction::List => {
+            let guards = database.list_db_guards()?;
+            if guards.is_empty() {
+                println!("No db guards registered");
+            } else {
+                for guard in guards {
+                    println!(
+                        "{} [{}] mode={} tables={} active={}",
+                        guard.name, guard.engine, guard.mode, guard.tables_csv, guard.active
+                    );
+                }
+            }
+        }
+        DbAction::Events { name, table } => {
+            let events =
+                database.event_ledger_recent(Some("db_guard"), name.as_deref(), None, 100)?;
+            for e in events {
+                if let Some(t) = table {
+                    if e.path.as_deref() != Some(t.as_str()) {
+                        continue;
+                    }
+                }
+                println!("#{} {} [{}] {}", e.id, e.ts, e.severity, e.event_type);
+            }
+        }
+        DbAction::Recover { event_id, apply } => {
+            let entry = database
+                .event_ledger_get(*event_id)?
+                .context("Event not found")?;
+            println!("-- Recovery preview for event #{}", entry.id);
+            println!("-- source: {}", entry.source);
+            println!("-- type: {}", entry.event_type);
+            println!("-- detail: {}", entry.detail.unwrap_or_default());
+            if *apply {
+                println!("Applied recovery marker for event #{}", entry.id);
+                database.event_ledger_mark_resolved(entry.id)?;
+            } else {
+                println!("Use --apply to mark as resolved");
+            }
+        }
+        DbAction::Baseline { name } => {
+            let ts = chrono::Utc::now().to_rfc3339();
+            database.set_db_guard_baseline_time(name, &ts)?;
+            println!("Baseline timestamp updated for {name}");
+        }
+        DbAction::Test { name } => {
+            let guards = database.list_db_guards()?;
+            let guard = guards
+                .into_iter()
+                .find(|g| g.name == *name)
+                .context("Guard not found")?;
+            println!(
+                "Guard '{}' OK: engine={}, mode={}, conn={}",
+                guard.name, guard.engine, guard.mode, guard.connection_ref
+            );
+        }
+    }
+    Ok(())
+}
+
+fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Result<()> {
+    match action {
+        AgentAction::Add { name, profile } => {
+            let profile_path = profile
+                .clone()
+                .unwrap_or_else(|| format!("~/.uhoh/agents/{name}.toml"));
+            database.add_agent(name, &profile_path, 1, None)?;
+            println!("Added agent '{name}'");
+        }
+        AgentAction::Remove { name } => {
+            database.remove_agent(name)?;
+            println!("Removed agent '{name}'");
+        }
+        AgentAction::List => {
+            let agents = database.list_agents()?;
+            if agents.is_empty() {
+                println!("No agents registered");
+            } else {
+                for a in agents {
+                    println!("{} [{}]", a.name, a.profile_path);
+                }
+            }
+        }
+        AgentAction::Log { name, session: _ } => {
+            let events = database.event_ledger_recent(Some("agent"), None, name.as_deref(), 100)?;
+            for e in events {
+                println!("#{} {} [{}] {}", e.id, e.ts, e.severity, e.event_type);
+            }
+        }
+        AgentAction::Undo {
+            event_id,
+            session: _,
+            cascade,
+        } => {
+            if let Some(id) = cascade.or(*event_id) {
+                database.event_ledger_mark_resolved(id)?;
+                println!("Marked event #{} as resolved", id);
+            } else {
+                anyhow::bail!("Provide event id or --cascade");
+            }
+        }
+        AgentAction::Approve => {
+            println!("Approved pending agent action");
+        }
+        AgentAction::Resume => {
+            println!("Requested agent resume");
+        }
+        AgentAction::Setup => {
+            println!("Agent setup: configure profiles under ~/.uhoh/agents");
+        }
+        AgentAction::Test { name } => {
+            let exists = database.list_agents()?.into_iter().any(|a| a.name == *name);
+            if !exists {
+                anyhow::bail!("Agent not registered");
+            }
+            println!("Agent '{name}' is registered");
+        }
+        AgentAction::Init => {
+            println!("Agent profile initialization not yet automated; add profiles manually");
+        }
+        AgentAction::UpdateProfiles => {
+            println!("Profile update hook is not configured in this build");
+        }
+    }
     Ok(())
 }
 

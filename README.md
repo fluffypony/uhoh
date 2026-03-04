@@ -207,6 +207,42 @@ All compaction settings require daemon restart.
 - `ai.idle_shutdown_secs` (default 300): shut down the model server after this many idle seconds. Restart recommended.
 - `ai.min_available_memory_gb` (default 4): don't start AI if available RAM is below this. Restart recommended.
 - `ai.models` (default empty, uses built-in tiers): override the model tier list. Each entry needs `name`, `filename`, `url`, and `min_ram_gb`. Restart required.
+- `ai.mlx.auto_update` (default true): enable periodic `mlx-lm` upgrades in a dedicated virtualenv.
+- `ai.mlx.check_interval_hours` (default 12): how often MLX upgrade checks run.
+- `ai.mlx.python_path` (default empty): optional Python executable for creating the MLX virtualenv.
+- `ai.mlx.venv_path` (default `~/.uhoh/venv/mlx`): dedicated MLX virtualenv path.
+- `ai.mlx.max_version` (default unset): optional upper version pin, e.g. `0.25`.
+
+### Notifications Settings
+
+- `notifications.desktop` (default true): enable desktop notifications.
+- `notifications.webhook_url` (default empty): webhook destination for high-signal alerts.
+- `notifications.webhook_events` (default critical db/agent/mlx events): event names forwarded to webhook.
+- `notifications.cooldown_seconds` (default 60): dedupe window per event type.
+
+### Database Guard Settings
+
+- `db_guard.enabled` (default false): enable database guardian subsystem.
+- `db_guard.mass_delete_row_threshold` (default 100): row-count threshold for alerting.
+- `db_guard.mass_delete_pct_threshold` (default 0.05): table percentage threshold for alerting.
+- `db_guard.baseline_interval_hours` (default 6): baseline snapshot cadence.
+- `db_guard.recovery_retention_days` (default 30): recovery artifact retention.
+- `db_guard.max_baseline_size_mb` (default 500): table baseline cap.
+- `db_guard.max_recovery_file_mb` (default 500): single recovery artifact cap.
+- `db_guard.encrypt_recovery` (default true): encrypt recovery artifacts at rest.
+
+### Agent Monitor Settings
+
+- `agent.enabled` (default false): enable agent monitoring subsystem.
+- `agent.mcp_proxy_enabled` (default true): enable MCP proxy tick processing.
+- `agent.mcp_proxy_port` (default 22823): MCP proxy listen port.
+- `agent.intercept_enabled` (default true): enable session log tailing fallback.
+- `agent.audit_enabled` (default false): enable OS-level audit loop.
+- `agent.audit_scope` (default `project`): audit scope (`project` or `home`).
+- `agent.sandbox_enabled` (default false): enable sandbox integrations when available.
+- `agent.on_dangerous_change` (default `none`): dangerous-action policy.
+- `agent.pause_timeout_seconds` (default 300): auto-resume timeout.
+- `agent.dangerous_patterns`: pattern set used for classification.
 
 ### Update settings
 
@@ -337,6 +373,19 @@ On macOS this creates a launchd agent (`~/Library/LaunchAgents/com.uhoh.daemon.p
 - `uhoh status` — show daemon state, project count, snapshots, blob storage, AI status
 - `uhoh start [--service]` / `uhoh stop` / `uhoh restart`
 - `uhoh service-install` / `uhoh service-remove`
+- `uhoh db add <dsn> [--tables ...] [--name ...] [--mode triggers|replication]`
+- `uhoh db remove <name>` / `uhoh db list`
+- `uhoh db events [name] [--table ...]`
+- `uhoh db recover <event-id> [--apply]`
+- `uhoh db baseline <name>` / `uhoh db test <name>`
+- `uhoh agent add <name> [--profile <path>]`
+- `uhoh agent remove <name>` / `uhoh agent list`
+- `uhoh agent log [name] [--session <id>]`
+- `uhoh agent undo [event-id] [--cascade <event-id>] [--session <id>]`
+- `uhoh agent approve` / `uhoh agent resume` / `uhoh agent setup`
+- `uhoh agent test <name>` / `uhoh agent init` / `uhoh agent update-profiles`
+- `uhoh trace <event-id>` / `uhoh blame <path>`
+- `uhoh run -- <command ...>`
 
 ## Tips
 

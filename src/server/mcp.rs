@@ -102,6 +102,19 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["snapshot_id"]
                 }
+            },
+            {
+                "name": "uhoh_pre_notify",
+                "description": "Cooperative pre-action notification for agent actions.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent": { "type": "string" },
+                        "action": { "type": "string" },
+                        "path": { "type": "string" }
+                    },
+                    "required": ["agent", "action"]
+                }
             }
         ]
     })
@@ -176,7 +189,45 @@ async fn handle_tools_call(
         "create_snapshot" => tool_create_snapshot(state, id, args).await,
         "list_snapshots" => tool_list_snapshots(state, id, args).await,
         "restore_snapshot" => tool_restore_snapshot(state, id, args).await,
+        "uhoh_pre_notify" => tool_pre_notify(state, id, args).await,
         _ => JsonRpcResponse::error(id, -32602, format!("Unknown tool: {tool_name}")),
+    }
+}
+
+async fn tool_pre_notify(state: AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+    let agent = args
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown-agent")
+        .to_string();
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown-action")
+        .to_string();
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let db = state.database.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let mut event = crate::event_ledger::new_event("agent", "pre_notify", "info");
+        event.agent_name = Some(agent.clone());
+        event.path = path.clone();
+        event.detail = Some(format!("action={action}"));
+        let event_id = db.insert_event_ledger(&event)?;
+        Ok(json!({
+            "content": [{"type": "text", "text": "pre-notify accepted"}],
+            "event_id": event_id,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(value)) => JsonRpcResponse::success(id, value),
+        Ok(Err(e)) => JsonRpcResponse::error(id, -32000, e.to_string()),
+        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {e}")),
     }
 }
 

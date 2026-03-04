@@ -1,3 +1,4 @@
+pub mod mlx_update;
 pub mod models;
 pub mod sidecar;
 pub mod sidecar_update;

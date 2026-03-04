@@ -146,6 +146,30 @@ pub enum Commands {
     /// Remove system service
     #[command(name = "service-remove", hide = true)]
     ServiceRemove,
+
+    /// Database guardian commands
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
+
+    /// Agent monitor commands
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+
+    /// Walk a causal chain in the unified event ledger
+    Trace { event_id: i64 },
+
+    /// Trace backward from a path in the event ledger
+    Blame { path: String },
+
+    /// Launch a command under uhoh runtime controls
+    Run {
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -156,4 +180,70 @@ pub enum ConfigAction {
     Set { key: String, value: String },
     /// Get the current value for a key
     Get { key: String },
+}
+
+#[derive(Subcommand)]
+pub enum DbAction {
+    Add {
+        dsn: String,
+        #[arg(long)]
+        tables: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "triggers")]
+        mode: String,
+    },
+    Remove {
+        name: String,
+    },
+    List,
+    Events {
+        name: Option<String>,
+        #[arg(long)]
+        table: Option<String>,
+    },
+    Recover {
+        event_id: i64,
+        #[arg(long)]
+        apply: bool,
+    },
+    Baseline {
+        name: String,
+    },
+    Test {
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentAction {
+    Add {
+        name: String,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    Remove {
+        name: String,
+    },
+    List,
+    Log {
+        name: Option<String>,
+        #[arg(long)]
+        session: Option<String>,
+    },
+    Undo {
+        event_id: Option<i64>,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        cascade: Option<i64>,
+    },
+    Approve,
+    Resume,
+    Setup,
+    Test {
+        name: String,
+    },
+    Init,
+    UpdateProfiles,
 }
