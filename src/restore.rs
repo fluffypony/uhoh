@@ -133,6 +133,10 @@ pub fn cmd_restore(
             tracing::warn!("Skipping suspicious path with '..': {}", path);
             continue;
         }
+        if !full_path.starts_with(project_path) {
+            tracing::warn!("Path escapes project root, skipping: {}", path);
+            continue;
+        }
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)?;
         }

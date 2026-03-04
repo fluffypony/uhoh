@@ -226,6 +226,7 @@ pub fn create_snapshot(
     // Fire-and-forget AI summary generation via ai::summary
     if ai::should_run_ai(&config.ai) {
         let uhoh_dir_cl = uhoh_dir.to_path_buf();
+        let cfg_cloned = config.clone();
         let files_added: Vec<String> = new_files.iter().filter(|p| !prev_files.contains_key(*p)).cloned().collect();
         let files_modified: Vec<String> = new_files.iter().filter(|p| prev_files.contains_key(*p)).cloned().collect();
         let files_deleted: Vec<String> = deleted_for_manifest.iter().map(|(p, _, _, _)| p.clone()).collect();
@@ -258,7 +259,7 @@ pub fn create_snapshot(
         }
 
         std::thread::spawn(move || {
-            let cfg = match crate::config::Config::load(&uhoh_dir_cl.join("config.toml")) { Ok(c) => c, Err(_) => return };
+            let cfg = cfg_cloned;
             let files = crate::ai::summary::FileChangeSummary { added: files_added, deleted: files_deleted, modified: files_modified };
             match crate::ai::summary::generate_summary_blocking(&uhoh_dir_cl, &cfg, &diff_chunks, &files) {
                 Ok(text) if !text.is_empty() => {
