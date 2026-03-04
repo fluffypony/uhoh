@@ -74,19 +74,22 @@ pub fn get_or_spawn_port_with_ctx(model_path: &Path, uhoh_dir: &Path, idle_shutd
 
     // Spawn new sidecar
     let backend = detect_backend(uhoh_dir)?;
-    // Try up to 3 attempts: let backend bind to port 0 and parse announced port
+    // Try up to 5 attempts: choose a high random-ish port and let backend bind it
     let (child, port) = {
         let mut last_err: Option<anyhow::Error> = None;
         let mut out: Option<(Child, u16)> = None;
-        for _ in 0..3 {
-            match spawn_backend(&backend, model_path, uhoh_dir, 0, ctx_tokens) {
-                Ok((child, bound_port)) => {
+        for i in 0..5 {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
+            let guess = 30000 + (((now + i as u64 * 179) % 30000) as u16);
+            match spawn_backend(&backend, model_path, uhoh_dir, guess, ctx_tokens) {
+                Ok((mut child, bound_port)) => {
                     if wait_for_ready_blocking(bound_port, Duration::from_secs(30)).is_ok() {
                         out = Some((child, bound_port));
                         break;
                     } else {
                         last_err = Some(anyhow::anyhow!("sidecar not ready on port {}", bound_port));
-                        continue;
+                        let _ = child.kill();
+                        let _ = child.wait();
                     }
                 }
                 Err(e) => { last_err = Some(e); continue; }
@@ -178,7 +181,7 @@ fn detect_backend(uhoh_dir: &Path) -> Result<Backend> {
     Ok(Backend::LlamaServer { binary: find_sidecar_binary(uhoh_dir)? })
 }
 
-fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, _port: u16, ctx_tokens: u64) -> Result<(Child, u16)> {
+fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, port: u16, ctx_tokens: u64) -> Result<(Child, u16)> {
     let log_file = std::fs::File::create(uhoh_dir.join("sidecar.log"))?;
     match backend {
         Backend::LlamaServer { binary } => {
@@ -187,7 +190,7 @@ fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, _port: u
             cmd.args([
                     "--model",
                     &model_path.to_string_lossy(),
-                    "--port", "0",
+                    "--port", &port.to_string(),
                     "--host",
                     "127.0.0.1",
                     "--ctx-size",
@@ -195,21 +198,10 @@ fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, _port: u
                     "--n-gpu-layers",
                     "999",
                 ]);
-            let mut child = cmd.stdout(Stdio::null())
+            let child = cmd.stdout(Stdio::null())
                 .stderr(Stdio::from(log_file))
                 .spawn()
                 .context("Failed to spawn llama-server")?;
-            // Try to read assigned port from health probe or logs; fallback: probe range (not ideal but bounded by readiness check)
-            // Prefer health check probe for a few ports; since we bound 0, the process prints the port to stderr in common builds.
-            // As a pragmatic approach, we scan a small range of recent ephemeral ports for readiness.
-            let mut found_port: Option<u16> = None;
-            for _ in 0..50 {
-                // Try to detect via a simple increasing guess: not reliable without parsing logs; defer to readiness loop caller
-                // Here we just sleep briefly and let wait_for_ready_blocking handle the final gate.
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            // Fallback: ask ready-checker to detect; we will retry there with None; use 127.0.0.1:8080 as impossible marker
-            let port = found_port.unwrap_or(8080);
             Ok((child, port))
         }
         Backend::MlxLm { python } => {
@@ -220,7 +212,8 @@ fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, _port: u
                     s if s.contains("0.5b") => "mlx-community/Qwen3.5-0.5B-Instruct-4bit".to_string(),
                     s if s.contains("3b") => "mlx-community/Qwen3.5-3B-Instruct-4bit".to_string(),
                     s if s.contains("7b") || s.contains("9b") => "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string(),
-                    s if s.contains("35b-a3b") => "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string(),
+                    // No 35B-A3B in mlx-community; map to closest 32B Instruct
+                    s if s.contains("35b-a3b") || s.contains("32b") => "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string(),
                     _ => stem.to_string(),
                 }
             };
@@ -231,14 +224,13 @@ fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, _port: u
                     "--model",
                     &model_id,
                     "--port",
-                    "0",
+                    &port.to_string(),
                 ]);
             let child = cmd.stdout(Stdio::null())
                 .stderr(Stdio::from(log_file))
                 .spawn()
                 .context("Failed to spawn mlx_lm server")?;
-            // As above, we cannot directly capture port; rely on readiness check that will be called with detected port externally.
-            Ok((child, 8080))
+            Ok((child, port))
         }
     }
 }

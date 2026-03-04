@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-// use std::sync::Arc; // not used currently
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -355,6 +355,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     {
                         if let Ok(exe) = std::env::current_exe() {
                             let mut args: Vec<String> = std::env::args().collect();
+                            if let Some(pos) = args.iter().position(|a| a == "--takeover") {
+                                // Remove existing --takeover and its value if present
+                                let _ = args.remove(pos);
+                                if pos < args.len() { let _ = args.remove(pos); }
+                            }
                             args.push("--takeover".into());
                             args.push(std::process::id().to_string());
                             let _ = std::process::Command::new(exe)
