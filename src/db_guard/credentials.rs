@@ -445,7 +445,11 @@ fn decode_hex_key(v: &str) -> Option<[u8; 32]> {
 fn resolve_env_credentials(engine_prefix: &str) -> Option<CredentialMaterial> {
     let user = std::env::var(format!("UHOH_{}_USER", engine_prefix)).ok();
     let password = std::env::var(format!("UHOH_{}_PASSWORD", engine_prefix)).ok();
-    if user.as_deref().map(str::trim).unwrap_or_default().is_empty()
+    if user
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
         && password
             .as_deref()
             .map(str::trim)

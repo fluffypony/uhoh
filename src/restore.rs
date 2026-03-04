@@ -81,8 +81,12 @@ fn check_no_symlink_parents(restore_base: &Path, target: &Path) -> Result<()> {
 }
 
 fn safe_remove_dir_tree_within(project_base: &Path, target: &Path) -> Result<()> {
-    let project_canonical = dunce::canonicalize(project_base)
-        .with_context(|| format!("Failed to canonicalize project base: {}", project_base.display()))?;
+    let project_canonical = dunce::canonicalize(project_base).with_context(|| {
+        format!(
+            "Failed to canonicalize project base: {}",
+            project_base.display()
+        )
+    })?;
     let target_canonical = dunce::canonicalize(target)
         .with_context(|| format!("Failed to canonicalize target: {}", target.display()))?;
 

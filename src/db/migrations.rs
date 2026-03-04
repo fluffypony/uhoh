@@ -30,7 +30,9 @@ pub fn apply_migrations(conn: &Connection, version: i32) -> Result<()> {
 }
 
 fn apply_v2(conn: &Connection) -> Result<()> {
-    conn.execute_batch("ALTER TABLE snapshots ADD COLUMN ai_summary TEXT; PRAGMA user_version = 2;")?;
+    conn.execute_batch(
+        "ALTER TABLE snapshots ADD COLUMN ai_summary TEXT; PRAGMA user_version = 2;",
+    )?;
     Ok(())
 }
 

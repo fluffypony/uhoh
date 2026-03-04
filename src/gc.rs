@@ -139,9 +139,10 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
     for prefix_entry in std::fs::read_dir(&blob_root)? {
         let prefix_entry = prefix_entry?;
         if prefix_entry.file_type()?.is_dir()
-            && std::fs::read_dir(prefix_entry.path())?.next().is_none() {
-                std::fs::remove_dir(prefix_entry.path()).ok();
-            }
+            && std::fs::read_dir(prefix_entry.path())?.next().is_none()
+        {
+            std::fs::remove_dir(prefix_entry.path()).ok();
+        }
     }
 
     Ok(())

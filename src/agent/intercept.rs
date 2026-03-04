@@ -9,7 +9,10 @@ use crate::db::AgentEntry;
 use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
 
-pub async fn run_session_tailers_async(ctx: &SubsystemContext, agents: &[AgentEntry]) -> Result<()> {
+pub async fn run_session_tailers_async(
+    ctx: &SubsystemContext,
+    agents: &[AgentEntry],
+) -> Result<()> {
     let mut offsets: HashMap<String, u64> = HashMap::new();
     loop {
         for agent in agents {

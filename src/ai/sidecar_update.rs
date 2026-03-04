@@ -91,9 +91,7 @@ pub fn check_for_update(
     let current = read_manifest(sidecar_dir);
 
     let url = if let Some(version) = pin_version {
-        format!(
-            "https://api.github.com/repos/{repo}/releases/tags/{version}"
-        )
+        format!("https://api.github.com/repos/{repo}/releases/tags/{version}")
     } else {
         format!("https://api.github.com/repos/{repo}/releases/latest")
     };

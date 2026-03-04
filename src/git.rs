@@ -143,9 +143,7 @@ pub fn cmd_gitstash(
     }
     let status = upd.wait()?;
     if !status.success() {
-        bail!(
-            "git update-index --index-info failed with status {status}"
-        );
+        bail!("git update-index --index-info failed with status {status}");
     }
     //  - write-tree
     let tree_hash = run_git_output_with_index(project_path, &tmp_index, &["write-tree"])?
@@ -216,9 +214,7 @@ pub fn cmd_gitstash(
     // Clean up temp index
     let _ = std::fs::remove_file(&tmp_index);
 
-    println!(
-        "Snapshot {id_str} stashed as git stash entry. Use `git stash pop` to apply."
-    );
+    println!("Snapshot {id_str} stashed as git stash entry. Use `git stash pop` to apply.");
     Ok(())
 }
 

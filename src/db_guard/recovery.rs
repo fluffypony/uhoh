@@ -191,11 +191,7 @@ fn postgres_schema_dump(connection_ref: &str, creds: &CredentialMaterial) -> Res
         writeln!(
             file,
             "{}:{}:{}:{}:{}",
-            parsed.host,
-            parsed.port,
-            parsed.database,
-            parsed.user,
-            password
+            parsed.host, parsed.port, parsed.database, parsed.user, password
         )?;
         #[cfg(unix)]
         {

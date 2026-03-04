@@ -293,13 +293,14 @@ fn postgres_listen_worker_queries_use_monotonic_id_cursor() {
     assert!(source.contains("SELECT id, payload::text"));
     assert!(source.contains("WHERE id > $1"));
     assert!(source.contains("last_seen_id = last_seen_id.max(id);"));
-    assert!(!source.contains("WHERE id > COALESCE((SELECT MAX(id) FROM _uhoh_ddl_events WHERE 1=0), 0)"));
+    assert!(!source
+        .contains("WHERE id > COALESCE((SELECT MAX(id) FROM _uhoh_ddl_events WHERE 1=0), 0)"));
 }
 
 #[test]
 fn mcp_approval_reader_uses_nofollow_guards() {
-    let source = std::fs::read_to_string("src/agent/mcp_proxy.rs")
-        .expect("read mcp proxy implementation");
+    let source =
+        std::fs::read_to_string("src/agent/mcp_proxy.rs").expect("read mcp proxy implementation");
     assert!(source.contains("symlink_metadata(path)"));
     assert!(source.contains("libc::O_NOFOLLOW | libc::O_CLOEXEC"));
 }
@@ -342,13 +343,16 @@ fn postgres_db_ops_use_runtime_bridge_instead_of_nested_runtime_builder() {
     let source = std::fs::read_to_string("src/main.rs").expect("read main command handler");
     assert!(source.contains("fn block_on_runtime<T>"));
     assert!(source.contains("tokio::task::block_in_place(|| handle.block_on(fut))"));
-    assert!(!source.contains("postgres guard install") || source.contains("block_on_runtime(async move"));
+    assert!(
+        !source.contains("postgres guard install")
+            || source.contains("block_on_runtime(async move")
+    );
 }
 
 #[test]
 fn db_guard_module_uses_trait_based_engine_dispatch() {
-    let source = std::fs::read_to_string("src/db_guard/mod.rs")
-        .expect("read db_guard subsystem module");
+    let source =
+        std::fs::read_to_string("src/db_guard/mod.rs").expect("read db_guard subsystem module");
     assert!(source.contains("trait DbGuardEngine"));
     assert!(source.contains("impl DbGuardEngine for SqliteEngine"));
     assert!(source.contains("impl DbGuardEngine for PostgresEngine"));
@@ -371,8 +375,7 @@ fn event_ledger_append_falls_back_to_direct_insert_when_flusher_not_started() {
 
 #[test]
 fn recovery_module_uses_machine_master_key_fallback_not_user_hostname() {
-    let source = std::fs::read_to_string("src/db_guard/recovery.rs")
-        .expect("read recovery module");
+    let source = std::fs::read_to_string("src/db_guard/recovery.rs").expect("read recovery module");
     assert!(source.contains("MACHINE_KEY_FILE: &str = \"master.key\""));
     assert!(source.contains("load_or_create_machine_key"));
     assert!(!source.contains("HOSTNAME"));
@@ -400,7 +403,9 @@ fn intercept_tailer_uses_async_fs_and_sleep_primitives() {
 fn daemon_registers_maintenance_subsystem_for_compaction_backup_ai() {
     let source = std::fs::read_to_string("src/daemon.rs").expect("read daemon");
     assert!(source.contains("struct DaemonMaintenanceSubsystem"));
-    assert!(source.contains("subsystem_manager_inner.register(Box::new(DaemonMaintenanceSubsystem::new(&config)))"));
+    assert!(source.contains(
+        "subsystem_manager_inner.register(Box::new(DaemonMaintenanceSubsystem::new(&config)))"
+    ));
     assert!(source.contains("fn name(&self) -> &str"));
     assert!(source.contains("\"daemon_maintenance\""));
 }

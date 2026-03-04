@@ -377,8 +377,7 @@ fn handle_stdio_tool_call(
             let fallback_event = event.clone();
             let event_id = match Database::open(&crate::uhoh_dir().join("uhoh.db")) {
                 Ok(db) => {
-                    let ledger =
-                        crate::event_ledger::EventLedger::new(std::sync::Arc::new(db));
+                    let ledger = crate::event_ledger::EventLedger::new(std::sync::Arc::new(db));
                     if let Err(err) = ledger.flush() {
                         tracing::error!(
                             "failed to flush event ledger before STDIO pre_notify append: {err}"

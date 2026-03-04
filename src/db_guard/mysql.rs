@@ -260,7 +260,11 @@ fn parse_mysql_ref(connection_ref: &str) -> Result<ParsedMysqlRef> {
 fn resolve_mysql_env_credentials() -> Option<CredentialMaterial> {
     let user = std::env::var("UHOH_MYSQL_USER").ok();
     let password = std::env::var("UHOH_MYSQL_PASSWORD").ok();
-    if user.as_deref().map(str::trim).unwrap_or_default().is_empty()
+    if user
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
         && password
             .as_deref()
             .map(str::trim)

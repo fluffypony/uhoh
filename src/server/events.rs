@@ -30,6 +30,10 @@ pub enum ServerEvent {
         status: String,
         detail: String,
     },
+    MlxUpdateFailed {
+        status: String,
+        detail: String,
+    },
     DbGuardAlert {
         guard_name: String,
         event_type: String,
@@ -59,6 +63,7 @@ impl ServerEvent {
             ServerEvent::AiSummaryCompleted { .. } => "ai_summary_completed".to_string(),
             ServerEvent::SidecarUpdated { .. } => "sidecar_updated".to_string(),
             ServerEvent::MlxUpdateStatus { .. } => "mlx_update_status".to_string(),
+            ServerEvent::MlxUpdateFailed { .. } => "mlx_update_failed".to_string(),
             ServerEvent::DbGuardAlert { event_type, .. } => event_type.clone(),
             ServerEvent::AgentAlert { event_type, .. } => event_type.clone(),
             ServerEvent::ProjectAdded { .. } => "project_added".to_string(),
@@ -93,6 +98,9 @@ impl ServerEvent {
             }
             ServerEvent::MlxUpdateStatus { status, detail } => {
                 format!("MLX update {status}: {detail}")
+            }
+            ServerEvent::MlxUpdateFailed { status, detail } => {
+                format!("MLX update failed {status}: {detail}")
             }
             ServerEvent::DbGuardAlert {
                 guard_name,

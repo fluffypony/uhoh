@@ -131,9 +131,7 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
                 }
             }
             Err(e) => {
-                bail!(
-                    "Cannot verify update (no signature, DNS failed: {e}). Aborting."
-                );
+                bail!("Cannot verify update (no signature, DNS failed: {e}). Aborting.");
             }
         }
     }

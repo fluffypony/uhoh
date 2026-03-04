@@ -181,7 +181,8 @@ impl DbGuardSubsystem {
                 "postgres" => {
                     #[cfg(not(feature = "pg-replication"))]
                     if guard.mode.eq_ignore_ascii_case("replication") {
-                        let mut event = new_event("db_guard", "pg_replication_mode_unsupported", "warn");
+                        let mut event =
+                            new_event("db_guard", "pg_replication_mode_unsupported", "warn");
                         event.guard_name = Some(guard.name.clone());
                         event.detail = Some(
                             "guard mode is replication but uhoh was built without pg-replication feature"

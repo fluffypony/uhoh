@@ -71,18 +71,14 @@ pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) ->
     match restore_snap {
         Some(snap) => {
             let id_str = cas::id_to_base58(snap.snapshot_id);
-            println!(
-                "Undoing operation \"{label}\": restoring to snapshot {id_str}"
-            );
+            println!("Undoing operation \"{label}\": restoring to snapshot {id_str}");
             crate::restore::cmd_restore(
                 uhoh_dir, database, project, &id_str, None, false,
                 true, // force (since this is an undo, we're intentional)
             )?;
         }
         None => {
-            println!(
-                "No snapshot found before operation \"{label}\". Cannot undo."
-            );
+            println!("No snapshot found before operation \"{label}\". Cannot undo.");
         }
     }
 
@@ -110,9 +106,7 @@ pub fn cmd_list_operations(database: &Database, project: &ProjectEntry) -> Resul
             ),
             _ => "no snapshots".to_string(),
         };
-        println!(
-            "  #{id} [{status}] \"{label}\" started={started} {snap_range}"
-        );
+        println!("  #{id} [{status}] \"{label}\" started={started} {snap_range}");
     }
     Ok(())
 }

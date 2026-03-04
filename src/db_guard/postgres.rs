@@ -157,7 +157,10 @@ pub fn tick_postgres_guard(
     Ok(())
 }
 
-pub fn reconcile_listen_workers(guards: &[DbGuardEntry], shutdown: &CancellationToken) -> Result<()> {
+pub fn reconcile_listen_workers(
+    guards: &[DbGuardEntry],
+    shutdown: &CancellationToken,
+) -> Result<()> {
     let required: HashSet<String> = guards
         .iter()
         .filter(|g| g.engine == "postgres")
