@@ -73,9 +73,9 @@ fn test_snapshot_creation_and_query() {
 
 #[test]
 fn test_base58_edge_cases() {
-    // ID 0
+    // ID 0 rejected
     let s = uhoh::cas::id_to_base58(0);
-    assert_eq!(uhoh::cas::base58_to_id(&s), Some(0));
+    assert_eq!(uhoh::cas::base58_to_id(&s), None);
 
     // ID 1 should be short
     let s1 = uhoh::cas::id_to_base58(1);

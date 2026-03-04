@@ -279,7 +279,7 @@ pub fn base58_to_id(s: &str) -> Option<u64> {
     let start = 8usize.saturating_sub(bytes.len());
     buf[start..].copy_from_slice(&bytes);
     let id = u64::from_be_bytes(buf);
-    if id == 0 { return Some(0); }
+    if id == 0 { return None; }
     Some(id)
 }
 
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_base58_roundtrip() {
-        for id in [0, 1, 42, 255, 1000, u64::MAX] {
+        for id in [1, 42, 255, 1000, u64::MAX] {
             let encoded = id_to_base58(id);
             let decoded = base58_to_id(&encoded);
             assert_eq!(decoded, Some(id), "Failed roundtrip for id={}", id);

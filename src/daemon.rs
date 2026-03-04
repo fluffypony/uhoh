@@ -192,7 +192,28 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
     loop {
         tokio::select! {
             Some(event) = event_rx.recv() => {
-                handle_watch_event(&mut project_states, &event, &config);
+                match event {
+                    WatchEvent::WatcherDied => {
+                        tracing::error!("File watcher died — attempting recovery...");
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        let paths: Vec<PathBuf> = project_states
+                            .keys()
+                            .map(|k| PathBuf::from(k))
+                            .collect();
+                        match watcher::start_watching(&paths, event_tx.clone()) {
+                            Ok(new_watcher) => {
+                                watcher_handle = new_watcher;
+                                tracing::info!("File watcher recovered successfully");
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to recover file watcher: {}. Will retry on next tick.", e);
+                            }
+                        }
+                    }
+                    other => {
+                        handle_watch_event(&mut project_states, &other, &config);
+                    }
+                }
             }
             // Binary change events
             Some(()) = bin_event_rx.recv() => {
