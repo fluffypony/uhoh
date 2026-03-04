@@ -272,9 +272,9 @@ fn is_dangerous_tool_call(tool: &str, path: Option<&str>, patterns: &[String]) -
             return tool_l == raw.trim();
         }
         if let Some(raw) = p.strip_prefix("path:") {
-            return path_l.contains(raw.trim());
+            return path_l == raw.trim();
         }
-        tool_l == p || path_l.contains(&p)
+        tool_l == p || path_l == p
     })
 }
 
@@ -451,16 +451,17 @@ fn uuid_like_id() -> String {
 }
 
 pub fn build_approval_response(token: &str, approval_id: &str, challenge: &str) -> String {
-    let mut token_buf = token.as_bytes().to_vec();
-    let mut payload = Vec::with_capacity(token_buf.len() + approval_id.len() + challenge.len() + 2);
-    payload.extend_from_slice(&token_buf);
-    payload.push(b':');
+    let mut key = [0u8; 32];
+    if hex::decode_to_slice(token, &mut key).is_err() {
+        key.copy_from_slice(blake3::hash(token.as_bytes()).as_bytes());
+    }
+    let mut payload = Vec::with_capacity(approval_id.len() + challenge.len() + 2);
     payload.extend_from_slice(approval_id.as_bytes());
     payload.push(b':');
     payload.extend_from_slice(challenge.as_bytes());
-    let digest = blake3::hash(&payload);
+    let digest = blake3::keyed_hash(&key, &payload);
     let digest_hex = digest.to_hex().to_string();
-    token_buf.zeroize();
+    key.zeroize();
     payload.zeroize();
     digest_hex
 }
