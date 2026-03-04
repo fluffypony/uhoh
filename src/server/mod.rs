@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use crate::config::ServerConfig;
 use crate::db::Database;
 use crate::subsystem::{SubsystemHealth, SubsystemManager};
-use auth::{auth_middleware, host_validation_middleware, AuthToken};
+use auth::{auth_middleware, host_validation_middleware, AuthConfig, AuthToken};
 use events::ServerEvent;
 
 #[derive(Clone)]
@@ -99,9 +99,15 @@ pub async fn start_server(
         host_validation_middleware,
     ));
 
-    if config.require_auth {
+    if config.require_auth || config.mcp_require_auth {
         app = app
-            .layer(middleware::from_fn(auth_middleware))
+            .route_layer(middleware::from_fn_with_state(
+                AuthConfig {
+                    require_auth: config.require_auth,
+                    mcp_require_auth: config.mcp_require_auth,
+                },
+                auth_middleware,
+            ))
             .layer(Extension(AuthToken(auth_token.clone())));
     }
     let app = app.with_state(state.clone());

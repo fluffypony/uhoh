@@ -224,6 +224,10 @@ pub struct ServerConfig {
     #[serde(default = "default_true")]
     pub mcp_enabled: bool,
 
+    /// Require bearer auth on MCP HTTP endpoint.
+    #[serde(default)]
+    pub mcp_require_auth: bool,
+
     /// Require bearer auth on mutating methods.
     #[serde(default = "default_true")]
     pub require_auth: bool,
@@ -288,6 +292,8 @@ pub struct AgentConfig {
     pub mcp_proxy_enabled: bool,
     #[serde(default = "default_agent_proxy_port")]
     pub mcp_proxy_port: u16,
+    #[serde(default)]
+    pub mcp_proxy_require_auth: bool,
     #[serde(default = "default_true")]
     pub intercept_enabled: bool,
     #[serde(default)]
@@ -553,6 +559,7 @@ impl Default for ServerConfig {
             bind_address: default_bind_address(),
             ui_enabled: true,
             mcp_enabled: true,
+            mcp_require_auth: false,
             require_auth: true,
         }
     }
@@ -601,6 +608,7 @@ impl Default for AgentConfig {
             enabled: false,
             mcp_proxy_enabled: true,
             mcp_proxy_port: default_agent_proxy_port(),
+            mcp_proxy_require_auth: false,
             intercept_enabled: true,
             audit_enabled: false,
             audit_scope: default_agent_audit_scope(),

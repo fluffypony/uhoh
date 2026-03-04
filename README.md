@@ -22,7 +22,7 @@ uhoh watches your project folders, takes small content‑addressable snapshots a
 - Event forensics commands: `uhoh trace <event-id>`, `uhoh blame <path>`, and `uhoh timeline [--source ...] [--since ...]`
 - Database guardian for PostgreSQL and SQLite with baseline/recovery artifact generation, plus MySQL phase-1 schema polling
 - Agent monitoring with MCP proxy interception, session-tail fallback, dangerous-action pause/approve flow, and profile-based registration
-- Bearer token auth for mutating server operations (token stored in `~/.uhoh/server.token`)
+- Bearer token auth for mutating REST server operations, with optional auth for MCP HTTP and MCP proxy connections (token stored in `~/.uhoh/server.token`)
 - Git integration: pre-commit hooks, snapshot-to-stash, worktree support
 - Safe auto‑updates: Ed25519 signatures, DNS TXT fallback, atomically applied
 - Guardrails: emergency‑delete detection, GC, compaction, and a `doctor` command
@@ -162,7 +162,7 @@ When enabled, the daemon also starts a unified localhost server (default `127.0.
 4. `POST /mcp` MCP Streamable HTTP JSON-RPC endpoint
 5. `GET /health` and `GET /api/v1/health` health endpoints
 
-Mutating requests require a bearer token by default. The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery.
+Mutating `/api/v1/*` requests require a bearer token by default. MCP over HTTP (`POST /mcp`) is unauthenticated by default to match MCP client expectations, and can be locked down by setting `server.mcp_require_auth = true`. The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery.
 
 ## Database guardian and agent monitor
 
@@ -172,15 +172,15 @@ Database guardian focuses on high-risk events, not full auditing. PostgreSQL gua
 
 Agent monitor combines MCP proxy interception with fallback session-log tailing. If your agent talks MCP through uhoh, calls can be classified before they execute. When a call matches dangerous patterns and pause mode is enabled, uhoh records a pending approval and waits for `uhoh agent approve` or timeout.
 
-MCP proxy clients must authenticate on connection by sending a first-line JSON-RPC message:
+If you enable `agent.mcp_proxy_require_auth`, MCP proxy clients must authenticate on connection by sending a first-line JSON-RPC message:
 
 ```json
 {"jsonrpc":"2.0","id":"uhoh-auth","method":"uhoh/auth","params":{"token":"<token-from-~/.uhoh/server.token>"}}
 ```
 
-The proxy also accepts the raw token value as the first line for minimal clients that cannot emit JSON-RPC before opening an MCP session.
+With `agent.mcp_proxy_require_auth = false` (default), proxy clients connect without a handshake line. The proxy still accepts the raw token value as the first line for minimal clients when auth is enabled.
 
-When you launch tools through `uhoh run`, `UHOH_MCP_PROXY_TOKEN` and `UHOH_MCP_PROXY_AUTH_LINE` are exported automatically for clients that can send a startup auth line.
+When you launch tools through `uhoh run`, `UHOH_MCP_PROXY_TOKEN` and `UHOH_MCP_PROXY_AUTH_LINE` are still exported automatically so clients can authenticate when proxy auth is enabled.
 
 All of this is tied together in the unified ledger so you can inspect one timeline instead of three separate logs.
 
@@ -287,6 +287,7 @@ Database guard is designed for emergency detection and recovery prep. It is not 
 - `agent.enabled` (default false): enable agent monitoring subsystem.
 - `agent.mcp_proxy_enabled` (default true): enable MCP proxy tick processing.
 - `agent.mcp_proxy_port` (default 22823): MCP proxy listen port.
+- `agent.mcp_proxy_require_auth` (default false): require an auth line from MCP proxy clients.
 - `agent.intercept_enabled` (default true): enable session log tailing fallback.
 - `agent.audit_enabled` (default false): enable OS-level audit loop.
 - `agent.audit_scope` (default `project`): audit scope (`project` or `home`).
@@ -315,6 +316,7 @@ Optional subsystems are feature-gated to keep default builds lean: `audit-trail`
 - `server.bind_address` (default `127.0.0.1`): bind address. Keep loopback-only for security.
 - `server.ui_enabled` (default true): serve Time Machine UI at `/`.
 - `server.mcp_enabled` (default true): serve MCP HTTP endpoint at `/mcp`.
+- `server.mcp_require_auth` (default false): require bearer auth for `POST /mcp`.
 - `server.require_auth` (default true): require bearer auth for mutating requests.
 
 ### Sidecar Update Settings

@@ -13,6 +13,12 @@ use subtle::ConstantTimeEq;
 #[derive(Clone)]
 pub struct AuthToken(pub String);
 
+#[derive(Clone, Copy)]
+pub struct AuthConfig {
+    pub require_auth: bool,
+    pub mcp_require_auth: bool,
+}
+
 pub fn generate_token() -> String {
     let mut rng = rand::thread_rng();
     let bytes: [u8; 32] = rng.gen();
@@ -39,11 +45,24 @@ pub fn write_port_file(uhoh_dir: &Path, port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn auth_middleware(headers: HeaderMap, request: Request, next: Next) -> Response {
+pub async fn auth_middleware(
+    State(auth_config): State<AuthConfig>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
 
     if method == axum::http::Method::GET || path == "/health" || path == "/api/v1/health" {
+        return next.run(request).await;
+    }
+
+    if path == "/mcp" {
+        if !auth_config.mcp_require_auth {
+            return next.run(request).await;
+        }
+    } else if !auth_config.require_auth {
         return next.run(request).await;
     }
 

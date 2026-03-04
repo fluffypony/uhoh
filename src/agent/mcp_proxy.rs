@@ -105,7 +105,7 @@ async fn handle_connection_async(
         Result::<(), anyhow::Error>::Ok(())
     });
 
-    let mut authed = false;
+    let mut authed = !config.agent.mcp_proxy_require_auth;
     let expected_token = ensure_proxy_token(&uhoh_dir)?;
     while let Some(line) = client_lines.next_line().await? {
         let mut should_forward = true;
