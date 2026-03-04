@@ -2,7 +2,6 @@
 
 use std::path::Path;
 use assert_cmd::prelude::*;
-use predicates::prelude::*;
 use std::process::Command as TestCommand;
 
 #[test]
@@ -58,8 +57,8 @@ fn test_snapshot_creation_and_query() {
     assert_eq!(snap_id, 1);
 
     let files: Vec<uhoh::db::SnapFileEntry> = vec![
-        uhoh::db::SnapFileEntry { path: "src/main.rs".into(), hash: "hash1".into(), size: 100, stored: true, executable: false, mtime: None, storage_method: 1 },
-        uhoh::db::SnapFileEntry { path: "README.md".into(), hash: "hash2".into(), size: 50, stored: true, executable: false, mtime: None, storage_method: 1 },
+        uhoh::db::SnapFileEntry { path: "src/main.rs".into(), hash: "hash1".into(), size: 100, stored: true, executable: false, mtime: None, storage_method: 1, is_symlink: false },
+        uhoh::db::SnapFileEntry { path: "README.md".into(), hash: "hash2".into(), size: 50, stored: true, executable: false, mtime: None, storage_method: 1, is_symlink: false },
     ];
 
     let (rowid, _sid) = db
@@ -76,17 +75,14 @@ fn test_snapshot_creation_and_query() {
     // Smoke test for snapshot listing display formatting by invoking the binary
     // This validates that storage method strings appear without panics.
     // Note: We don't match exact formatting here to avoid flakiness across platforms.
-    if let Ok(current_exe) = std::env::current_exe() {
-        let mut bin = current_exe.clone();
-        // In tests, the binary is `deps/<test-name>`; try to run `uhoh` if available
-        // Skip if we can't find the binary in PATH.
-        if which::which("uhoh").is_ok() {
-            TestCommand::new("uhoh")
-                .arg("snapshots")
-                .current_dir("/") // Not using a real project here; this is a smoke run only
-                .assert()
-                .failure(); // Expect failure when no project is registered
-        }
+    // In tests, the binary is `deps/<test-name>`; try to run `uhoh` if available.
+    // Skip if we can't find the binary in PATH.
+    if which::which("uhoh").is_ok() {
+        TestCommand::new("uhoh")
+            .arg("snapshots")
+            .current_dir("/") // Not using a real project here; this is a smoke run only
+            .assert()
+            .failure(); // Expect failure when no project is registered
     }
 }
 
