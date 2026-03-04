@@ -1046,15 +1046,23 @@ async fn install_delete_counter_trigger(
     client: &tokio_postgres::Client,
     table: &str,
 ) -> Result<()> {
-    let fn_ident = format!("_uhoh_count_deletes_{}", sanitize_ident(table));
-    let trigger_ident = format!("uhoh_delete_counter_{}", sanitize_ident(table));
+    let table_safe = table.replace('\'', "''");
+    let table_quoted = quote_pg_ident(table);
+    let fn_ident = quote_pg_ident(&format!(
+        "_uhoh_count_deletes_{}",
+        blake3::hash(table.as_bytes()).to_hex()
+    ));
+    let trigger_ident = quote_pg_ident(&format!(
+        "uhoh_delete_counter_{}",
+        blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
+    ));
 
     let install_sql = format!(
         "
         CREATE OR REPLACE FUNCTION {fn_ident}() RETURNS trigger AS $$
         BEGIN
             INSERT INTO _uhoh_delete_counts (table_name, txid, delete_count)
-            VALUES ('{table}', txid_current(), 1)
+            VALUES ('{table_safe}', txid_current(), 1)
             ON CONFLICT (table_name, txid)
             DO UPDATE SET delete_count = _uhoh_delete_counts.delete_count + 1,
                           ts = now();
@@ -1062,9 +1070,9 @@ async fn install_delete_counter_trigger(
         END;
         $$ LANGUAGE plpgsql;
 
-        DROP TRIGGER IF EXISTS {trigger_ident} ON \"{table}\";
+        DROP TRIGGER IF EXISTS {trigger_ident} ON {table_quoted};
         CREATE TRIGGER {trigger_ident}
-            BEFORE DELETE ON \"{table}\"
+            BEFORE DELETE ON {table_quoted}
             FOR EACH ROW EXECUTE FUNCTION {fn_ident}();
         "
     );
@@ -1092,10 +1100,17 @@ fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Resul
 
         let tables = parse_watched_tables(tables_csv);
         for table in tables {
-            let trigger_ident = format!("uhoh_delete_counter_{}", sanitize_ident(&table));
-            let fn_ident = format!("_uhoh_count_deletes_{}", sanitize_ident(&table));
+            let trigger_ident = quote_pg_ident(&format!(
+                "uhoh_delete_counter_{}",
+                blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
+            ));
+            let fn_ident = quote_pg_ident(&format!(
+                "_uhoh_count_deletes_{}",
+                blake3::hash(table.as_bytes()).to_hex()
+            ));
+            let table_quoted = quote_pg_ident(&table);
             let sql = format!(
-                "DROP TRIGGER IF EXISTS {trigger_ident} ON \"{table}\"; DROP FUNCTION IF EXISTS {fn_ident}();"
+                "DROP TRIGGER IF EXISTS {trigger_ident} ON {table_quoted}; DROP FUNCTION IF EXISTS {fn_ident}();"
             );
             client
                 .batch_execute(&sql)
@@ -1173,17 +1188,8 @@ fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
         .collect()
 }
 
-fn sanitize_ident(input: &str) -> String {
-    input
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+fn quote_pg_ident(input: &str) -> String {
+    format!("\"{}\"", input.replace('"', "\"\""))
 }
 
 fn extract_dsn_credentials(dsn: &str) -> Option<uhoh::db_guard::CredentialMaterial> {

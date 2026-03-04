@@ -213,7 +213,7 @@ impl AgentSubsystem {
             }
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "audit-trail"))]
         if ctx.config.agent.intercept_enabled && !self.fanotify_started {
             self.fanotify_started = true;
             let ctx_cl = ctx.clone();

@@ -4,6 +4,7 @@ use tempfile::NamedTempFile;
 use url::Url;
 
 use crate::db::DbGuardEntry;
+use crate::db_guard::CredentialMaterial;
 use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
 
@@ -21,7 +22,8 @@ pub fn tick_mysql_guard(
 ) -> Result<()> {
     // Phase 1 schema polling mode: detect abrupt table/index shape changes and estimate row
     // count drops to surface catastrophic operations before full binlog support lands.
-    let snapshot = match poll_schema_snapshot(&guard.connection_ref) {
+    let stored_credentials = crate::db_guard::resolve_stored_credentials(&guard.connection_ref)?;
+    let snapshot = match poll_schema_snapshot(&guard.connection_ref, stored_credentials.as_ref()) {
         Ok(snapshot) => snapshot,
         Err(e) => {
             let mut event = new_event("db_guard", "mysql_poll_failed", "warn");
@@ -114,13 +116,24 @@ struct MysqlSnapshot {
     table_count: usize,
 }
 
-fn poll_schema_snapshot(connection_ref: &str) -> Result<MysqlSnapshot> {
+fn poll_schema_snapshot(
+    connection_ref: &str,
+    stored_credentials: Option<&CredentialMaterial>,
+) -> Result<MysqlSnapshot> {
     let parsed = parse_mysql_ref(connection_ref)?;
+    let effective_user = stored_credentials
+        .and_then(|creds| creds.username.clone())
+        .or(parsed.user.clone())
+        .ok_or_else(|| anyhow::anyhow!("MySQL connection ref must include user@host"))?;
+    let effective_password = stored_credentials
+        .and_then(|creds| creds.password.clone())
+        .or(parsed.password.clone());
+
     let mut defaults_guard: Option<NamedTempFile> = None;
     let mut defaults_path = None;
     let mut cmd = Command::new("mysql");
 
-    if let Some(password) = &parsed.password {
+    if let Some(password) = &effective_password {
         let mut tmp = NamedTempFile::new().context("Failed creating MySQL defaults file")?;
         use std::io::Write as _;
         writeln!(tmp, "[client]")?;
@@ -149,7 +162,7 @@ fn poll_schema_snapshot(connection_ref: &str) -> Result<MysqlSnapshot> {
         .arg("-P")
         .arg(parsed.port.to_string())
         .arg("-u")
-        .arg(&parsed.user);
+        .arg(&effective_user);
     if let Some(db) = &parsed.database {
         cmd.arg("-D").arg(db);
     }
@@ -199,7 +212,7 @@ fn poll_schema_snapshot(connection_ref: &str) -> Result<MysqlSnapshot> {
 struct ParsedMysqlRef {
     host: String,
     port: u16,
-    user: String,
+    user: Option<String>,
     password: Option<String>,
     database: Option<String>,
 }
@@ -211,9 +224,9 @@ fn parse_mysql_ref(connection_ref: &str) -> Result<ParsedMysqlRef> {
     }
 
     let user = if url.username().is_empty() {
-        anyhow::bail!("MySQL connection ref must include user@host");
+        None
     } else {
-        url.username().to_string()
+        Some(url.username().to_string())
     };
     let password = url.password().map(str::to_string);
     let host = url

@@ -155,6 +155,10 @@ fn resolve_encrypted_credentials(connection_ref: &str) -> Result<Option<Credenti
     Ok(map.get(connection_ref).cloned())
 }
 
+pub fn resolve_stored_credentials(connection_ref: &str) -> Result<Option<CredentialMaterial>> {
+    resolve_encrypted_credentials(connection_ref)
+}
+
 pub fn store_encrypted_credential(connection_ref: &str, cred: &CredentialMaterial) -> Result<()> {
     let uhoh = crate::uhoh_dir();
     std::fs::create_dir_all(&uhoh)?;
