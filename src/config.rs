@@ -79,6 +79,11 @@ pub struct StorageConfig {
     #[serde(default = "default_max_text_blob_bytes")]
     pub max_text_blob_bytes: u64,
 
+    /// Maximum file size (bytes) that will be fully copied into the blob store
+    /// when reflink and hardlink are unavailable. Larger files will not be copied.
+    #[serde(default = "default_max_copy_blob_bytes")]
+    pub max_copy_blob_bytes: u64,
+
     /// Storage limit as fraction of watched folder size
     #[serde(default = "default_storage_limit_fraction")]
     pub storage_limit_fraction: f64,
@@ -148,6 +153,7 @@ fn default_keep_weekly_beyond() -> bool { true }
 fn default_emergency_expire_hours() -> u64 { 48 }
 fn default_max_binary_blob_bytes() -> u64 { 1_048_576 }
 fn default_max_text_blob_bytes() -> u64 { 52_428_800 }
+fn default_max_copy_blob_bytes() -> u64 { 50 * 1024 * 1024 }
 fn default_storage_limit_fraction() -> f64 { 0.15 }
 fn default_storage_min_bytes() -> u64 { 524_288_000 } // 500MB floor
 fn default_compress_level() -> i32 { 3 }
@@ -201,6 +207,7 @@ impl Default for StorageConfig {
         Self {
             max_binary_blob_bytes: default_max_binary_blob_bytes(),
             max_text_blob_bytes: default_max_text_blob_bytes(),
+            max_copy_blob_bytes: default_max_copy_blob_bytes(),
             storage_limit_fraction: default_storage_limit_fraction(),
             storage_min_bytes: default_storage_min_bytes(),
             compress: false,

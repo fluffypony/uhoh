@@ -170,26 +170,18 @@ fn verify_ed25519_signature(data: &[u8], signature_bytes: &[u8]) -> Result<bool>
 }
 
 async fn dns_verify_hash(version: &str, asset: &str) -> Result<String> {
-    let query = format!("release-{}.{}.releases.uhoh.it", asset, version);
-    // Use nslookup to retrieve TXT records to avoid heavy DNS client deps/APIs
-    let output = std::process::Command::new("nslookup")
-        .args(["-type=TXT", &query])
-        .output()
-        .context("Failed to invoke nslookup for DNS verification")?;
-    if !output.status.success() {
-        anyhow::bail!("nslookup failed for {}", query);
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Find first quoted string as TXT content
-    for line in stdout.lines() {
-        if let Some(start) = line.find('"') {
-            if let Some(end) = line[start + 1..].find('"') {
-                let txt = &line[start + 1..start + 1 + end];
-                return Ok(txt.to_string());
-            }
-        }
-    }
-    anyhow::bail!("No TXT record found for {}", query)
+    use hickory_resolver::config::ResolverConfig;
+    use hickory_resolver::name_server::TokioConnectionProvider;
+    use hickory_resolver::Resolver;
+
+    let query = format!("release-{}.{}.releases.uhoh.it.", asset, version);
+    let resolver = Resolver::builder_with_config(ResolverConfig::default(), TokioConnectionProvider::default())
+        .build();
+    let response = resolver.txt_lookup(query.clone())
+        .await
+        .with_context(|| format!("DNS TXT lookup failed for {}", query))?;
+    let txt = response.iter().next().ok_or_else(|| anyhow::anyhow!("Empty TXT record for {}", query))?;
+    Ok(txt.to_string())
 }
 
 async fn apply_update(uhoh_dir: &Path, binary: &[u8]) -> Result<()> {

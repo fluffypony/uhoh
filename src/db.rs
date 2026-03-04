@@ -173,6 +173,19 @@ impl Database {
             )?;
         }
 
+        // Schema v3: add storage_method columns and backfill from stored
+        if version < 3 {
+            conn.execute_batch(
+                "BEGIN TRANSACTION;\n
+                 ALTER TABLE snapshot_files ADD COLUMN storage_method INTEGER NOT NULL DEFAULT 1;\n
+                 ALTER TABLE snapshot_deleted ADD COLUMN storage_method INTEGER NOT NULL DEFAULT 1;\n
+                 UPDATE snapshot_files SET storage_method = CASE WHEN stored = 1 THEN 1 ELSE 0 END;\n
+                 UPDATE snapshot_deleted SET storage_method = CASE WHEN stored = 1 THEN 1 ELSE 0 END;\n
+                 INSERT OR REPLACE INTO schema_version (version) VALUES (3);\n
+                 COMMIT;",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -773,10 +786,12 @@ impl Database {
     pub fn total_blob_size_for_project(&self, project_hash: &str) -> Result<u64> {
         let conn = self.conn();
         let size: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(sf.size), 0)
-             FROM snapshot_files sf
-             INNER JOIN snapshots s ON sf.snapshot_rowid = s.rowid
-             WHERE s.project_hash = ?1 AND sf.stored = 1",
+            "SELECT COALESCE(SUM(t.size), 0) FROM (
+                SELECT DISTINCT sf.hash, sf.size AS size
+                FROM snapshot_files sf
+                INNER JOIN snapshots s ON sf.snapshot_rowid = s.rowid
+                WHERE s.project_hash = ?1 AND sf.stored = 1
+            ) t",
             params![project_hash],
             |row| row.get(0),
         )?;

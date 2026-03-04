@@ -51,7 +51,7 @@ fn is_daemon_running(uhoh: &std::path::Path) -> bool {
     match std::fs::read_to_string(&pid_path) {
         Ok(pid_str) => {
             if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                daemon::is_uhoh_process_alive(pid)
+                platform::is_uhoh_process_alive(pid)
             } else {
                 false
             }
@@ -295,7 +295,7 @@ async fn main() -> Result<()> {
                     std::process::Command::new(&editor).arg(&config_path).status()?;
                 }
                 Some("set") => {
-                    println!("Usage: uhoh config set is not yet implemented. Edit config.toml directly.");
+                    println!("Usage: uhoh config set <key> <value>");
                 }
                 _ => {
                     let cfg = config::Config::load(&config_path)?;

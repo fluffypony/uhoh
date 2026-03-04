@@ -15,7 +15,7 @@ enum Backend {
 pub struct Sidecar {
     child: Option<Child>,
     port: u16,
-    backend: Backend,
+    // backend removed — not used by callers
 }
 
 impl Sidecar {
@@ -28,7 +28,7 @@ impl Sidecar {
         let backend = detect_backend(uhoh_dir)?;
         let child = spawn_backend(&backend, model_path, uhoh_dir, port)?;
 
-        let sidecar = Sidecar { child: Some(child), port, backend };
+        let sidecar = Sidecar { child: Some(child), port };
 
         // Wait for sidecar to be ready with exponential backoff
         sidecar.wait_for_ready()?;
@@ -106,7 +106,6 @@ fn find_sidecar_binary(uhoh_dir: &Path) -> Result<PathBuf> {
 struct GlobalSidecar {
     child: Child,
     port: u16,
-    backend: Backend,
     last_used: Instant,
 }
 
@@ -141,7 +140,7 @@ pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs:
     // Store globally and start idle watcher thread
     {
         let mut guard = GLOBAL_SIDECAR.lock().unwrap();
-        *guard = Some(GlobalSidecar { child, port, backend, last_used: Instant::now() });
+        *guard = Some(GlobalSidecar { child, port, last_used: Instant::now() });
     }
 
     let idle = idle_shutdown_secs.max(60);
@@ -194,6 +193,18 @@ fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, port: u1
     let log_file = std::fs::File::create(uhoh_dir.join("sidecar.log"))?;
     match backend {
         Backend::LlamaServer { binary } => {
+            // Use configured ctx-size based on AI config if available
+            let ctx_size = {
+                // Try to load config to read max_context_tokens; fallback to 8192 if unavailable
+                if let Some(home) = dirs::home_dir() {
+                    let cfg_path = home.join(".uhoh").join("config.toml");
+                    if let Ok(cfg) = std::fs::read_to_string(&cfg_path) {
+                        if let Ok(conf) = toml::from_str::<crate::config::Config>(&cfg) {
+                            conf.ai.max_context_tokens.to_string()
+                        } else { "8192".to_string() }
+                    } else { "8192".to_string() }
+                } else { "8192".to_string() }
+            };
             Command::new(binary)
                 .args([
                     "--model",
@@ -203,7 +214,7 @@ fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, port: u1
                     "--host",
                     "127.0.0.1",
                     "--ctx-size",
-                    "8192",
+                    &ctx_size,
                     "--n-gpu-layers",
                     "999",
                 ])

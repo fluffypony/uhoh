@@ -64,8 +64,8 @@ pub fn cmd_gitstash(
     // Step 2: Build tree object using temporary index to avoid corrupting user's index
     let git_dir = project_path.join(".git");
     let tmp_index = git_dir.join("index.uhoh-tmp");
-    std::env::set_var("GIT_INDEX_FILE", &tmp_index);
-    run_git(project_path, &["read-tree", "--empty"])?;
+    // Use per-command environment to avoid global side effects
+    run_git_with_index(project_path, &tmp_index, &["read-tree", "--empty"]) ?;
     // Build a lookup for executable flag from DB
     let mut exec_map = std::collections::HashSet::new();
     let snap_files = database.get_snapshot_files(snap.rowid)?;
@@ -73,10 +73,10 @@ pub fn cmd_gitstash(
     for (path, blob_hash) in &tree_entries {
         let mode = if exec_map.contains(path.as_str()) { "100755" } else { "100644" };
         let args = ["update-index", "--add", "--cacheinfo", mode, blob_hash.as_str(), path.as_str()];
-        run_git(project_path, &args)?;
+        run_git_with_index(project_path, &tmp_index, &args)?;
     }
     //  - write-tree
-    let tree_hash = run_git_output(project_path, &["write-tree"])?.trim().to_string();
+    let tree_hash = run_git_output_with_index(project_path, &tmp_index, &["write-tree"])?.trim().to_string();
 
     // Step 3: Get current HEAD commit
     let head_output = run_git_output(project_path, &["rev-parse", "HEAD"])?;
@@ -106,7 +106,6 @@ pub fn cmd_gitstash(
     run_git(project_path, &["stash", "store", "-m", &msg, &stash_commit])?;
 
     // Clean up temp index
-    std::env::remove_var("GIT_INDEX_FILE");
     let _ = std::fs::remove_file(&tmp_index);
 
     println!(
@@ -214,6 +213,38 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
 fn run_git_output(cwd: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .current_dir(cwd)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .with_context(|| format!("Failed to run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+fn run_git_with_index(cwd: &Path, index_file: &Path, args: &[&str]) -> Result<()> {
+    let status = Command::new("git")
+        .current_dir(cwd)
+        .env("GIT_INDEX_FILE", index_file)
+        .args(args)
+        .status()
+        .with_context(|| format!("Failed to run git {}", args.join(" ")))?;
+    if !status.success() {
+        bail!("git {} failed with status {}", args.join(" "), status);
+    }
+    Ok(())
+}
+
+fn run_git_output_with_index(cwd: &Path, index_file: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(cwd)
+        .env("GIT_INDEX_FILE", index_file)
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

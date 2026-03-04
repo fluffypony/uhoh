@@ -1,6 +1,41 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+/// How a blob was stored in the CAS.
+/// Numeric values can be persisted in the DB if needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum StorageMethod {
+    None = 0,
+    Copy = 1,
+    Reflink = 2,
+    Hardlink = 3,
+}
+
+impl StorageMethod {
+    pub fn is_recoverable(self) -> bool {
+        !matches!(self, StorageMethod::None)
+    }
+    pub fn to_db(self) -> i64 { self as i64 }
+    pub fn from_db(v: i64) -> Self {
+        match v {
+            1 => StorageMethod::Copy,
+            2 => StorageMethod::Reflink,
+            3 => StorageMethod::Hardlink,
+            _ => StorageMethod::None,
+        }
+    }
+    pub fn display_name(self) -> &'static str {
+        match self {
+            StorageMethod::None => "none",
+            StorageMethod::Copy => "copy",
+            StorageMethod::Reflink => "reflink",
+            StorageMethod::Hardlink => "hardlink",
+        }
+    }
+}
 
 /// Store a blob in the CAS. Uses atomic write (write-to-temp, fsync, rename).
 /// Returns the BLAKE3 hex hash.
@@ -51,14 +86,13 @@ pub fn store_blob(blob_root: &Path, content: &[u8]) -> Result<String> {
     Ok(hash)
 }
 
-/// Store a blob from a file path using streaming BLAKE3.
-/// Returns (hash, size, is_stored).
+/// Store a blob from a file path using streaming BLAKE3 and a tiered strategy.
+/// Returns (hash, size, storage_method).
 pub fn store_blob_from_file(
     blob_root: &Path,
     file_path: &Path,
-    max_binary_bytes: u64,
-    max_text_bytes: u64,
-) -> Result<(String, u64, bool)> {
+    max_copy_blob_bytes: u64,
+) -> Result<(String, u64, StorageMethod)> {
     let metadata = std::fs::metadata(file_path)
         .with_context(|| format!("Cannot stat: {}", file_path.display()))?;
     let file_size = metadata.len();
@@ -71,19 +105,47 @@ pub fn store_blob_from_file(
     let mut first_chunk = vec![0u8; 8192.min(file_size as usize)];
     let first_n = reader.read(&mut first_chunk)?;
     first_chunk.truncate(first_n);
-    let is_binary = content_inspector::inspect(&first_chunk).is_binary();
-    let max_size = if is_binary { max_binary_bytes } else { max_text_bytes };
-    let should_store = file_size <= max_size;
-
     hasher.update(&first_chunk);
 
-    let mut tmp_path: Option<PathBuf> = None;
-    let mut tmp_file: Option<std::fs::File> = None;
+    // We'll compute the hash regardless of storage method
+    // Decide storage after hashing by trying reflink/hardlink/copy
 
-    if should_store {
-        let prefix_dir = blob_root.join("tmp");
-        std::fs::create_dir_all(&prefix_dir)?;
-        let tp = prefix_dir.join(format!(
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+        // Just hashing here
+    }
+
+    let hash = hasher.finalize().to_hex().to_string();
+    let dir = blob_root.join(&hash[..2]);
+    std::fs::create_dir_all(&dir)?;
+    let blob_path = dir.join(&hash);
+
+    // If already exists, treat as stored via Copy for compatibility
+    if blob_path.exists() {
+        return Ok((hash, file_size, StorageMethod::Copy));
+    }
+
+    // Try reflink
+    if reflink_copy::reflink(file_path, &blob_path).is_ok() {
+        set_blob_readonly(&blob_path);
+        return Ok((hash, file_size, StorageMethod::Reflink));
+    }
+
+    // Try hardlink
+    if std::fs::hard_link(file_path, &blob_path).is_ok() {
+        set_blob_readonly(&blob_path);
+        return Ok((hash, file_size, StorageMethod::Hardlink));
+    }
+
+    // Try full copy if within size limit
+    if file_size <= max_copy_blob_bytes {
+        // Write to temp then rename for atomicity
+        let tmp_dir = blob_root.join("tmp");
+        std::fs::create_dir_all(&tmp_dir)?;
+        let tmp_path = tmp_dir.join(format!(
             ".tmp.{}.{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -91,44 +153,26 @@ pub fn store_blob_from_file(
                 .unwrap()
                 .as_nanos()
         ));
-        let mut f = create_restricted_file(&tp)?;
-        f.write_all(&first_chunk)?;
-        tmp_file = Some(f);
-        tmp_path = Some(tp);
-    }
-
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 { break; }
-        hasher.update(&buf[..n]);
-        if let Some(f) = tmp_file.as_mut() {
-            f.write_all(&buf[..n])?;
-        }
-    }
-
-    let hash = hasher.finalize().to_hex().to_string();
-
-    if let Some(tp) = tmp_path.take() {
-        if let Some(f) = tmp_file.take() {
-            f.sync_all()?;
-        }
-        let dir = blob_root.join(&hash[..2]);
-        std::fs::create_dir_all(&dir)?;
-        let blob_path = dir.join(&hash);
-        if !blob_path.exists() {
-            std::fs::rename(&tp, &blob_path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&blob_path, std::fs::Permissions::from_mode(0o600)).ok();
+        std::fs::copy(file_path, &tmp_path)?;
+        set_blob_readonly(&tmp_path);
+        match std::fs::rename(&tmp_path, &blob_path) {
+            Ok(()) => return Ok((hash, file_size, StorageMethod::Copy)),
+            Err(_) => {
+                // Race: someone else wrote it
+                let _ = std::fs::remove_file(&tmp_path);
+                if blob_path.exists() {
+                    return Ok((hash, file_size, StorageMethod::Copy));
+                }
             }
-        } else {
-            let _ = std::fs::remove_file(&tp);
         }
     }
 
-    Ok((hash, file_size, should_store))
+    // Could not store, return hash only
+    tracing::debug!(
+        "Not storing {} ({} bytes): reflink/hardlink/copy failed or size exceeds limit",
+        file_path.display(), file_size
+    );
+    Ok((hash, file_size, StorageMethod::None))
 }
 
 /// Read a blob from the CAS with integrity verification.
@@ -150,8 +194,8 @@ pub fn read_blob(blob_root: &Path, hash: &str) -> Result<Option<Vec<u8>>> {
     if actual_hash != hash {
         tracing::error!(
             "Blob corruption detected! Expected {}, got {}",
-            &hash[..16],
-            &actual_hash[..16]
+            &hash[..hash.len().min(16)],
+            &actual_hash[..actual_hash.len().min(16)]
         );
         return Ok(None);
     }
@@ -164,6 +208,22 @@ pub fn blob_exists(blob_root: &Path, hash: &str) -> bool {
         return false;
     }
     blob_root.join(&hash[..2]).join(hash).exists()
+}
+
+fn set_blob_readonly(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400));
+    }
+    #[cfg(not(unix))]
+    {
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perms = meta.permissions();
+            perms.set_readonly(true);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
 }
 
 /// Compress if feature enabled

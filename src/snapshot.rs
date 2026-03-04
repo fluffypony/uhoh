@@ -123,10 +123,9 @@ pub fn create_snapshot(
         match cas::store_blob_from_file(
             &blob_root,
             abs_path,
-            config.storage.max_binary_blob_bytes,
-            config.storage.max_text_blob_bytes,
+            config.storage.max_copy_blob_bytes,
         ) {
-            Ok((hash, size, stored)) => {
+            Ok((hash, size, method)) => {
                 let is_new_or_changed = prev_files
                     .get(rel_path)
                     .map_or(true, |prev| prev.hash != hash);
@@ -135,6 +134,7 @@ pub fn create_snapshot(
                     new_files.push(rel_path.clone());
                 }
                 let mtime_i = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                let stored = method.is_recoverable();
                 files_for_manifest.push((rel_path.clone(), hash, size, stored, executable, Some(mtime_i)));
                 current_hashes.insert(rel_path.clone(), (files_for_manifest.last().unwrap().1.clone(), stored));
             }
@@ -194,8 +194,8 @@ pub fn create_snapshot(
         trigger
     };
 
-    // Compute tree hashes for efficient future diffs
-    let tree_hashes = compute_tree_hashes(&files_for_manifest);
+    // Tree hashes removed to reduce per-snapshot overhead; left table exists for potential future use
+    let tree_hashes: Vec<(String, String)> = Vec::new();
 
     // Get next snapshot ID (atomic via SQLite transaction)
     let snapshot_id = database.next_snapshot_id(project_hash)?;

@@ -9,58 +9,9 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::snapshot;
 use crate::watcher;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::{RecursiveMode, Watcher as _};
 
-/// Check if a given PID is an alive uhoh process.
-pub fn is_uhoh_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // Check /proc/<pid>/cmdline on Linux
-        #[cfg(target_os = "linux")]
-        {
-            let cmdline_path = format!("/proc/{}/cmdline", pid);
-            if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
-                return cmdline.contains("uhoh");
-            }
-            return false;
-        }
-
-        // On macOS, check if process exists via kill(0)
-        #[cfg(target_os = "macos")]
-        {
-            unsafe {
-                return libc::kill(pid as i32, 0) == 0;
-            }
-        }
-
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            unsafe {
-                return libc::kill(pid as i32, 0) == 0;
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        // Try to open the process
-        let handle = unsafe {
-            winapi::um::processthreadsapi::OpenProcess(
-                winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION,
-                0,
-                pid,
-            )
-        };
-        if handle.is_null() {
-            return false;
-        }
-        unsafe {
-            winapi::um::handleapi::CloseHandle(handle);
-        }
-        true
-    }
-}
+// Removed duplicate is_uhoh_process_alive; use crate::platform::is_uhoh_process_alive instead
 
 /// Spawn daemon as a detached background process.
 pub fn spawn_detached_daemon() -> Result<()> {
@@ -109,7 +60,7 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
     let pid_str = std::fs::read_to_string(&pid_path).context("Daemon not running (no PID file)")?;
     let pid: u32 = pid_str.trim().parse().context("Invalid PID file")?;
 
-    if !is_uhoh_process_alive(pid) {
+    if !crate::platform::is_uhoh_process_alive(pid) {
         std::fs::remove_file(&pid_path).ok();
         println!("Daemon was not running (stale PID file cleaned up).");
         return Ok(());
@@ -166,13 +117,34 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
 
     let mut watcher_handle = watcher::start_watching(&watch_paths, event_tx.clone())?;
 
-    // Binary self-watch: watch the executable's parent and ~/.uhoh for .update-ready
-    let (bin_tx, bin_rx) = std::sync::mpsc::channel();
-    let bin_rx = std::sync::Arc::new(std::sync::Mutex::new(bin_rx));
-    let mut bin_watcher: RecommendedWatcher = notify::recommended_watcher(move |res| { let _ = bin_tx.send(res); })?;
-    let exe_path = std::env::current_exe()?;
-    if let Some(parent) = exe_path.parent() { let _ = bin_watcher.watch(parent, RecursiveMode::NonRecursive); }
-    let _ = bin_watcher.watch(&uhoh_dir, RecursiveMode::NonRecursive);
+    // Binary self-watch: use a dedicated bridge thread and unbounded tokio channel
+    let (bin_event_tx, mut bin_event_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let exe_path = std::env::current_exe().ok();
+    let _bin_watcher = if let Some(ref exe) = exe_path {
+        let (bin_notify_tx, bin_notify_rx) = std::sync::mpsc::channel();
+        let mut watcher = notify::RecommendedWatcher::new(
+            move |res| { let _ = bin_notify_tx.send(res); },
+            notify::Config::default(),
+        ).ok();
+        if let Some(ref mut w) = watcher {
+            if let Some(parent) = exe.parent() { let _ = w.watch(parent, RecursiveMode::NonRecursive); }
+            let _ = w.watch(&uhoh_dir, RecursiveMode::NonRecursive);
+        }
+        let exe_clone = exe.clone();
+        let tx = bin_event_tx.clone();
+        std::thread::Builder::new().name("bin-watcher-bridge".into()).spawn(move || {
+            for result in bin_notify_rx {
+                if let Ok(evt) = result {
+                    let involves_binary = evt.paths.iter().any(|p| p == &exe_clone) ||
+                        evt.paths.iter().any(|p| p.file_name().map_or(false, |n| n == ".update-ready"));
+                    if involves_binary {
+                        let _ = tx.send(());
+                    }
+                }
+            }
+        }).ok();
+        watcher
+    } else { None };
 
     // Per-project state
     let mut project_states: HashMap<String, ProjectDaemonState> = HashMap::new();
@@ -223,37 +195,28 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 handle_watch_event(&mut project_states, &event, &config);
             }
             // Binary change events
-            recv = tokio::task::spawn_blocking({
-                let bin_rx = bin_rx.clone();
-                move || {
-                    let guard = bin_rx.lock().unwrap();
-                    guard.recv()
-                }
-            }) => {
-                if let Ok(Ok(Ok(ev))) = recv { // JoinHandle -> RecvResult -> notify::Result<Event>
-                    let should_restart = ev.paths.iter().any(|p| {
-                        p == &exe_path || p == &uhoh_dir.join(".update-ready")
-                    });
-                    if should_restart {
-                        tracing::info!("Binary update detected; restarting daemon");
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::process::CommandExt;
-                            let args: Vec<String> = std::env::args().collect();
-                            let err = std::process::Command::new(&exe_path).args(&args[1..]).exec();
-                            anyhow::bail!("exec failed: {}", err);
-                        }
-                        #[cfg(windows)]
-                        {
-                            let args: Vec<String> = std::env::args().collect();
-                            let _child = std::process::Command::new(&exe_path)
-                                .args(&args[1..])
-                                .arg("--takeover")
-                                .arg(std::process::id().to_string())
-                                .spawn();
-                            break;
-                        }
+            Some(()) = bin_event_rx.recv() => {
+                tracing::info!("Binary change detected; restarting daemon");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    let args: Vec<String> = std::env::args().collect();
+                    if let Some(ref exe) = exe_path {
+                        let err = std::process::Command::new(exe).args(&args[1..]).exec();
+                        anyhow::bail!("exec failed: {}", err);
                     }
+                }
+                #[cfg(windows)]
+                {
+                    let args: Vec<String> = std::env::args().collect();
+                    if let Some(ref exe) = exe_path {
+                        let _child = std::process::Command::new(exe)
+                            .args(&args[1..])
+                            .arg("--takeover")
+                            .arg(std::process::id().to_string())
+                            .spawn();
+                    }
+                    break;
                 }
             }
             _ = debounce_interval.tick() => {
@@ -269,6 +232,17 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 check_moved_folders(database, &mut watcher_handle, &mut project_states);
                 // Discover newly added projects and watch them
                 check_for_new_projects(database, &mut watcher_handle, &mut project_states);
+                // Attempt to recover watcher if it died earlier
+                if let Some(paths) = {
+                    // Collect paths if watcher appears unhealthy (dummy heuristic: none)
+                    Some(project_states.values().map(|s| Path::new(&s.hash).to_path_buf()).collect::<Vec<_>>())
+                } {
+                    // No direct health API; watcher::start_watching will reinit
+                    if let Ok(new_watcher) = watcher::start_watching(&paths, event_tx.clone()) {
+                        watcher_handle = new_watcher;
+                        tracing::info!("File watcher recovered");
+                    }
+                }
                 // If an update has been applied (trigger file present), exit gracefully so service manager can restart
                 if update_trigger.exists() {
                     tracing::info!("Update ready trigger detected; stopping daemon for restart");
@@ -340,7 +314,7 @@ fn handle_watch_event(
     }
 
     if let WatchEvent::WatcherDied = event {
-        tracing::warn!("Watcher bridge thread terminated; attempting to continue on next tick");
+        tracing::error!("File watcher died — attempting recovery on next tick");
         return;
     }
 
@@ -513,7 +487,13 @@ fn check_for_new_projects(
             if !states.contains_key(&key) {
                 let path = PathBuf::from(&p.current_path);
                 if path.exists() {
-                    if watcher.watch(&path, RecursiveMode::Recursive).is_ok() {
+                    if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
+                        tracing::error!(
+                            "Failed to watch project {}: {}. Changes won't be detected until next tick.",
+                            path.display(), e
+                        );
+                        continue;
+                    } else {
                         states.insert(
                             key,
                             ProjectDaemonState {

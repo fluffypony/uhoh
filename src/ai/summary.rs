@@ -14,9 +14,13 @@ pub fn generate_summary_blocking(
     diff_text: &str,
     files: &FileChangeSummary,
 ) -> Result<String> {
-    // Truncate diff to configured max context (rough 4 chars/token)
+    // Truncate diff to configured max context (rough 4 chars/token) with UTF-8 boundary safety
     let max_chars = config.ai.max_context_tokens.saturating_mul(4);
-    let truncated = if diff_text.len() > max_chars { &diff_text[..max_chars] } else { diff_text };
+    let truncated = if diff_text.len() > max_chars {
+        let mut cut = max_chars;
+        while cut > 0 && !diff_text.is_char_boundary(cut) { cut -= 1; }
+        &diff_text[..cut]
+    } else { diff_text };
 
     // Choose a model tier from config or defaults
     let tiers = if config.ai.models.is_empty() {
@@ -81,8 +85,9 @@ pub async fn generate_summary(
 ) -> Result<String> {
     // Truncate diff to configured max context (prevents memory exhaustion)
     let truncated_diff = if diff_text.len() > max_tokens * 4 {
-        // Rough char-to-token ratio
-        let cut = max_tokens * 4;
+        // Rough char-to-token ratio with UTF-8 boundary safety
+        let mut cut = max_tokens * 4;
+        while cut > 0 && !diff_text.is_char_boundary(cut) { cut -= 1; }
         format!("{}\n...[diff truncated]", &diff_text[..cut])
     } else {
         diff_text.to_string()
