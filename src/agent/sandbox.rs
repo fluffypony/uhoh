@@ -1,5 +1,7 @@
 #[cfg(target_os = "linux")]
-use landlock::{path_beneath_rules, AccessFs, LandlockStatus, Ruleset, RulesetStatus, ABI};
+use landlock::{
+    path_beneath_rules, AccessFs, LandlockStatus, RestrictionStatus, Ruleset, RulesetStatus, ABI,
+};
 
 pub fn sandbox_supported() -> bool {
     #[cfg(target_os = "linux")]
@@ -82,6 +84,7 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     ruleset = ruleset.add_rules(path_beneath_rules(&refs, AccessFs::from_all(abi)))?;
     let status = ruleset.restrict_self()?;
+    log_restriction_status(&status.restriction);
     match status.ruleset {
         RulesetStatus::FullyEnforced | RulesetStatus::PartiallyEnforced => Ok(()),
         RulesetStatus::NotEnforced => anyhow::bail!("Landlock not enforced on this kernel"),
@@ -101,4 +104,17 @@ fn expand_home(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+#[cfg(target_os = "linux")]
+fn log_restriction_status(status: &RestrictionStatus) {
+    match status {
+        RestrictionStatus::FullyEnforced => {
+            tracing::info!("Landlock restrictions fully enforced")
+        }
+        RestrictionStatus::PartiallyEnforced => {
+            tracing::warn!("Landlock restrictions partially enforced on this kernel")
+        }
+        RestrictionStatus::NotEnforced => tracing::warn!("Landlock restrictions not enforced"),
+    }
 }

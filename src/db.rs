@@ -1236,14 +1236,20 @@ impl Database {
     pub fn insert_event_ledger(&self, event: &NewEventLedgerEntry) -> Result<i64> {
         let conn = self.conn();
         let ts = chrono::Utc::now().to_rfc3339();
+        let tx = conn.unchecked_transaction()?;
+        let next_id: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM event_ledger",
+            [],
+            |row| row.get(0),
+        )?;
         let prev_hash = match event.prev_hash.clone() {
             Some(v) => v,
             None => self
-                .latest_ledger_hash_with_conn(&conn)?
+                .latest_ledger_hash_with_conn(&tx)?
                 .unwrap_or_default(),
         };
-        let chain_hash = ledger::compute_event_chain_hash(&prev_hash, event, &ts);
-        conn.execute(
+        let chain_hash = ledger::compute_event_chain_hash_with_id(&prev_hash, next_id, event, &ts);
+        tx.execute(
             "INSERT INTO event_ledger (
                 ts, source, event_type, severity, project_hash, agent_name, guard_name,
                 path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
@@ -1264,7 +1270,8 @@ impl Database {
                 event.causal_parent,
             ],
         )?;
-        Ok(conn.last_insert_rowid())
+        tx.commit()?;
+        Ok(next_id)
     }
 
     pub fn insert_event_ledger_batch(&self, events: &[NewEventLedgerEntry]) -> Result<usize> {
@@ -1273,13 +1280,20 @@ impl Database {
         }
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        let mut next_id: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM event_ledger",
+            [],
+            |row| row.get(0),
+        )?;
         let mut prev_hash = self.latest_ledger_hash_with_conn(&tx)?.unwrap_or_default();
         for event in events {
             let ts = chrono::Utc::now().to_rfc3339();
             let chain_hash = event
                 .prev_hash
                 .clone()
-                .unwrap_or_else(|| ledger::compute_event_chain_hash(&prev_hash, event, &ts));
+                .unwrap_or_else(|| {
+                    ledger::compute_event_chain_hash_with_id(&prev_hash, next_id, event, &ts)
+                });
             tx.execute(
                 "INSERT INTO event_ledger (
                     ts, source, event_type, severity, project_hash, agent_name, guard_name,
@@ -1302,6 +1316,7 @@ impl Database {
                 ],
             )?;
             prev_hash = chain_hash;
+            next_id += 1;
         }
         tx.commit()?;
         Ok(events.len())
@@ -1336,7 +1351,7 @@ impl Database {
                 causal_parent: row.get(13)?,
             };
             let stored_hash: Option<String> = row.get(12)?;
-            let expected = ledger::compute_event_chain_hash(&prev_hash, &event, &ts);
+            let expected = ledger::compute_event_chain_hash_with_id(&prev_hash, id, &event, &ts);
             if stored_hash.as_deref() != Some(expected.as_str()) {
                 broken.push(id);
             }

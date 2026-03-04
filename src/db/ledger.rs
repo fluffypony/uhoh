@@ -72,22 +72,29 @@ pub fn map_event_ledger_entry(row: &Row<'_>) -> rusqlite::Result<EventLedgerEntr
     EventLedgerEntry::try_from(row)
 }
 
+pub fn compute_event_chain_hash_with_id(
+    prev_hash: &str,
+    id: i64,
+    event: &NewEventLedgerEntry,
+    ts: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(prev_hash.as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(id.to_string().as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(ts.as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(event.source.as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(event.event_type.as_bytes());
+    hasher.update(&[0u8]);
+    if let Some(detail) = event.detail.as_deref() {
+        hasher.update(detail.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
 pub fn compute_event_chain_hash(prev_hash: &str, event: &NewEventLedgerEntry, ts: &str) -> String {
-    let payload = serde_json::json!({
-        "prev_hash": prev_hash,
-        "ts": ts,
-        "source": event.source,
-        "event_type": event.event_type,
-        "severity": event.severity,
-        "project_hash": event.project_hash,
-        "agent_name": event.agent_name,
-        "guard_name": event.guard_name,
-        "path": event.path,
-        "detail": event.detail,
-        "pre_state_ref": event.pre_state_ref,
-        "post_state_ref": event.post_state_ref,
-        "causal_parent": event.causal_parent,
-    })
-    .to_string();
-    blake3::hash(payload.as_bytes()).to_hex().to_string()
+    compute_event_chain_hash_with_id(prev_hash, 0, event, ts)
 }
