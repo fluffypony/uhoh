@@ -108,13 +108,13 @@ fn find_sidecar_binary(uhoh_dir: &Path) -> Result<PathBuf> {
 
 // ===== Persistent global sidecar with idle shutdown =====
 
-struct GlobalSidecar {
+pub(crate) struct GlobalSidecar {
     child: Child,
     port: u16,
     last_used: Instant,
 }
 
-pub static GLOBAL_SIDECAR: Lazy<Mutex<Option<GlobalSidecar>>> = Lazy::new(|| Mutex::new(None));
+pub(crate) static GLOBAL_SIDECAR: Lazy<Mutex<Option<GlobalSidecar>>> = Lazy::new(|| Mutex::new(None));
 static SIDECAR_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Get or spawn a persistent sidecar and return its port.
