@@ -96,7 +96,8 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
 /// Run the daemon in the foreground (called with --service flag).
 pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> {
     let uhoh_dir = uhoh_dir.to_path_buf();
-    let config = Config::load(&uhoh_dir.join("config.toml"))?;
+    let config_path = uhoh_dir.join("config.toml");
+    let mut config = Config::load(&config_path)?;
 
     // Write PID file with exclusive lock to avoid races
     let pid_path = uhoh_dir.join("daemon.pid");
@@ -215,7 +216,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
     let mut next_recover_at: Option<Instant> = None;
     let mut tick_interval = tokio::time::interval(Duration::from_secs(60));
     let mut update_check_interval = tokio::time::interval(Duration::from_secs(config.update.check_interval_hours * 3600));
-    let mut debounce_interval = tokio::time::interval(Duration::from_millis(500));
+    let mut debounce_interval = tokio::time::interval(Duration::from_secs(config.watch.debounce_quiet_secs));
     let update_trigger = uhoh_dir.join(".update-ready");
 
     tracing::info!("Daemon running, watching {} projects", projects.len());
@@ -291,6 +292,17 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 ).await;
             }
             _ = tick_interval.tick() => {
+                // Live-reload configuration and update relevant timers
+                if let Ok(new_cfg) = Config::load(&config_path) {
+                    // Update live-safe fields
+                    if new_cfg.watch.debounce_quiet_secs != config.watch.debounce_quiet_secs {
+                        debounce_interval = tokio::time::interval(Duration::from_secs(new_cfg.watch.debounce_quiet_secs));
+                    }
+                    if new_cfg.update.check_interval_hours != config.update.check_interval_hours {
+                        update_check_interval = tokio::time::interval(Duration::from_secs(new_cfg.update.check_interval_hours * 3600));
+                    }
+                    config = new_cfg;
+                }
                 // Periodic tasks: check for moved folders, expire emergency snapshots
                 check_moved_folders(database, &mut watcher_handle, &mut project_states);
                 // Discover newly added projects and watch them

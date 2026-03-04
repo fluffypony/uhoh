@@ -134,10 +134,8 @@ pub fn cmd_cat(
     file_path: &str,
     id_str: &str,
 ) -> Result<()> {
-    // Try base58 first, then timestamp formats
-    let snap = if let Some(_) = crate::cas::base58_to_id(id_str) {
-        database.find_snapshot_by_base58(&project.hash, id_str)?
-    } else if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(id_str) {
+    // Try RFC3339/timestamp formats first (less ambiguous), then base58 ID
+    let snap = if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(id_str) {
         // Find snapshot at or before timestamp
         database
             .list_snapshots(&project.hash)?
@@ -149,6 +147,8 @@ pub fn cmd_cat(
             .list_snapshots(&project.hash)?
             .into_iter()
             .find(|s| s.timestamp <= ts.to_rfc3339())
+    } else if let Some(_) = crate::cas::base58_to_id(id_str) {
+        database.find_snapshot_by_base58(&project.hash, id_str)?
     } else {
         None
     }
