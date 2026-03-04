@@ -10,11 +10,11 @@ use zeroize::Zeroize;
 use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
 
-const PROXY_TOKEN_FILE: &str = "agent_proxy.token";
+const PROXY_TOKEN_FILE: &str = "server.token";
 const APPROVAL_RESPONSE_FILE_SUFFIX: &str = ".approved.json";
 
 pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
-    let proxy_token = ensure_proxy_token(&ctx.uhoh_dir)?;
+    let _ = ensure_proxy_token(&ctx.uhoh_dir)?;
     let addr = format!("127.0.0.1:{}", ctx.config.agent.mcp_proxy_port);
     let listener = TcpListener::bind(&addr)
         .with_context(|| format!("Failed to bind MCP proxy listener on {addr}"))?;
@@ -48,7 +48,6 @@ pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
                     &ctx.uhoh_dir,
                     &ctx.event_ledger,
                     &ctx.config,
-                    &proxy_token,
                 ) {
                     let mut event = new_event("agent", "mcp_proxy_connection_failed", "warn");
                     event.detail = Some(format!("peer={}, error={}", addr, e));
@@ -81,7 +80,6 @@ fn handle_connection(
     uhoh_dir: &Path,
     ledger: &crate::event_ledger::EventLedger,
     config: &crate::config::Config,
-    proxy_token: &str,
 ) -> Result<()> {
     let mut upstream = TcpStream::connect(upstream_addr)
         .with_context(|| format!("Failed connecting MCP upstream: {upstream_addr}"))?;
@@ -90,6 +88,7 @@ fn handle_connection(
 
     let mut line = String::new();
     let mut authed = false;
+    let expected_token = ensure_proxy_token(uhoh_dir)?;
     loop {
         line.clear();
         let n = client_reader.read_line(&mut line)?;
@@ -98,7 +97,7 @@ fn handle_connection(
         }
 
         if !authed {
-            authed = validate_auth_line(&line, proxy_token)?;
+            authed = validate_auth_line(&line, &expected_token)?;
             if !authed {
                 return Err(anyhow::anyhow!("MCP proxy authentication failed"));
             }
@@ -395,6 +394,10 @@ fn wait_for_approval(
 }
 
 fn validate_auth_line(line: &str, expected_token: &str) -> Result<bool> {
+    let trimmed = line.trim();
+    if secure_eq(trimmed.as_bytes(), expected_token.as_bytes()) {
+        return Ok(true);
+    }
     let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
         return Ok(false);
     };
@@ -467,10 +470,9 @@ pub fn build_approval_response(token: &str, approval_id: &str, challenge: &str) 
 }
 
 pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
-    let runtime = runtime_dir(uhoh_dir);
-    std::fs::create_dir_all(&runtime)
-        .with_context(|| format!("Failed to create runtime dir: {}", runtime.display()))?;
-    let token_path = runtime.join(PROXY_TOKEN_FILE);
+    std::fs::create_dir_all(uhoh_dir)
+        .with_context(|| format!("Failed to create uhoh dir: {}", uhoh_dir.display()))?;
+    let token_path = uhoh_dir.join(PROXY_TOKEN_FILE);
     if token_path.exists() {
         let token = std::fs::read_to_string(&token_path)
             .with_context(|| format!("Failed reading {}", token_path.display()))?;

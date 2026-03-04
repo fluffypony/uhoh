@@ -175,8 +175,10 @@ Agent monitor combines MCP proxy interception with fallback session-log tailing.
 MCP proxy clients must authenticate on connection by sending a first-line JSON-RPC message:
 
 ```json
-{"jsonrpc":"2.0","id":"uhoh-auth","method":"uhoh/auth","params":{"token":"<token-from-~/.uhoh/agents/runtime/agent_proxy.token>"}}
+{"jsonrpc":"2.0","id":"uhoh-auth","method":"uhoh/auth","params":{"token":"<token-from-~/.uhoh/server.token>"}}
 ```
+
+The proxy also accepts the raw token value as the first line for minimal clients that cannot emit JSON-RPC before opening an MCP session.
 
 When you launch tools through `uhoh run`, `UHOH_MCP_PROXY_TOKEN` and `UHOH_MCP_PROXY_AUTH_LINE` are exported automatically for clients that can send a startup auth line.
 
