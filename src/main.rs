@@ -343,7 +343,7 @@ async fn main() -> Result<()> {
             if verify_install {
                 return run_verify_install().await;
             }
-            run_doctor(&uhoh, &database, fix, restore_latest)?;
+            run_doctor(&uhoh, &database, fix, restore_latest).await?;
         }
 
         Commands::Status => {
@@ -452,7 +452,7 @@ async fn run_zero_verb() -> Result<()> {
     Ok(())
 }
 
-fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bool, restore_latest: bool) -> Result<()> {
+async fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bool, restore_latest: bool) -> Result<()> {
     // 1) SQLite integrity check
     {
         let conn = rusqlite::Connection::open(uhoh_dir.join("uhoh.db"))?;
@@ -560,14 +560,8 @@ fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bool, re
         .unwrap_or_else(|_| String::from("unknown"));
     let version = env!("CARGO_PKG_VERSION");
     let asset_name = format!("uhoh-{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    // Use current Tokio runtime to perform async DNS query
-    let dns = tokio::runtime::Handle::try_current()
-        .ok()
-        .and_then(|h| {
-            h.block_on(async {
-                uhoh::update::dns_verify_hash(version, &asset_name).await.ok()
-            })
-        });
+    // Perform async DNS query via update module
+    let dns = uhoh::update::dns_verify_hash(version, &asset_name).await.ok();
     match dns {
         Some(expected) => {
             if expected.eq_ignore_ascii_case(&local_hash) {
