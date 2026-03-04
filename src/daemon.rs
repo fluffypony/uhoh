@@ -598,7 +598,7 @@ async fn process_pending_snapshots(
     let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
     let concurrency = std::cmp::max(1, (logical / 2).max(1));
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
-    let mut join: tokio::task::JoinSet<anyhow::Result<Option<SnapshotResult>>> = tokio::task::JoinSet::new();
+    let mut join: tokio::task::JoinSet<(String, Vec<PathBuf>, anyhow::Result<Option<SnapshotResult>>)> = tokio::task::JoinSet::new();
     for (project_path, state) in states.iter_mut() {
         if state.pending_changes.is_empty() {
             continue;
@@ -626,9 +626,11 @@ async fn process_pending_snapshots(
             let proj_path = Path::new(project_path).to_path_buf();
             let cfg = config.clone();
             let changed: Vec<PathBuf> = state.pending_changes.drain().collect();
+            let changed_for_requeue = changed.clone();
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             // Move minimal state needed; clear after join completes below
             let db_for_task = database.clone();
+            let project_path_key = project_path.clone();
             state.first_change_at = None;
             state.last_change_at = None;
             join.spawn(async move {
@@ -640,21 +642,49 @@ async fn process_pending_snapshots(
                         Err(e) => Err(e),
                     }
                 }).await;
-                drop(permit);
-                match res {
+                let task_result = match res {
                     Ok(Ok(v)) => Ok(v),
-                    Ok(Err(e)) => { tracing::error!("Snapshot task failed for {}: {}", &proj_hash_for_log[..proj_hash_for_log.len().min(12)], e); Ok(None) },
-                    Err(e) => { tracing::error!("Snapshot task join error: {:?}", e); Ok(None) }
-                }
+                    Ok(Err(e)) => {
+                        tracing::error!(
+                            "Snapshot task failed for {}: {}",
+                            &proj_hash_for_log[..proj_hash_for_log.len().min(12)],
+                            e
+                        );
+                        Err(e)
+                    }
+                    Err(e) => {
+                        tracing::error!("Snapshot task join error: {:?}", e);
+                        Err(anyhow::anyhow!("Snapshot task join error: {}", e))
+                    }
+                };
+                drop(permit);
+                (project_path_key, changed_for_requeue, task_result)
             });
         }
     }
-    while let Some(res) = join.join_next().await {
-        match res.unwrap_or(Ok(None)) {
-            Ok(Some(SnapshotResult::Created(_id))) => { /* snapshot created */ }
-            Ok(Some(SnapshotResult::NoChanges)) => { /* no-op */ }
-            Ok(None) => { /* error already logged; do not clear pending */ }
-            Err(e) => { tracing::error!("Auto-snapshot task error: {}", e); }
+    while let Some(result) = join.join_next().await {
+        match result {
+            Ok((project_path, _drained, Ok(Some(SnapshotResult::Created(_id))))) => {
+                if let Some(state) = states.get_mut(&project_path) {
+                    state.last_snapshot = Instant::now();
+                }
+            }
+            Ok((project_path, _drained, Ok(Some(SnapshotResult::NoChanges)))) => {
+                if let Some(state) = states.get_mut(&project_path) {
+                    state.last_snapshot = Instant::now();
+                }
+            }
+            Ok((project_path, drained, Ok(None))) | Ok((project_path, drained, Err(_))) => {
+                if let Some(state) = states.get_mut(&project_path) {
+                    for p in drained {
+                        state.pending_changes.insert(p);
+                    }
+                    let now = Instant::now();
+                    state.first_change_at.get_or_insert(now);
+                    state.last_change_at = Some(now);
+                }
+            }
+            Err(e) => tracing::error!("Auto-snapshot task join failure: {:?}", e),
         }
     }
 }
