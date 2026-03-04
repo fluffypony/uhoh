@@ -806,13 +806,22 @@ fn handle_db_commands(
             let connection_ref = uhoh::db_guard::scrub_dsn(dsn);
             database.add_db_guard(&guard_name, engine, &connection_ref, &tables_csv, mode)?;
             if let Some(creds) = extract_dsn_credentials(dsn) {
-                uhoh::db_guard::store_postgres_credentials_cli(&connection_ref, &creds)
+                uhoh::db_guard::store_encrypted_credential(&connection_ref, &creds)
                     .with_context(|| {
                         format!(
                             "Failed to persist credentials for guard '{}'. Ensure UHOH_MASTER_KEY is set and valid before adding a DSN with embedded credentials",
                             guard_name
                         )
                     })?;
+                if engine == "postgres" {
+                    if let Err(err) = uhoh::db_guard::store_postgres_credentials_cli(&connection_ref, &creds) {
+                        tracing::warn!(
+                            "Postgres keyring mirror failed for '{}': {}",
+                            guard_name,
+                            err
+                        );
+                    }
+                }
             }
             println!("Added db guard '{guard_name}' ({engine})");
         }
@@ -944,12 +953,7 @@ fn handle_db_commands(
 }
 
 fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Failed to build tokio runtime for postgres guard install")?;
-
-    rt.block_on(async move {
+    block_on_runtime(async move {
         let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
             .await
             .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
@@ -1085,12 +1089,7 @@ async fn install_delete_counter_trigger(
 }
 
 fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Failed to build tokio runtime for postgres guard uninstall")?;
-
-    rt.block_on(async move {
+    block_on_runtime(async move {
         let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
             .await
             .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
@@ -1135,12 +1134,7 @@ fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Resul
 }
 
 fn test_postgres_monitoring_infrastructure(dsn: &str) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Failed to build tokio runtime for postgres guard test")?;
-
-    rt.block_on(async move {
+    block_on_runtime(async move {
         let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
             .await
             .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
@@ -1174,6 +1168,18 @@ fn test_postgres_monitoring_infrastructure(dsn: &str) -> Result<()> {
 
         Ok(())
     })
+}
+
+fn block_on_runtime<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(fut))
+    } else {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("Failed to build tokio runtime for postgres guard operation")?;
+        rt.block_on(fut)
+    }
 }
 
 fn parse_watched_tables(tables_csv: &str) -> Vec<String> {

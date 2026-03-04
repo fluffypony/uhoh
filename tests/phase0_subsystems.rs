@@ -334,3 +334,21 @@ fn cargo_features_include_replication_and_cdc_gates() {
     assert!(db_main.contains("requires building with --features pg-replication"));
     assert!(db_main.contains("requires building with --features mysql-cdc"));
 }
+
+#[test]
+fn postgres_db_ops_use_runtime_bridge_instead_of_nested_runtime_builder() {
+    let source = std::fs::read_to_string("src/main.rs").expect("read main command handler");
+    assert!(source.contains("fn block_on_runtime<T>"));
+    assert!(source.contains("tokio::task::block_in_place(|| handle.block_on(fut))"));
+    assert!(!source.contains("postgres guard install") || source.contains("block_on_runtime(async move"));
+}
+
+#[test]
+fn db_guard_module_uses_trait_based_engine_dispatch() {
+    let source = std::fs::read_to_string("src/db_guard/mod.rs")
+        .expect("read db_guard subsystem module");
+    assert!(source.contains("trait DbGuardEngine"));
+    assert!(source.contains("impl DbGuardEngine for SqliteEngine"));
+    assert!(source.contains("impl DbGuardEngine for PostgresEngine"));
+    assert!(source.contains("impl DbGuardEngine for MysqlEngine"));
+}

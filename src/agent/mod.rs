@@ -115,16 +115,20 @@ impl Subsystem for AgentSubsystem {
 
     fn health_check(&self) -> SubsystemHealth {
         if self.healthy {
-            if cfg!(all(target_os = "linux", feature = "audit-trail")) {
+            if self.fanotify_started {
                 SubsystemHealth::HealthyWithAudit(AuditSource::Fanotify)
+            } else if cfg!(target_os = "macos") {
+                SubsystemHealth::HealthyWithAudit(AuditSource::OpenBsm)
             } else {
                 SubsystemHealth::HealthyWithAudit(AuditSource::None)
             }
         } else {
             SubsystemHealth::DegradedWithAudit {
                 message: "agent monitor reported failures".to_string(),
-                source: if cfg!(all(target_os = "linux", feature = "audit-trail")) {
+                source: if self.fanotify_started {
                     AuditSource::Fanotify
+                } else if cfg!(target_os = "macos") {
+                    AuditSource::OpenBsm
                 } else {
                     AuditSource::None
                 },

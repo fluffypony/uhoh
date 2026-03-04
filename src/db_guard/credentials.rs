@@ -91,21 +91,16 @@ pub fn ensure_guard_dir(uhoh_dir: &std::path::Path) -> Result<std::path::PathBuf
 }
 
 pub fn resolve_postgres_credentials(connection_ref: &str) -> Result<CredentialMaterial> {
+    if let Some(material) = resolve_env_credentials("PG") {
+        return Ok(material);
+    }
+
     if let Some(material) = EncryptedFileBackend.load(connection_ref)? {
         return Ok(material);
     }
 
     if let Some(material) = resolve_pgpass(connection_ref)? {
         return Ok(material);
-    }
-
-    if let Ok(master) = std::env::var("UHOH_MASTER_KEY") {
-        if !master.trim().is_empty() {
-            return Ok(CredentialMaterial {
-                username: None,
-                password: Some(master),
-            });
-        }
     }
 
     Ok(CredentialMaterial {
@@ -115,6 +110,10 @@ pub fn resolve_postgres_credentials(connection_ref: &str) -> Result<CredentialMa
 }
 
 pub fn resolve_postgres_credentials_cli(connection_ref: &str) -> Result<CredentialMaterial> {
+    if let Some(material) = resolve_env_credentials("PG") {
+        return Ok(material);
+    }
+
     if let Some(material) = EncryptedFileBackend.load(connection_ref)? {
         return Ok(material);
     }
@@ -125,15 +124,6 @@ pub fn resolve_postgres_credentials_cli(connection_ref: &str) -> Result<Credenti
 
     if let Some(material) = resolve_pgpass(connection_ref)? {
         return Ok(material);
-    }
-
-    if let Ok(master) = std::env::var("UHOH_MASTER_KEY") {
-        if !master.trim().is_empty() {
-            return Ok(CredentialMaterial {
-                username: None,
-                password: Some(master),
-            });
-        }
     }
 
     Ok(CredentialMaterial {
@@ -450,6 +440,24 @@ fn decode_hex_key(v: &str) -> Option<[u8; 32]> {
     let mut out = [0u8; 32];
     hex::decode_to_slice(v, &mut out).ok()?;
     Some(out)
+}
+
+fn resolve_env_credentials(engine_prefix: &str) -> Option<CredentialMaterial> {
+    let user = std::env::var(format!("UHOH_{}_USER", engine_prefix)).ok();
+    let password = std::env::var(format!("UHOH_{}_PASSWORD", engine_prefix)).ok();
+    if user.as_deref().map(str::trim).unwrap_or_default().is_empty()
+        && password
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return None;
+    }
+    Some(CredentialMaterial {
+        username: user.filter(|v| !v.trim().is_empty()),
+        password: password.filter(|v| !v.trim().is_empty()),
+    })
 }
 
 fn enforce_mode_600(path: &std::path::Path) -> Result<()> {

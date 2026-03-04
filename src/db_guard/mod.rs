@@ -35,6 +35,72 @@ pub struct DbGuardSubsystem {
     shutdown: Option<CancellationToken>,
 }
 
+trait DbGuardEngine {
+    fn engine_name(&self) -> &'static str;
+    fn tick(
+        &mut self,
+        ctx: &SubsystemContext,
+        guard: &DbGuardEntry,
+        tick_interval_secs: i64,
+    ) -> Result<()>;
+}
+
+struct SqliteEngine<'a> {
+    versions: &'a mut HashMap<String, i64>,
+}
+
+impl DbGuardEngine for SqliteEngine<'_> {
+    fn engine_name(&self) -> &'static str {
+        "sqlite"
+    }
+
+    fn tick(
+        &mut self,
+        ctx: &SubsystemContext,
+        guard: &DbGuardEntry,
+        _tick_interval_secs: i64,
+    ) -> Result<()> {
+        sqlite_guard::tick_sqlite_guard(ctx, guard, self.versions)
+    }
+}
+
+struct PostgresEngine;
+
+impl DbGuardEngine for PostgresEngine {
+    fn engine_name(&self) -> &'static str {
+        "postgres"
+    }
+
+    fn tick(
+        &mut self,
+        ctx: &SubsystemContext,
+        guard: &DbGuardEntry,
+        tick_interval_secs: i64,
+    ) -> Result<()> {
+        postgres::tick_postgres_guard(ctx, guard, tick_interval_secs)
+    }
+}
+
+struct MysqlEngine<'a> {
+    states: &'a mut HashMap<String, mysql::MysqlGuardState>,
+}
+
+impl DbGuardEngine for MysqlEngine<'_> {
+    fn engine_name(&self) -> &'static str {
+        "mysql"
+    }
+
+    fn tick(
+        &mut self,
+        ctx: &SubsystemContext,
+        guard: &DbGuardEntry,
+        _tick_interval_secs: i64,
+    ) -> Result<()> {
+        let state = self.states.entry(guard.name.clone()).or_default();
+        mysql::tick_mysql_guard(ctx, guard, state)
+    }
+}
+
 impl DbGuardSubsystem {
     pub fn new() -> Self {
         Self {
@@ -106,7 +172,11 @@ impl DbGuardSubsystem {
         for guard in guards {
             match guard.engine.as_str() {
                 "sqlite" => {
-                    sqlite_guard::tick_sqlite_guard(ctx, guard, &mut self.sqlite_versions)?;
+                    let mut engine = SqliteEngine {
+                        versions: &mut self.sqlite_versions,
+                    };
+                    tracing::trace!("db_guard tick via {} engine", engine.engine_name());
+                    engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS)?;
                 }
                 "postgres" => {
                     #[cfg(not(feature = "pg-replication"))]
@@ -124,7 +194,9 @@ impl DbGuardSubsystem {
                         }
                         continue;
                     }
-                    postgres::tick_postgres_guard(ctx, guard, GUARD_TICK_INTERVAL_SECS)?;
+                    let mut engine = PostgresEngine;
+                    tracing::trace!("db_guard tick via {} engine", engine.engine_name());
+                    engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS)?;
                 }
                 "mysql" => {
                     #[cfg(not(feature = "mysql-cdc"))]
@@ -144,8 +216,11 @@ impl DbGuardSubsystem {
                         }
                         continue;
                     }
-                    let state = self.mysql_states.entry(guard.name.clone()).or_default();
-                    mysql::tick_mysql_guard(ctx, guard, state)?;
+                    let mut engine = MysqlEngine {
+                        states: &mut self.mysql_states,
+                    };
+                    tracing::trace!("db_guard tick via {} engine", engine.engine_name());
+                    engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS)?;
                 }
                 _ => {}
             }

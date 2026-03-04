@@ -94,7 +94,3 @@ pub fn compute_event_chain_hash_with_id(
     }
     hasher.finalize().to_hex().to_string()
 }
-
-pub fn compute_event_chain_hash(prev_hash: &str, event: &NewEventLedgerEntry, ts: &str) -> String {
-    compute_event_chain_hash_with_id(prev_hash, 0, event, ts)
-}
