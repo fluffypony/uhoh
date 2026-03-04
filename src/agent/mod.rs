@@ -26,7 +26,7 @@ pub struct AgentSubsystem {
     fanotify_started: bool,
     proxy_started: bool,
     background_failures: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    intercept_task: Option<tokio::task::JoinHandle<()>>,
+    intercept_task: Option<tokio::task::JoinHandle<Result<()>>>,
     fanotify_task: Option<tokio::task::JoinHandle<()>>,
     proxy_task: Option<tokio::task::JoinHandle<Result<()>>>,
     proxy_shutdown: Option<CancellationToken>,
@@ -142,11 +142,20 @@ impl AgentSubsystem {
             .unwrap_or(false)
         {
             if let Some(task) = self.intercept_task.take() {
-                if let Err(err) = task.await {
-                    self.background_failures
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    self.healthy = false;
-                    tracing::error!("session tailer task panicked: {err}");
+                match task.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        self.background_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.healthy = false;
+                        tracing::error!("session tailer task failed: {err}");
+                    }
+                    Err(err) => {
+                        self.background_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.healthy = false;
+                        tracing::error!("session tailer task panicked: {err}");
+                    }
                 }
             }
             self.intercept_started = false;
@@ -203,12 +212,8 @@ impl AgentSubsystem {
                 self.intercept_started = true;
                 let ctx_cl = ctx.clone();
                 let agents_cl = agents.to_vec();
-                let failures = self.background_failures.clone();
-                self.intercept_task = Some(tokio::task::spawn_blocking(move || {
-                    if let Err(err) = intercept::run_session_tailers(&ctx_cl, &agents_cl) {
-                        failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::error!("session tailer thread failed: {err}");
-                    }
+                self.intercept_task = Some(tokio::spawn(async move {
+                    intercept::run_session_tailers_async(&ctx_cl, &agents_cl).await
                 }));
             }
         }

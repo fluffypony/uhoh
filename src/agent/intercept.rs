@@ -9,7 +9,7 @@ use crate::db::AgentEntry;
 use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
 
-pub fn run_session_tailers(ctx: &SubsystemContext, agents: &[AgentEntry]) -> Result<()> {
+pub async fn run_session_tailers_async(ctx: &SubsystemContext, agents: &[AgentEntry]) -> Result<()> {
     let mut offsets: HashMap<String, u64> = HashMap::new();
     loop {
         for agent in agents {
@@ -31,11 +31,7 @@ pub fn run_session_tailers(ctx: &SubsystemContext, agents: &[AgentEntry]) -> Res
             let entry = offsets.entry(agent.name.clone()).or_insert(0);
             *entry = tail_one_file(ctx, agent, &session_path, *entry)?;
         }
-        tokio::runtime::Handle::try_current()
-            .map(|handle| {
-                handle.block_on(tokio::time::sleep(std::time::Duration::from_millis(500)));
-            })
-            .unwrap_or_else(|_| std::thread::sleep(std::time::Duration::from_millis(500)));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 

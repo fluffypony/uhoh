@@ -186,6 +186,28 @@ pub fn store_blob_from_file(
         return Ok((hash, file_size, StorageMethod::None, 0));
     }
 
+    #[cfg(feature = "compression")]
+    let do_compress = compress_enabled;
+    #[cfg(not(feature = "compression"))]
+    let do_compress = false;
+
+    let hash = hasher.finalize().to_hex().to_string();
+    let dir = blob_root.join(&hash[..hash.len().min(2)]);
+    std::fs::create_dir_all(&dir)?;
+    let blob_path = dir.join(&hash);
+
+    if blob_path.exists() {
+        return Ok((hash, file_size, StorageMethod::Copy, 0));
+    }
+
+    if !do_compress {
+        if reflink_copy::reflink(file_path, &blob_path).is_ok() {
+            set_blob_readonly(&blob_path);
+            fsync_parent_dir(&blob_path);
+            return Ok((hash, file_size, StorageMethod::Reflink, 0));
+        }
+    }
+
     let tmp_dir = blob_root.join("tmp");
     std::fs::create_dir_all(&tmp_dir)?;
     let tmp_path = tmp_dir.join(format!(
@@ -197,15 +219,7 @@ pub fn store_blob_from_file(
             .as_nanos()
     ));
 
-    #[cfg(feature = "compression")]
-    let do_compress = compress_enabled;
-    #[cfg(not(feature = "compression"))]
-    let do_compress = false;
-
-    #[allow(unused_mut)]
-    let mut bytes_on_disk: u64;
-
-    if do_compress {
+    let bytes_on_disk: u64 = if do_compress {
         #[cfg(feature = "compression")]
         {
             let level = if (1..=22).contains(&compress_level) {
@@ -237,9 +251,9 @@ pub fn store_blob_from_file(
                 .into_inner()
                 .map_err(|e| anyhow::anyhow!("Failed to get temp file handle: {e}"))?;
             file.sync_all()?;
-            bytes_on_disk = file.metadata()?.len();
+            let mut compressed_size = file.metadata()?.len();
 
-            if bytes_on_disk >= file_size + COMPRESSION_MAGIC_NEW.len() as u64 {
+            if compressed_size >= file_size + COMPRESSION_MAGIC_NEW.len() as u64 {
                 drop(file);
                 let _ = std::fs::remove_file(&tmp_path);
 
@@ -254,12 +268,13 @@ pub fn store_blob_from_file(
                     dst.write_all(&buf[..n])?;
                 }
                 dst.sync_all()?;
-                bytes_on_disk = file_size;
+                compressed_size = file_size;
             }
+            compressed_size
         }
         #[cfg(not(feature = "compression"))]
         {
-            bytes_on_disk = 0;
+            0
         }
     } else {
         let mut tmp_file = create_restricted_file(&tmp_path)?;
@@ -271,31 +286,11 @@ pub fn store_blob_from_file(
             if n == 0 {
                 break;
             }
-            hasher.update(&buf[..n]);
             tmp_file.write_all(&buf[..n])?;
         }
         tmp_file.sync_all()?;
-        bytes_on_disk = file_size;
-    }
-
-    let hash = hasher.finalize().to_hex().to_string();
-    let dir = blob_root.join(&hash[..hash.len().min(2)]);
-    std::fs::create_dir_all(&dir)?;
-    let blob_path = dir.join(&hash);
-
-    if blob_path.exists() {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Ok((hash, file_size, StorageMethod::Copy, 0));
-    }
-
-    if !do_compress {
-        if reflink_copy::reflink(file_path, &blob_path).is_ok() {
-            set_blob_readonly(&blob_path);
-            fsync_parent_dir(&blob_path);
-            let _ = std::fs::remove_file(&tmp_path);
-            return Ok((hash, file_size, StorageMethod::Reflink, 0));
-        }
-    }
+        file_size
+    };
 
     match std::fs::rename(&tmp_path, &blob_path) {
         Ok(()) => {

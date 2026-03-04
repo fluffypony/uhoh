@@ -13,7 +13,6 @@ use crate::db_guard::recovery;
 use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
 
-const GUARD_TICK_SECS: i64 = 30;
 static PG_DDL_CURSOR: Lazy<Mutex<HashMap<String, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 struct ListenWorker {
     queue: std::sync::Arc<Mutex<Vec<String>>>,
@@ -23,7 +22,11 @@ struct ListenWorker {
 static PG_LISTEN_WORKERS: Lazy<Mutex<HashMap<String, ListenWorker>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-pub fn tick_postgres_guard(ctx: &SubsystemContext, guard: &DbGuardEntry) -> Result<()> {
+pub fn tick_postgres_guard(
+    ctx: &SubsystemContext,
+    guard: &DbGuardEntry,
+    tick_interval_secs: i64,
+) -> Result<()> {
     let baseline_interval = std::time::Duration::from_secs(
         ctx.config
             .db_guard
@@ -59,7 +62,8 @@ pub fn tick_postgres_guard(ctx: &SubsystemContext, guard: &DbGuardEntry) -> Resu
     }
 
     // Lightweight delete-counter polling.
-    if let Ok(deleted_rows) = poll_delete_count(&guard.connection_ref, GUARD_TICK_SECS * 2) {
+    let poll_window_secs = tick_interval_secs.saturating_mul(2).max(1);
+    if let Ok(deleted_rows) = poll_delete_count(&guard.connection_ref, poll_window_secs) {
         if deleted_rows >= ctx.config.db_guard.mass_delete_row_threshold as i64 {
             let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
             if let Ok(artifact) = recovery::write_postgres_schema_recovery(

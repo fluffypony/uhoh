@@ -26,6 +26,8 @@ pub use recovery::decrypt_recovery_payload;
 pub use recovery::write_postgres_schema_baseline;
 pub use recovery::write_sqlite_baseline;
 
+const GUARD_TICK_INTERVAL_SECS: i64 = 30;
+
 pub struct DbGuardSubsystem {
     healthy: bool,
     sqlite_versions: HashMap<String, i64>,
@@ -72,7 +74,7 @@ impl Subsystem for DbGuardSubsystem {
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(GUARD_TICK_INTERVAL_SECS as u64)) => {
                     self.tick_guards(&ctx, &guards)?;
                 }
             }
@@ -122,7 +124,7 @@ impl DbGuardSubsystem {
                         }
                         continue;
                     }
-                    postgres::tick_postgres_guard(ctx, guard)?;
+                    postgres::tick_postgres_guard(ctx, guard, GUARD_TICK_INTERVAL_SECS)?;
                 }
                 "mysql" => {
                     #[cfg(not(feature = "mysql-cdc"))]
