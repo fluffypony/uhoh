@@ -128,6 +128,16 @@ pub enum Commands {
     /// Show daemon and project status
     Status,
 
+    /// Validate database and blob store; optionally repair or restore
+    Doctor {
+        /// Attempt to fix issues (delete orphaned blobs, etc.)
+        #[arg(long)]
+        fix: bool,
+        /// Restore the DB from latest backup if integrity check fails
+        #[arg(long)]
+        restore_latest: bool,
+    },
+
     /// Mark the start of an AI-agent operation for grouped undo
     Mark {
         label: String,

@@ -175,20 +175,23 @@ fn verify_ed25519_signature(data: &[u8], signature_bytes: &[u8]) -> Result<bool>
 }
 
 async fn dns_verify_hash(version: &str, asset: &str) -> Result<String> {
-    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    // Test override to allow deterministic tests without real DNS
+    if let Ok(v) = std::env::var("UHOH_TEST_DNS_TXT") {
+        return Ok(v);
+    }
+    use hickory_resolver::config::ResolverConfig;
     use hickory_resolver::{name_server::TokioConnectionProvider, Resolver};
-
-    let query = format!("release-{}.{}.releases.uhoh.it.", asset, version);
+    let query = format!("release-{asset}.{version}.releases.uhoh.it.");
     let resolver: Resolver<_> = Resolver::builder_with_config(ResolverConfig::default(), TokioConnectionProvider::default())
         .build();
     let response = resolver
         .txt_lookup(query.clone())
         .await
-        .with_context(|| format!("DNS TXT lookup failed for {}", query))?;
+        .with_context(|| format!("DNS TXT lookup failed for {query}"))?;
     let txt = response
         .iter()
         .next()
-        .ok_or_else(|| anyhow::anyhow!("Empty TXT record for {}", query))?;
+        .ok_or_else(|| anyhow::anyhow!("Empty TXT record for {query}"))?;
     Ok(txt.to_string())
 }
 

@@ -320,6 +320,50 @@ fn create_restricted_file(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+/// Estimate disk usage of a blob, accounting for hardlinks on Unix.
+pub fn blob_disk_usage(blob_path: &Path) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = std::fs::metadata(blob_path) {
+            return if meta.nlink() > 1 { meta.len() / meta.nlink() } else { meta.len() };
+        }
+        0
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::metadata(blob_path).map(|m| m.len()).unwrap_or(0)
+    }
+}
+
+/// Clean up stale temp files in the blob store (from crashed processes).
+/// Removes files under blobs/tmp older than the specified max_age.
+pub fn cleanup_stale_temp_files(blob_root: &Path, max_age: std::time::Duration) {
+    let tmp_dir = blob_root.join("tmp");
+    if !tmp_dir.exists() {
+        return;
+    }
+    let now = std::time::SystemTime::now();
+    if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with(".tmp.") {
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        if let Ok(mtime) = meta.modified() {
+                            if let Ok(age) = now.duration_since(mtime) {
+                                if age > max_age {
+                                    let _ = std::fs::remove_file(&path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

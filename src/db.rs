@@ -68,6 +68,21 @@ impl Database {
         Ok(db)
     }
 
+    /// Create a consistent backup of the database to the given path.
+    /// Uses SQLite online backup API under the hood.
+    pub fn backup_to(&self, path: &std::path::Path) -> Result<()> {
+        let src = self.conn();
+        let mut dest = rusqlite::Connection::open(path)?;
+        let mut backup = rusqlite::backup::Backup::new(&*src, &mut dest)?;
+        backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+        Ok(())
+    }
+
     /// Get a connection guard, recovering from mutex poisoning.
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn
@@ -360,9 +375,9 @@ impl Database {
         trigger: &str,
         message: &str,
         pinned: bool,
-        files: &[(String, String, u64, bool, bool, Option<i64>, i64)], // (path, hash, size, stored, executable, mtime, storage_method)
-        deleted: &[(String, String, u64, bool, i64)],       // (path, hash, size, stored, storage_method)
-        tree_hashes: &[(String, String)],              // (dir_path, tree_hash)
+        files: &[SnapFile],
+        deleted: &[DeletedFile],
+        tree_hashes: &[TreeHash],
     ) -> Result<i64> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -840,3 +855,7 @@ impl Database {
         Ok(size as u64)
     }
 }
+// Type aliases to simplify complex tuple signatures used around snapshot creation
+pub type SnapFile = (String, String, u64, bool, bool, Option<i64>, i64); // (path, hash, size, stored, executable, mtime, storage_method)
+pub type DeletedFile = (String, String, u64, bool, i64); // (path, hash, size, stored, storage_method)
+pub type TreeHash = (String, String); // (dir_path, tree_hash)

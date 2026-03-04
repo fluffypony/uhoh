@@ -10,6 +10,7 @@ use crate::db::Database;
 use crate::snapshot;
 use crate::watcher;
 use notify::{RecursiveMode, Watcher as _};
+// already imported above
 
 // Removed duplicate is_uhoh_process_alive; use crate::platform::is_uhoh_process_alive instead
 
@@ -182,6 +183,9 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
     }
 
     // Main event loop
+    // Backoff state for watcher recovery
+    let mut recover_attempts: u32 = 0;
+    let mut next_recover_at: Option<Instant> = None;
     let mut tick_interval = tokio::time::interval(Duration::from_secs(60));
     let mut update_check_interval = tokio::time::interval(Duration::from_secs(config.update.check_interval_hours * 3600));
     let mut debounce_interval = tokio::time::interval(Duration::from_millis(500));
@@ -194,8 +198,15 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
             Some(event) = event_rx.recv() => {
                 match event {
                     WatchEvent::WatcherDied => {
-                        tracing::error!("File watcher died — attempting recovery...");
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        let now = Instant::now();
+                        if let Some(ready_at) = next_recover_at {
+                            if now < ready_at {
+                                tracing::warn!("Watcher died, backoff active — next attempt in {:?}", ready_at - now);
+                                continue;
+                            }
+                        }
+                        let delay_secs = (1u64 << recover_attempts.min(6)).min(60);
+                        tracing::error!("File watcher died — attempting recovery (attempt #{})...", recover_attempts + 1);
                         let paths: Vec<PathBuf> = project_states
                             .keys()
                             .map(|k| PathBuf::from(k))
@@ -204,9 +215,13 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                             Ok(new_watcher) => {
                                 watcher_handle = new_watcher;
                                 tracing::info!("File watcher recovered successfully");
+                                recover_attempts = 0;
+                                next_recover_at = None;
                             }
                             Err(e) => {
-                                tracing::error!("Failed to recover file watcher: {}. Will retry on next tick.", e);
+                                recover_attempts = recover_attempts.saturating_add(1);
+                                next_recover_at = Some(now + Duration::from_secs(delay_secs));
+                                tracing::error!("Failed to recover file watcher: {}. Backing off {}s.", e, delay_secs);
                             }
                         }
                     }
@@ -269,6 +284,28 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 if total_freed > 100 * 1024 * 1024 {
                     tracing::info!("Compaction estimated freed {:.1} MB; triggering GC", total_freed as f64 / 1_048_576.0);
                     let _ = crate::gc::run_gc(&uhoh_dir, database);
+                }
+
+                // Periodic database backup once every check_interval_hours
+                // Creates a timestamped WAL-safe backup under ~/.uhoh/backups/
+                let backups_dir = uhoh_dir.join("backups");
+                let _ = std::fs::create_dir_all(&backups_dir);
+                let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                let backup_path = backups_dir.join(format!("uhoh-{}.db", ts));
+                if let Err(e) = database_backup_to(database, &backup_path) {
+                    tracing::warn!("Database backup failed: {}", e);
+                } else {
+                    // Best-effort rotation: keep last 14 backups
+                    if let Ok(entries) = std::fs::read_dir(&backups_dir) {
+                        let mut files: Vec<_> = entries.flatten().collect();
+                        files.sort_by_key(|e| e.file_name());
+                        if files.len() > 14 {
+                            let to_remove = files.len() - 14;
+                            for e in files.iter().take(to_remove) {
+                                let _ = std::fs::remove_file(e.path());
+                            }
+                        }
+                    }
                 }
             }
             _ = update_check_interval.tick() => {
@@ -414,6 +451,10 @@ async fn process_pending_snapshots(
             }
         }
     }
+}
+
+fn database_backup_to(database: &Database, path: &std::path::Path) -> anyhow::Result<()> {
+    database.backup_to(path)
 }
 
 fn check_moved_folders(

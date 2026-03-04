@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::cas;
+use chrono::TimeZone;
 use crate::db::{Database, ProjectEntry};
 use syntect::easy::HighlightLines;
 // Style imported implicitly via ranges; suppress unused warnings by not importing it explicitly
@@ -143,7 +144,7 @@ pub fn cmd_cat(
             .into_iter()
             .find(|s| s.timestamp <= ts.to_rfc3339())
     } else if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(id_str, "%Y-%m-%dT%H:%M:%S") {
-        let ts = chrono::DateTime::<chrono::Utc>::from_utc(ts, chrono::Utc);
+        let ts = chrono::Utc.from_utc_datetime(&ts);
         database
             .list_snapshots(&project.hash)?
             .into_iter()

@@ -329,6 +329,9 @@ async fn main() -> Result<()> {
 
         Commands::Gc => { gc::run_gc(&uhoh, &database)?; }
         Commands::Update => { update::check_and_apply_update(&uhoh).await?; }
+        Commands::Doctor { fix, restore_latest } => {
+            run_doctor(&uhoh, &database, fix, restore_latest)?;
+        }
 
         Commands::Status => {
             let running = is_daemon_running(&uhoh);
@@ -375,4 +378,72 @@ fn parse_toml_value(s: &str) -> toml_edit::Value {
     if let Ok(i) = s.parse::<i64>() { return toml_edit::Value::from(i); }
     if let Ok(f) = s.parse::<f64>() { return toml_edit::Value::from(f); }
     toml_edit::Value::from(s.to_string())
+}
+
+fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bool, restore_latest: bool) -> Result<()> {
+    // 1) SQLite integrity check
+    {
+        let conn = rusqlite::Connection::open(uhoh_dir.join("uhoh.db"))?;
+        let ok: String = conn
+            .prepare("PRAGMA integrity_check;")?
+            .query_row([], |row| row.get(0))?;
+        if ok != "ok" {
+            eprintln!("Database integrity check FAILED: {}", ok);
+            if restore_latest {
+                // Attempt restore from latest backup
+                let backups = uhoh_dir.join("backups");
+                if backups.exists() {
+                    let mut files: Vec<_> = std::fs::read_dir(&backups)?.flatten().collect();
+                    files.sort_by_key(|e| e.file_name());
+                    if let Some(last) = files.last() {
+                        let src = last.path();
+                        let dst = uhoh_dir.join("uhoh.db");
+                        std::fs::copy(&src, &dst)?;
+                        println!("Restored database from {}", src.display());
+                    } else {
+                        eprintln!("No backups found to restore.");
+                    }
+                }
+            }
+        } else {
+            println!("Database integrity: ok");
+        }
+    }
+
+    // 2) Blob store cross-check
+    let blob_root = uhoh_dir.join("blobs");
+    let referenced = database.all_referenced_blob_hashes()?;
+    let mut missing = Vec::new();
+    for h in &referenced {
+        let p = blob_root.join(&h[..h.len().min(2)]).join(h);
+        if !p.exists() { missing.push(h.clone()); }
+    }
+    println!("Referenced blobs: {}, missing: {}", referenced.len(), missing.len());
+    if !missing.is_empty() {
+        for m in missing.iter().take(10) {
+            println!("  missing {}...", &m[..m.len().min(12)]);
+        }
+    }
+
+    // 3) Orphan detection
+    let mut orphans = Vec::new();
+    if blob_root.exists() {
+        for pref in std::fs::read_dir(&blob_root)? {
+            let pref = match pref { Ok(p) => p, Err(_) => continue };
+            if !pref.file_type()?.is_dir() { continue; }
+            if pref.file_name() == "tmp" { continue; }
+            for e in std::fs::read_dir(pref.path())? {
+                let e = match e { Ok(v) => v, Err(_) => continue };
+                let name = e.file_name().to_string_lossy().to_string();
+                if !referenced.contains(&name) { orphans.push(e.path()); }
+            }
+        }
+    }
+    println!("Orphaned blobs: {}", orphans.len());
+    if fix && !orphans.is_empty() {
+        for o in &orphans { let _ = std::fs::remove_file(o); }
+        println!("Removed {} orphaned blobs", orphans.len());
+    }
+
+    Ok(())
 }
