@@ -103,10 +103,10 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
     #[cfg(target_os = "linux")]
     check_inotify_limit();
 
-    // Channel for events from watcher
-    let (event_tx, mut event_rx) = mpsc::channel::<WatchEvent>(1000);
+    // Channel for events from watcher (larger buffer to handle bursts)
+    let (event_tx, mut event_rx) = mpsc::channel::<WatchEvent>(10_000);
 
-    // Load all registered projects
+    // Load registered projects (initial), dynamic discovery runs on ticks
     let projects = database.list_projects()?;
 
     // Start file watcher
@@ -270,15 +270,38 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 check_for_new_projects(database, &mut watcher_handle, &mut project_states);
                 // Attempt to recover watcher if it died earlier
                 // Attempt watcher recovery only when we get WatcherDied events; here keep lightweight
-                // If an update has been applied (trigger file present), exit gracefully so service manager can restart
+                // If an update has been applied (trigger file present), restart like binary change
                 if update_trigger.exists() {
-                    tracing::info!("Update ready trigger detected; stopping daemon for restart");
+                    tracing::info!("Update ready trigger detected; restarting daemon");
+                    let _ = std::fs::remove_file(&update_trigger);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        let args: Vec<String> = std::env::args().collect();
+                        if let Ok(exe) = std::env::current_exe() {
+                            let err = std::process::Command::new(exe).args(&args[1..]).exec();
+                            tracing::error!("exec failed: {}", err);
+                        }
+                    }
+                    #[cfg(windows)]
+                    {
+                        if let Ok(exe) = std::env::current_exe() {
+                            let mut args: Vec<String> = std::env::args().collect();
+                            args.push("--takeover".into());
+                            args.push(std::process::id().to_string());
+                            let _ = std::process::Command::new(exe)
+                                .args(&args[1..])
+                                .spawn();
+                        }
+                    }
                     break;
                 }
                 let mut total_freed = 0u64;
-                for project in &projects {
-                    if let Ok(freed) = crate::compaction::compact_project(database, &project.hash, &config.compaction) {
-                        total_freed = total_freed.saturating_add(freed);
+                if let Ok(current_projects) = database.list_projects() {
+                    for project in &current_projects {
+                        if let Ok(freed) = crate::compaction::compact_project(database, &project.hash, &config.compaction) {
+                            total_freed = total_freed.saturating_add(freed);
+                        }
                     }
                 }
                 if total_freed > 100 * 1024 * 1024 {
@@ -286,25 +309,28 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                     let _ = crate::gc::run_gc(&uhoh_dir, database);
                 }
 
-                // Periodic database backup once every check_interval_hours
-                // Creates a timestamped WAL-safe backup under ~/.uhoh/backups/
-                let backups_dir = uhoh_dir.join("backups");
-                let _ = std::fs::create_dir_all(&backups_dir);
-                let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-                let backup_path = backups_dir.join(format!("uhoh-{}.db", ts));
-                if let Err(e) = database_backup_to(database, &backup_path) {
-                    tracing::warn!("Database backup failed: {}", e);
-                } else {
-                    // Best-effort rotation: keep last 14 backups
-                    if let Ok(entries) = std::fs::read_dir(&backups_dir) {
-                        let mut files: Vec<_> = entries.flatten().collect();
-                        files.sort_by_key(|e| e.file_name());
-                        if files.len() > 14 {
-                            let to_remove = files.len() - 14;
-                            for e in files.iter().take(to_remove) {
-                                let _ = std::fs::remove_file(e.path());
+                // Periodic database backup (hourly by default)
+                static mut LAST_BACKUP: Option<std::time::Instant> = None;
+                let backup_interval = std::time::Duration::from_secs(config.update.check_interval_hours * 3600);
+                let do_backup = unsafe { LAST_BACKUP.map(|t| t.elapsed() >= backup_interval).unwrap_or(true) };
+                if do_backup {
+                    let backups_dir = uhoh_dir.join("backups");
+                    let _ = std::fs::create_dir_all(&backups_dir);
+                    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                    let backup_path = backups_dir.join(format!("uhoh-{}.db", ts));
+                    if let Err(e) = database_backup_to(database, &backup_path) {
+                        tracing::warn!("Database backup failed: {}", e);
+                    } else {
+                        // Best-effort rotation: keep last 14 backups
+                        if let Ok(entries) = std::fs::read_dir(&backups_dir) {
+                            let mut files: Vec<_> = entries.flatten().collect();
+                            files.sort_by_key(|e| e.file_name());
+                            if files.len() > 14 {
+                                let to_remove = files.len() - 14;
+                                for e in files.iter().take(to_remove) { let _ = std::fs::remove_file(e.path()); }
                             }
                         }
+                        unsafe { LAST_BACKUP = Some(std::time::Instant::now()); }
                     }
                 }
             }
@@ -436,6 +462,10 @@ async fn process_pending_snapshots(
             match result.unwrap_or_else(|_| Ok(None)) {
                 Ok(Some(_id)) => {
                     state.last_snapshot = now;
+                    // Clear pending state after successful snapshot
+                    state.pending_changes.clear();
+                    state.first_change_at = None;
+                    state.last_change_at = None;
                     tracing::debug!("Auto-snapshot for {}", &state.hash[..state.hash.len().min(12)]);
                 }
                 Ok(None) => {

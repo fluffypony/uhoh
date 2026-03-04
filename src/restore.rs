@@ -145,21 +145,14 @@ pub fn cmd_restore(
     );
 
     for (path, hash, executable) in &to_restore {
-        // Basic traversal guard
-        if path.contains("..") {
-            tracing::warn!("Skipping suspicious path with '..': {}", path);
+        // Path traversal guard using structural components
+        let p = std::path::Path::new(path);
+        if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            tracing::warn!("Skipping suspicious path: {}", path);
             continue;
         }
-        // Canonicalize parent and ensure contained in project root
+        // Join relative path directly under project root
         let full_path = project_path.join(path);
-        if let Some(parent) = full_path.parent() {
-            let canon_project = dunce::canonicalize(project_path).unwrap_or(project_path.to_path_buf());
-            let canon_parent = if parent.exists() { dunce::canonicalize(parent).unwrap_or(parent.to_path_buf()) } else { parent.to_path_buf() };
-            if !canon_parent.starts_with(&canon_project) {
-                tracing::warn!("Path escapes project root after canonicalization, skipping: {}", path);
-                continue;
-            }
-        }
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)?;
         }

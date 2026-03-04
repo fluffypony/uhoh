@@ -108,7 +108,16 @@ pub fn create_snapshot(
 
         // Check if we can skip hashing (mtime + size unchanged)
         if let Some(cached) = prev_files.get(rel_path) {
-            if cached.size == size && cached.mtime == mtime {
+            let fs_mtime_secs = mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let cached_secs = cached
+                .mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            if cached.size == size && cached_secs == fs_mtime_secs {
                 // Carry forward unchanged file
                 files_for_manifest.push((
                     rel_path.clone(),

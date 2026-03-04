@@ -336,7 +336,10 @@ async fn main() -> Result<()> {
 
         Commands::Gc => { gc::run_gc(&uhoh, &database)?; }
         Commands::Update => { update::check_and_apply_update(&uhoh).await?; }
-        Commands::Doctor { fix, restore_latest } => {
+        Commands::Doctor { fix, restore_latest, verify_install } => {
+            if verify_install {
+                return run_verify_install().await;
+            }
             run_doctor(&uhoh, &database, fix, restore_latest)?;
         }
 
@@ -394,20 +397,20 @@ async fn run_zero_verb() -> Result<()> {
 
     // Already registered?
     if let Some(project) = database.find_project_by_path(&cwd)? {
-        // Take a quick manual snapshot and revert to the previous one
-        let cfg = config::Config::load(&uhoh.join("config.toml"))?;
-        let _ = snapshot::create_snapshot(&uhoh, &database, &project.hash, &cwd, "manual", Some("Quick snapshot"), &cfg)?;
-        // Find the snapshot before the newest
+        // Show status instead of performing a destructive restore
         let snaps = database.list_snapshots(&project.hash)?; // newest-first
-        if let Some(current) = snaps.first() {
-            if let Some(prev) = database.snapshot_before(&project.hash, current.snapshot_id)? {
-                let id_str = cas::id_to_base58(prev.snapshot_id);
-                restore::cmd_restore(&uhoh, &database, &project, &id_str, false, true)?;
-                println!("Reverted to snapshot {}", id_str);
-            } else {
-                println!("No previous snapshot to revert to; quick snapshot saved.");
-            }
+        println!("uhoh is active in this directory.");
+        if let Some(latest) = snaps.first() {
+            println!("Latest snapshot: {} ({})",
+                cas::id_to_base58(latest.snapshot_id),
+                latest.timestamp);
+            println!("Total snapshots: {}", snaps.len());
+        } else {
+            println!("No snapshots yet.");
         }
+        println!("\nTo undo the last AI operation: uhoh undo");
+        println!("To restore a snapshot:         uhoh restore <id>");
+        println!("To see recent changes:         uhoh log");
         return Ok(());
     }
 
@@ -544,4 +547,41 @@ fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bool, re
     }
 
     Ok(())
+}
+
+async fn run_verify_install() -> Result<()> {
+    let exe_path = std::env::current_exe()
+        .context("Could not determine path to running binary")?;
+    let exe_bytes = std::fs::read(&exe_path)
+        .context("Could not read running binary")?;
+
+    let local_hash = blake3::hash(&exe_bytes).to_hex().to_string();
+    let version = env!("CARGO_PKG_VERSION");
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let asset_name = format!("uhoh-{}-{}", os, arch);
+
+    println!("Binary:  {}", exe_path.display());
+    println!("Version: {}", version);
+    println!("Hash:    {}", local_hash);
+    println!("Asset:   {}", asset_name);
+
+    match uhoh::update::dns_verify_hash(version, &asset_name).await {
+        Ok(expected) => {
+            if expected.eq_ignore_ascii_case(&local_hash) {
+                println!("\u{2713} Binary hash matches DNS record.");
+                std::process::exit(0);
+            } else {
+                eprintln!("Binary hash does not match DNS record!");
+                eprintln!("  Local:    {}", local_hash);
+                eprintln!("  Expected: {}", expected);
+                std::process::exit(2);
+            }
+        }
+        Err(e) => {
+            eprintln!("Could not verify hash via DNS: {}", e);
+            // Non-fatal: installer treats this as a warning
+            std::process::exit(0);
+        }
+    }
 }

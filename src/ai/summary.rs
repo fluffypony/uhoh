@@ -22,21 +22,8 @@ pub fn generate_summary_blocking(
         &diff_text[..cut]
     } else { diff_text };
 
-    // Choose a model tier from config or defaults
-    let tiers = if config.ai.models.is_empty() {
-        crate::ai::models::default_model_tiers()
-    } else {
-        config.ai.models.clone()
-    };
-    // Simple RAM-based selection with 2GB margin; gracefully skip if none fit
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
-    let total = sys.total_memory() / (1024 * 1024 * 1024);
-    let mut selected = None;
-    for t in tiers {
-        if total >= t.min_ram_gb + 2 { selected = Some(t); }
-    }
-    let Some(model) = selected else {
+    // Choose a model tier using centralized selector
+    let Some(model) = crate::ai::models::select_model(&config.ai) else {
         tracing::warn!("No suitable AI model tier for available RAM; skipping summary generation");
         return Ok(String::new());
     };

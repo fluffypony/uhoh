@@ -15,9 +15,38 @@ Highlights
 - Safe auto‑updates: Ed25519 signatures, DNS TXT fallback, atomically applied
 - Guardrails: emergency‑delete detection, GC, compaction, and a `doctor` command
 
-## Install
+## Installation
 
-Prebuilt binaries are available on the releases page. Place `uhoh` in your `PATH`.
+### Quick Install (Recommended)
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://uhoh.it/install.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://uhoh.it/install.ps1 | iex
+```
+
+### What the Install Script Does
+
+1. Checks for existing installation and reports the current version
+2. Detects your OS and CPU architecture and selects the correct binary asset
+3. Downloads the latest release from GitHub
+4. Installs the binary to a directory on your PATH
+5. Verifies binary integrity via DNS TXT records using `uhoh doctor --verify-install`
+6. Prints success or a warning if verification could not complete
+
+You can re-verify at any time:
+
+```bash
+uhoh doctor --verify-install
+```
+
+Manual installation remains supported: download from the latest release and place the binary on your PATH (`/usr/local/bin`, `~/.local/bin`, or `%LOCALAPPDATA%\uhoh\bin`).
 
 ## Quick start
 

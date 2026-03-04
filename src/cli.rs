@@ -136,6 +136,9 @@ pub enum Commands {
         /// Restore the DB from latest backup if integrity check fails
         #[arg(long)]
         restore_latest: bool,
+        /// Verify installed binary hash against DNS records and exit
+        #[arg(long)]
+        verify_install: bool,
     },
 
     /// Mark the start of an AI-agent operation for grouped undo

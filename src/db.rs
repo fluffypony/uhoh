@@ -192,26 +192,35 @@ impl Database {
 
         // Schema v2: add mtime to snapshot_files and denormalized file_count on snapshots
         if version < 2 {
-            conn.execute_batch(
-                "BEGIN TRANSACTION;\n
-                ALTER TABLE snapshot_files ADD COLUMN mtime INTEGER;\n
-                ALTER TABLE snapshots ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;\n
-                INSERT OR REPLACE INTO schema_version (version) VALUES (2);\n
-                COMMIT;",
-            )?;
+            conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION;")?;
+            // Check column existence by preparing a dummy SELECT
+            let has_mtime = conn.prepare("SELECT mtime FROM snapshot_files LIMIT 0").is_ok();
+            if !has_mtime {
+                conn.execute_batch("ALTER TABLE snapshot_files ADD COLUMN mtime INTEGER;")?;
+            }
+            let has_file_count = conn.prepare("SELECT file_count FROM snapshots LIMIT 0").is_ok();
+            if !has_file_count {
+                conn.execute_batch("ALTER TABLE snapshots ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;")?;
+            }
+            conn.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (2);")?;
+            conn.execute_batch("COMMIT;")?;
         }
 
         // Schema v3: add storage_method columns and backfill from stored
         if version < 3 {
-            conn.execute_batch(
-                "BEGIN TRANSACTION;\n
-                 ALTER TABLE snapshot_files ADD COLUMN storage_method INTEGER NOT NULL DEFAULT 1;\n
-                 ALTER TABLE snapshot_deleted ADD COLUMN storage_method INTEGER NOT NULL DEFAULT 1;\n
-                 UPDATE snapshot_files SET storage_method = CASE WHEN stored = 1 THEN 1 ELSE 0 END;\n
-                 UPDATE snapshot_deleted SET storage_method = CASE WHEN stored = 1 THEN 1 ELSE 0 END;\n
-                 INSERT OR REPLACE INTO schema_version (version) VALUES (3);\n
-                 COMMIT;",
-            )?;
+            conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION;")?;
+            let has_sf = conn.prepare("SELECT storage_method FROM snapshot_files LIMIT 0").is_ok();
+            if !has_sf {
+                conn.execute_batch("ALTER TABLE snapshot_files ADD COLUMN storage_method INTEGER NOT NULL DEFAULT 1;")?;
+                conn.execute_batch("UPDATE snapshot_files SET storage_method = CASE WHEN stored = 1 THEN 1 ELSE 0 END;")?;
+            }
+            let has_sd = conn.prepare("SELECT storage_method FROM snapshot_deleted LIMIT 0").is_ok();
+            if !has_sd {
+                conn.execute_batch("ALTER TABLE snapshot_deleted ADD COLUMN storage_method INTEGER NOT NULL DEFAULT 1;")?;
+                conn.execute_batch("UPDATE snapshot_deleted SET storage_method = CASE WHEN stored = 1 THEN 1 ELSE 0 END;")?;
+            }
+            conn.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (3);")?;
+            conn.execute_batch("COMMIT;")?;
         }
 
         Ok(())

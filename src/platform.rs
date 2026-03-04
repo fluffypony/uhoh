@@ -197,7 +197,7 @@ pub fn is_uhoh_process_alive(pid: u32) -> bool {
     #[cfg(target_os = "macos")]
     {
         match std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .args(["-p", &pid.to_string(), "-o", "args="])
             .output()
         {
             Ok(out) if out.status.success() => {
@@ -223,14 +223,14 @@ pub fn is_uhoh_process_alive(pid: u32) -> bool {
     #[cfg(target_os = "windows")]
     {
         use winapi::um::processthreadsapi::OpenProcess;
-        use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
+        use winapi::um::winnt::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
         use winapi::um::handleapi::CloseHandle;
         use winapi::um::psapi::GetModuleFileNameExW;
         unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
             if handle.is_null() { return false; }
-            let mut buf = [0u16; 260];
-            let len = GetModuleFileNameExW(handle, std::ptr::null_mut(), buf.as_mut_ptr(), 260);
+            let mut buf = [0u16; 32767];
+            let len = GetModuleFileNameExW(handle, std::ptr::null_mut(), buf.as_mut_ptr(), 32767);
             CloseHandle(handle);
             if len > 0 {
                 let name = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();

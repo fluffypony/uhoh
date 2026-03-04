@@ -134,12 +134,6 @@ pub fn store_blob_from_file(
         return Ok((hash, file_size, StorageMethod::Reflink));
     }
 
-    // Try hardlink
-    if std::fs::hard_link(file_path, &blob_path).is_ok() {
-        set_blob_readonly(&blob_path);
-        return Ok((hash, file_size, StorageMethod::Hardlink));
-    }
-
     // Try full copy if within size limit
     if file_size <= max_copy_blob_bytes {
         // Write to temp then rename for atomicity
@@ -154,6 +148,18 @@ pub fn store_blob_from_file(
                 .as_nanos()
         ));
         std::fs::copy(file_path, &tmp_path)?;
+        // TOCTOU guard: re-hash the stored bytes to ensure match
+        let stored_hash = {
+            let mut hasher = blake3::Hasher::new();
+            let mut f = std::fs::File::open(&tmp_path)?;
+            let _ = std::io::copy(&mut f, &mut hasher)?;
+            hasher.finalize().to_hex().to_string()
+        };
+        if stored_hash != hash {
+            let _ = std::fs::remove_file(&tmp_path);
+            tracing::warn!("File changed during snapshot: {}", file_path.display());
+            return Ok((hash, file_size, StorageMethod::None));
+        }
         set_blob_readonly(&tmp_path);
         match std::fs::rename(&tmp_path, &blob_path) {
             Ok(()) => return Ok((hash, file_size, StorageMethod::Copy)),
@@ -230,12 +236,16 @@ fn set_blob_readonly(path: &Path) {
 fn maybe_compress(data: &[u8]) -> Vec<u8> {
     #[cfg(feature = "compression")]
     {
-        // Prefix with a magic byte to identify compressed blobs
-        let mut out = vec![0x01]; // 0x01 = zstd compressed
+        // Prefix with a robust magic header to avoid collisions with raw data
+        const COMPRESSION_MAGIC: &[u8; 4] = b"UHZS"; // "UH" + "ZS" (zstd)
         let compressed = zstd::encode_all(std::io::Cursor::new(data), 3)
             .unwrap_or_else(|_| data.to_vec());
-        out.extend_from_slice(&compressed);
-        return out;
+        if compressed.len() < data.len() {
+            let mut out = Vec::with_capacity(compressed.len() + 4);
+            out.extend_from_slice(COMPRESSION_MAGIC);
+            out.extend_from_slice(&compressed);
+            return out;
+        }
     }
     #[cfg(not(feature = "compression"))]
     {
@@ -246,8 +256,9 @@ fn maybe_compress(data: &[u8]) -> Vec<u8> {
 fn maybe_decompress(data: &[u8]) -> Result<Vec<u8>> {
     #[cfg(feature = "compression")]
     {
-        if data.first() == Some(&0x01) {
-            return zstd::decode_all(std::io::Cursor::new(&data[1..]))
+        const COMPRESSION_MAGIC: &[u8; 4] = b"UHZS";
+        if data.len() > 4 && &data[..4] == COMPRESSION_MAGIC {
+            return zstd::decode_all(std::io::Cursor::new(&data[4..]))
                 .context("Failed to decompress blob");
         }
     }

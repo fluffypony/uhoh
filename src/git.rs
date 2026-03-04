@@ -156,11 +156,8 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
 
     let hook_path = hooks_dir.join("pre-commit");
 
-    // Use absolute path to uhoh binary (prevents PATH hijacking)
-    let exe_str = match std::env::current_exe() {
-        Ok(p) => p.to_string_lossy().to_string(),
-        Err(_) => "uhoh".to_string(), // fallback to PATH
-    };
+    // Use command name to honor PATH so hooks keep working after updates/moves
+    let exe_str = "uhoh".to_string();
 
     let uhoh_hook_content = format!(
         r#"

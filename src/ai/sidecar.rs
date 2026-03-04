@@ -227,12 +227,22 @@ fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, port: u1
                 .context("Failed to spawn llama-server")
         }
         Backend::MlxLm { python } => {
+            // MLX expects a HuggingFace repo ID; map common tiers or fall back to filename stem
+            let model_id = {
+                let stem = model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                match stem {
+                    s if s.contains("0.5b") => "mlx-community/Qwen2.5-0.5B-Instruct-4bit".to_string(),
+                    s if s.contains("3b") => "mlx-community/Qwen2.5-3B-Instruct-4bit".to_string(),
+                    s if s.contains("7b") || s.contains("9b") => "mlx-community/Qwen2.5-7B-Instruct-4bit".to_string(),
+                    _ => stem.to_string(),
+                }
+            };
             Command::new(python)
                 .args([
                     "-m",
                     "mlx_lm.server",
                     "--model",
-                    &model_path.to_string_lossy(),
+                    &model_id,
                     "--port",
                     &port.to_string(),
                 ])

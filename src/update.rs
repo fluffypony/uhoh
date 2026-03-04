@@ -3,7 +3,7 @@ use std::path::Path;
 
 /// Ed25519 public key for release signature verification.
 /// IMPORTANT: Replace this with your actual public key before release.
-const UPDATE_PUBLIC_KEY: &[u8; 32] = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+const UPDATE_PUBLIC_KEY: &[u8; 32] = &[0u8; 32];
 
 #[cfg(not(debug_assertions))]
 const _: () = {
@@ -120,7 +120,7 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
     // Supplementary verification: DNS TXT record (not primary trust anchor)
     if !verified {
         println!("No signature file found. Attempting DNS verification...");
-        match dns_verify_hash(&latest.tag_name, &asset_name).await {
+        match dns_verify_hash(latest_version_str, &asset_name).await {
             Ok(expected_hash) => {
                 let actual_hash = blake3::hash(&binary).to_hex().to_string();
                 if actual_hash == expected_hash {
@@ -174,11 +174,18 @@ fn verify_ed25519_signature(data: &[u8], signature_bytes: &[u8]) -> Result<bool>
     Ok(pubkey.verify(hash_bytes, &sig).is_ok())
 }
 
-async fn dns_verify_hash(version: &str, asset: &str) -> Result<String> {
-    // Test override to allow deterministic tests without real DNS
-    if let Ok(v) = std::env::var("UHOH_TEST_DNS_TXT") {
-        return Ok(v);
-    }
+#[cfg(any(test, debug_assertions))]
+pub async fn dns_verify_hash(version: &str, asset: &str) -> Result<String> {
+    if let Ok(v) = std::env::var("UHOH_TEST_DNS_TXT") { return Ok(v); }
+    dns_verify_hash_inner(version, asset).await
+}
+
+#[cfg(not(any(test, debug_assertions)))]
+pub async fn dns_verify_hash(version: &str, asset: &str) -> Result<String> {
+    dns_verify_hash_inner(version, asset).await
+}
+
+async fn dns_verify_hash_inner(version: &str, asset: &str) -> Result<String> {
     use hickory_resolver::config::ResolverConfig;
     use hickory_resolver::{name_server::TokioConnectionProvider, Resolver};
     let query = format!("release-{asset}.{version}.releases.uhoh.it.");

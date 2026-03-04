@@ -35,24 +35,17 @@ pub fn start_watching(
         for result in file_rx {
             match result {
                 Ok(event) => {
-                    let watch_event = match event.kind {
+                    match event.kind {
                         EventKind::Remove(_) => {
-                            event.paths.first().map(|p| WatchEvent::FileDeleted(p.clone()))
+                            for p in event.paths { let _ = tx_clone.blocking_send(WatchEvent::FileDeleted(p)); }
                         }
-                        EventKind::Create(_)
-                        | EventKind::Modify(_) => {
-                            event.paths.first().map(|p| WatchEvent::FileChanged(p.clone()))
+                        EventKind::Create(_) | EventKind::Modify(_) => {
+                            for p in event.paths { let _ = tx_clone.blocking_send(WatchEvent::FileChanged(p)); }
                         }
                         EventKind::Other => {
-                            // Treat as overflow; rescan all
-                            Some(WatchEvent::Overflow)
+                            let _ = tx_clone.blocking_send(WatchEvent::Overflow);
                         }
-                        _ => None,
-                    };
-                    if let Some(we) = watch_event {
-                        if tx_clone.blocking_send(we).is_err() {
-                            break; // Receiver dropped
-                        }
+                        _ => {}
                     }
                 }
                 Err(e) => {
