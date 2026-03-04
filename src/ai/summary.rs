@@ -28,15 +28,18 @@ pub fn generate_summary_blocking(
     } else {
         config.ai.models.clone()
     };
-    // Simple RAM-based selection with 2GB margin
+    // Simple RAM-based selection with 2GB margin; gracefully skip if none fit
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
     let total = sys.total_memory() / (1024 * 1024 * 1024);
-    let mut selected = tiers.first().cloned();
+    let mut selected = None;
     for t in tiers {
         if total >= t.min_ram_gb + 2 { selected = Some(t); }
     }
-    let model = selected.expect("no AI model tiers available");
+    let Some(model) = selected else {
+        tracing::warn!("No suitable AI model tier for available RAM; skipping summary generation");
+        return Ok(String::new());
+    };
 
     // Ensure model is available locally
     let model_path = match crate::ai::models::ensure_model_downloaded(uhoh_dir, &model) {

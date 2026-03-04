@@ -210,3 +210,9 @@ fn build_current_file_list_readonly(
     }
     Ok(entries)
 }
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes { return s; }
+    let mut cut = max_bytes;
+    while cut > 0 && !s.is_char_boundary(cut) { cut -= 1; }
+    &s[..cut]
+}

@@ -41,7 +41,7 @@ impl StorageMethod {
 /// Returns the BLAKE3 hex hash.
 pub fn store_blob(blob_root: &Path, content: &[u8]) -> Result<String> {
     let hash = blake3::hash(content).to_hex().to_string();
-    let dir = blob_root.join(&hash[..2]);
+    let dir = blob_root.join(&hash[..hash.len().min(2)]);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create blob dir: {}", dir.display()))?;
     let blob_path = dir.join(&hash);
@@ -119,7 +119,7 @@ pub fn store_blob_from_file(
     }
 
     let hash = hasher.finalize().to_hex().to_string();
-    let dir = blob_root.join(&hash[..2]);
+    let dir = blob_root.join(&hash[..hash.len().min(2)]);
     std::fs::create_dir_all(&dir)?;
     let blob_path = dir.join(&hash);
 
@@ -180,7 +180,7 @@ pub fn read_blob(blob_root: &Path, hash: &str) -> Result<Option<Vec<u8>>> {
     if hash.len() < 2 {
         return Ok(None);
     }
-    let path = blob_root.join(&hash[..2]).join(hash);
+    let path = blob_root.join(&hash[..hash.len().min(2)]).join(hash);
     let data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -207,7 +207,7 @@ pub fn blob_exists(blob_root: &Path, hash: &str) -> bool {
     if hash.len() < 2 {
         return false;
     }
-    blob_root.join(&hash[..2]).join(hash).exists()
+    blob_root.join(&hash[..hash.len().min(2)]).join(hash).exists()
 }
 
 fn set_blob_readonly(path: &Path) {
@@ -257,11 +257,7 @@ fn maybe_decompress(data: &[u8]) -> Result<Vec<u8>> {
 // === Base58 Snapshot ID encoding ===
 
 pub fn id_to_base58(id: u64) -> String {
-    if id == 0 {
-        return bs58::encode(&[0u8])
-            .with_alphabet(bs58::Alphabet::BITCOIN)
-            .into_string();
-    }
+    if id == 0 { return "1".to_string(); } // base58 zero is single '1'
     let bytes = id.to_be_bytes();
     // Strip leading zero bytes for shorter IDs
     let start = bytes.iter().position(|&b| b != 0).unwrap_or(7);
@@ -271,6 +267,7 @@ pub fn id_to_base58(id: u64) -> String {
 }
 
 pub fn base58_to_id(s: &str) -> Option<u64> {
+    if s.is_empty() { return None; }
     let bytes = bs58::decode(s)
         .with_alphabet(bs58::Alphabet::BITCOIN)
         .into_vec()
@@ -281,7 +278,9 @@ pub fn base58_to_id(s: &str) -> Option<u64> {
     let mut buf = [0u8; 8];
     let start = 8usize.saturating_sub(bytes.len());
     buf[start..].copy_from_slice(&bytes);
-    Some(u64::from_be_bytes(buf))
+    let id = u64::from_be_bytes(buf);
+    if id == 0 { return Some(0); }
+    Some(id)
 }
 
 /// Normalize a path to use forward slashes for cross-platform manifest storage.

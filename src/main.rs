@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
                     let exists = std::path::Path::new(&p.current_path).exists();
                     let status = if exists { "✓" } else { "✗ MISSING" };
                     let count = database.snapshot_count(&p.hash)?;
-                    println!("  {} {} ({} snapshots) [{}]", status, p.current_path, count, &p.hash[..12]);
+                    println!("  {} {} ({} snapshots) [{}]", status, p.current_path, count, &p.hash[..p.hash.len().min(12)]);
                 }
             }
         }
@@ -295,7 +295,27 @@ async fn main() -> Result<()> {
                     std::process::Command::new(&editor).arg(&config_path).status()?;
                 }
                 Some("set") => {
-                    println!("Usage: uhoh config set <key> <value>");
+                    let mut args = std::env::args().skip_while(|a| a != "config").collect::<Vec<_>>();
+                    // Expect: uhoh config set <key> <value>
+                    if args.len() < 4 {
+                        println!("Usage: uhoh config set <key> <value>");
+                    } else {
+                        let key = args[2].clone();
+                        let value = args[3].clone();
+                        let content = if config_path.exists() { std::fs::read_to_string(&config_path)? } else { String::new() };
+                        let mut doc: toml_edit::DocumentMut = content.parse().unwrap_or_else(|_| toml_edit::DocumentMut::new());
+                        let parts: Vec<&str> = key.split('.').collect();
+                        match parts.as_slice() {
+                            [k] => { doc[*k] = toml_edit::value(parse_toml_value(&value)); }
+                            [a,b] => {
+                                if !doc.contains_key(a) { doc[*a] = toml_edit::Item::Table(toml_edit::Table::new()); }
+                                doc[*a][*b] = toml_edit::value(parse_toml_value(&value));
+                            }
+                            _ => anyhow::bail!("Key nesting deeper than 2 levels is not supported"),
+                        }
+                        std::fs::write(&config_path, doc.to_string())?;
+                        println!("Set {} = {}", key, value);
+                    }
                 }
                 _ => {
                     let cfg = config::Config::load(&config_path)?;
@@ -339,4 +359,12 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_toml_value(s: &str) -> toml_edit::Value {
+    if s.eq_ignore_ascii_case("true") { return toml_edit::Value::from(true); }
+    if s.eq_ignore_ascii_case("false") { return toml_edit::Value::from(false); }
+    if let Ok(i) = s.parse::<i64>() { return toml_edit::Value::from(i); }
+    if let Ok(f) = s.parse::<f64>() { return toml_edit::Value::from(f); }
+    toml_edit::Value::from(s.to_string())
 }

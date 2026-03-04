@@ -387,19 +387,19 @@ async fn process_pending_snapshots(
             match result.unwrap_or_else(|_| Ok(None)) {
                 Ok(Some(_id)) => {
                     state.last_snapshot = now;
-                    tracing::debug!("Auto-snapshot for {}", &state.hash[..12]);
+                    tracing::debug!("Auto-snapshot for {}", &state.hash[..state.hash.len().min(12)]);
                 }
                 Ok(None) => {
-                    // No changes detected
+                    // No changes detected — clear pending state
+                    state.pending_changes.clear();
+                    state.first_change_at = None;
+                    state.last_change_at = None;
                 }
                 Err(e) => {
+                    // Snapshot failed — keep pending changes for retry
                     tracing::error!("Snapshot error for {}: {:?}", project_path, e);
                 }
             }
-
-            state.pending_changes.clear();
-            state.first_change_at = None;
-            state.last_change_at = None;
         }
     }
 }
@@ -416,12 +416,18 @@ fn check_moved_folders(
                 // Try to relocate by scanning common parent directories for the .uhoh marker
                 let mut candidates: Vec<PathBuf> = Vec::new();
                 if let Some(parent) = Path::new(&project.current_path).parent() {
-                    // Scan parent and its immediate subdirs
-                    candidates.push(parent.to_path_buf());
-                    if let Ok(rd) = std::fs::read_dir(parent) {
-                        for e in rd.flatten().take(50) { // limit breadth
-                            if e.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                                candidates.push(e.path());
+                    // Scan parent bounded to depth 3
+                    use ignore::WalkBuilder;
+                    let walker = WalkBuilder::new(parent)
+                        .max_depth(Some(3))
+                        .hidden(false)
+                        .build();
+                    let mut seen = std::collections::HashSet::new();
+                    for entry in walker.flatten() {
+                        let p = entry.path().to_path_buf();
+                        if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                            if seen.insert(p.clone()) {
+                                candidates.push(p);
                             }
                         }
                     }
@@ -438,7 +444,7 @@ fn check_moved_folders(
                                 states.insert(new_path.to_string_lossy().to_string(), ProjectDaemonState { last_change_at: None, ..state });
                             }
                             let _ = database.update_project_path(&project.hash, &new_path.to_string_lossy());
-                            tracing::info!("Relocated project {} -> {}", &project.hash[..12], new_path.display());
+                            tracing::info!("Relocated project {} -> {}", &project.hash[..project.hash.len().min(12)], new_path.display());
                         }
                         break;
                     }
@@ -448,7 +454,7 @@ fn check_moved_folders(
                 if !Path::new(&project.current_path).exists() {
                     tracing::warn!(
                         "Project {} path missing: {}",
-                        &project.hash[..12],
+                        &project.hash[..project.hash.len().min(12)],
                         project.current_path
                     );
                 }

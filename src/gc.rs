@@ -10,6 +10,29 @@ use crate::db::Database;
 pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
     let blob_root = uhoh_dir.join("blobs");
 
+    // Clean up stale temp files first
+    let tmp_dir = blob_root.join("tmp");
+    if tmp_dir.exists() {
+        let now = std::time::SystemTime::now();
+        let max_age = std::time::Duration::from_secs(3600);
+        if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with(".tmp.") {
+                        if let Ok(meta) = std::fs::metadata(&p) {
+                            if let Ok(mtime) = meta.modified() {
+                                if let Ok(age) = now.duration_since(mtime) {
+                                    if age > max_age { let _ = std::fs::remove_file(&p); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Get all referenced hashes
     let referenced = database.all_referenced_blob_hashes()?;
     println!("Referenced blobs: {}", referenced.len());
@@ -44,7 +67,15 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
                             }
                         }
                     }
-                    total_size += meta.len();
+                    // Hardlink-aware approximate usage: divide by link count if >1 (Unix only)
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        let usage = if meta.nlink() > 1 { meta.len() / meta.nlink() } else { meta.len() };
+                        total_size += usage;
+                    }
+                    #[cfg(not(unix))]
+                    { total_size += meta.len(); }
                 }
                 orphaned.push(blob_entry.path());
             }

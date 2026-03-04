@@ -52,6 +52,18 @@ impl Database {
             conn: Mutex::new(conn),
         };
         db.migrate()?;
+        // Set database file permissions to 0o600 on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(path) {
+                let mut perms = meta.permissions();
+                if perms.mode() & 0o077 != 0 {
+                    perms.set_mode(0o600);
+                    let _ = std::fs::set_permissions(path, perms);
+                }
+            }
+        }
         Ok(db)
     }
 
@@ -322,6 +334,7 @@ impl Database {
     // === Snapshots ===
 
     pub fn next_snapshot_id(&self, project_hash: &str) -> Result<u64> {
+        // Kept for tests; prefer create_snapshot_with_alloc to avoid races
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let id: u64 = tx.query_row(
@@ -351,7 +364,21 @@ impl Database {
         tree_hashes: &[(String, String)],              // (dir_path, tree_hash)
     ) -> Result<i64> {
         let mut conn = self.conn();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        // Allocate snapshot_id inside the same transaction if zero passed
+        let snapshot_id = if snapshot_id == 0 {
+            let id: u64 = tx.query_row(
+                "SELECT next_snapshot_id FROM projects WHERE hash = ?1",
+                params![project_hash],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "UPDATE projects SET next_snapshot_id = ?1 WHERE hash = ?2",
+                params![id + 1, project_hash],
+            )?;
+            id
+        } else { snapshot_id };
 
         tx.execute(
             "INSERT INTO snapshots (project_hash, snapshot_id, timestamp, trigger, message, pinned)

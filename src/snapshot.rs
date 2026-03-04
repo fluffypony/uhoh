@@ -197,8 +197,8 @@ pub fn create_snapshot(
     // Tree hashes removed to reduce per-snapshot overhead; left table exists for potential future use
     let tree_hashes: Vec<(String, String)> = Vec::new();
 
-    // Get next snapshot ID (atomic via SQLite transaction)
-    let snapshot_id = database.next_snapshot_id(project_hash)?;
+    // Snapshot ID will be allocated inside the DB transaction
+    let snapshot_id: u64 = 0;
     let timestamp = chrono::Utc::now().to_rfc3339();
     let msg = message.unwrap_or("");
     let pinned = false;
@@ -214,6 +214,15 @@ pub fn create_snapshot(
         &deleted_for_manifest,
         &tree_hashes,
     )?;
+
+    // Resolve actual snapshot_id from DB for logging and operations
+    let snapshot_id: u64 = {
+        let conn = database;
+        // small helper query
+        if let Ok(snaps) = conn.list_snapshots(project_hash) {
+            if let Some(s) = snaps.iter().find(|s| s.rowid == rowid) { s.snapshot_id } else { 0 }
+        } else { 0 }
+    };
 
     // If there is an active operation for this project and this was not a pre-restore snapshot,
     // keep last_snapshot_id updated so undo has a clear end.
@@ -235,12 +244,24 @@ pub fn create_snapshot(
         // Build compact diff text for modified files
         let blob_root = uhoh_dir.join("blobs");
         let mut diff_chunks = String::new();
+        const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024; // 512KB cap for AI diff
         for path in files_modified.iter().take(10) {
             if let (Some(prev), Some((curr_hash, curr_stored))) = (prev_files.get(path), current_hashes.get(path)) {
                 if prev.stored && *curr_stored && !prev.hash.is_empty() && !curr_hash.is_empty() {
+                    // Enforce size cap and skip binary
+                    if prev.size > MAX_AI_DIFF_FILE_SIZE || current_files.get(path.as_str()).map(|(_, m)| m.len()).unwrap_or(0) > MAX_AI_DIFF_FILE_SIZE {
+                        diff_chunks.push_str(&format!("--- {}\n[File too large for AI diff]\n", path));
+                        continue;
+                    }
                     let old = crate::cas::read_blob(&blob_root, &prev.hash).ok().flatten();
                     let new = crate::cas::read_blob(&blob_root, curr_hash).ok().flatten();
                     if let (Some(old), Some(new)) = (old, new) {
+                        let head_old = &old[..old.len().min(8192)];
+                        let head_new = &new[..new.len().min(8192)];
+                        if content_inspector::inspect(head_old).is_binary() || content_inspector::inspect(head_new).is_binary() {
+                            diff_chunks.push_str(&format!("--- {}\n[Binary file]\n", path));
+                            continue;
+                        }
                         if let (Ok(old_s), Ok(new_s)) = (String::from_utf8(old), String::from_utf8(new)) {
                             let d = similar::TextDiff::from_lines(&old_s, &new_s);
                             diff_chunks.push_str(&format!("--- a/{}\n+++ b/{}\n", path, path));
@@ -277,7 +298,7 @@ pub fn create_snapshot(
     tracing::info!(
         "Snapshot {} created for {} ({} files, {} deleted, trigger={})",
         id_str,
-        &project_hash[..12],
+        &project_hash[..project_hash.len().min(12)],
         files_for_manifest.len(),
         deleted_for_manifest.len(),
         actual_trigger,
@@ -309,7 +330,7 @@ fn enforce_storage_limit(
         config.storage.storage_min_bytes,
     );
 
-    let blob_size = database.total_blob_size_for_project(project_hash)?;
+    let mut blob_size = database.total_blob_size_for_project(project_hash)?;
     if blob_size <= max_blob_size { return Ok(()); }
 
     tracing::info!(
@@ -323,7 +344,10 @@ fn enforce_storage_limit(
     for snap in database.list_snapshots_oldest_first(project_hash)? {
         if blob_size <= max_blob_size { break; }
         if snap.pinned { continue; }
+        // Estimate how much this snapshot frees
+        let freed = database.estimate_snapshot_blob_size(snap.rowid)?;
         let _ = database.delete_snapshot(snap.rowid);
+        blob_size = blob_size.saturating_sub(freed);
         // Actual blob GC happens via `uhoh gc` or next scheduled GC
     }
     Ok(())
@@ -358,74 +382,28 @@ fn load_previous_snapshot_files(
 
 /// Check if .git/HEAD changed recently (indicating a branch switch).
 fn is_likely_git_operation(project_path: &Path) -> bool {
-    let head_path = project_path.join(".git/HEAD");
-    if let Ok(meta) = std::fs::metadata(&head_path) {
-        if let Ok(modified) = meta.modified() {
-            if let Ok(elapsed) = modified.elapsed() {
-                return elapsed.as_secs() < 10;
+    let git_dir = project_path.join(".git");
+    let now = std::time::SystemTime::now();
+    let threshold = std::time::Duration::from_secs(10);
+    let indicators = [
+        git_dir.join("HEAD"),
+        git_dir.join("index.lock"),
+        git_dir.join("MERGE_HEAD"),
+        git_dir.join("REBASE_HEAD"),
+        git_dir.join("CHERRY_PICK_HEAD"),
+        git_dir.join("BISECT_LOG"),
+    ];
+    for indicator in &indicators {
+        if let Ok(meta) = std::fs::metadata(indicator) {
+            if let Ok(mtime) = meta.modified() {
+                if let Ok(age) = now.duration_since(mtime) {
+                    if age < threshold { return true; }
+                }
             }
         }
     }
+    if git_dir.join("index.lock").exists() { return true; }
     false
 }
 
-/// Compute Merkle-style tree hashes for directories.
-/// Each directory gets a hash of its children's hashes, enabling O(log n) diff.
-fn compute_tree_hashes(
-    files: &[(String, String, u64, bool, bool, Option<i64>)],
-) -> Vec<(String, String)> {
-    // Group files by directory
-    let mut dir_contents: HashMap<String, Vec<&str>> = HashMap::new();
-    for (path, hash, _, _, _, _) in files {
-        let dir = match path.rfind('/') {
-            Some(pos) => &path[..pos],
-            None => ".",
-        };
-        dir_contents.entry(dir.to_string()).or_default().push(hash);
-    }
-
-    let mut tree_hashes = Vec::new();
-    for (dir, hashes) in &dir_contents {
-        let mut hasher = blake3::Hasher::new();
-        // Sort for determinism
-        let mut sorted_hashes: Vec<&&str> = hashes.iter().collect();
-        sorted_hashes.sort();
-        for h in sorted_hashes {
-            hasher.update(h.as_bytes());
-        }
-        let tree_hash = hasher.finalize().to_hex().to_string();
-        tree_hashes.push((dir.clone(), tree_hash));
-    }
-
-    // Compute root hash
-    if !tree_hashes.is_empty() {
-        let mut root_hasher = blake3::Hasher::new();
-        let mut sorted_dirs: Vec<&(String, String)> = tree_hashes.iter().collect();
-        sorted_dirs.sort_by_key(|(d, _)| d.as_str());
-        for (_, h) in &sorted_dirs {
-            root_hasher.update(h.as_bytes());
-        }
-        tree_hashes.push((".".to_string(), root_hasher.finalize().to_hex().to_string()));
-    }
-
-    tree_hashes
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_compute_tree_hashes() {
-        let files = vec![
-            ("src/main.rs".to_string(), "abc123".to_string(), 100u64, true, false, None),
-            ("src/lib.rs".to_string(), "def456".to_string(), 200u64, true, false, None),
-            ("README.md".to_string(), "ghi789".to_string(), 50u64, true, false, None),
-        ];
-        let hashes = compute_tree_hashes(&files);
-        assert!(!hashes.is_empty());
-        // Should have entries for "src", ".", and a root
-        let dirs: Vec<&str> = hashes.iter().map(|(d, _)| d.as_str()).collect();
-        assert!(dirs.contains(&"src"));
-    }
-}
+// Tree hash computation removed to reduce overhead; table preserved for potential future use.

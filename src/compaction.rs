@@ -125,8 +125,8 @@ fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
     match DateTime::parse_from_rfc3339(s) {
         Ok(dt) => Some(dt.with_timezone(&Utc)),
         Err(e) => {
-            tracing::warn!("Failed to parse timestamp '{}': {} — snapshot will be treated as purgeable", s, e);
-            None
+            tracing::warn!("Failed to parse timestamp '{}': {} — treating as recent to avoid accidental pruning", s, e);
+            Some(Utc::now())
         }
     }
 }

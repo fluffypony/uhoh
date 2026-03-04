@@ -33,6 +33,11 @@ struct GithubAsset {
 }
 
 pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
+    // Runtime guard: ensure public key is set
+    if UPDATE_PUBLIC_KEY.iter().all(|&b| b == 0) {
+        tracing::warn!("Update public key is not set; skipping update check.");
+        return Ok(());
+    }
     let current_version = env!("CARGO_PKG_VERSION");
     println!("Current version: {}", current_version);
 
@@ -124,8 +129,8 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
                 } else {
                     bail!(
                         "Hash mismatch! DNS expected {}, got {}. Aborting.",
-                        &expected_hash[..16],
-                        &actual_hash[..16]
+                        &expected_hash[..expected_hash.len().min(16)],
+                        &actual_hash[..actual_hash.len().min(16)]
                     );
                 }
             }

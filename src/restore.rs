@@ -110,6 +110,23 @@ pub fn cmd_restore(
         &cfg,
     );
 
+    // Pre-flight: verify that all required blobs exist
+    let mut missing_blobs = Vec::new();
+    for f in &target_files {
+        if !f.stored { continue; }
+        if !crate::cas::blob_exists(&blob_root, &f.hash) {
+            missing_blobs.push((f.path.as_str(), &f.hash));
+        }
+    }
+    if !missing_blobs.is_empty() {
+        eprintln!("ERROR: {} blob(s) missing; aborting restore.", missing_blobs.len());
+        for (p, h) in missing_blobs.iter().take(10) {
+            let short = &h[..h.len().min(12)];
+            eprintln!("  - {} ({}...)", p, short);
+        }
+        anyhow::bail!("Cannot restore: required blobs missing");
+    }
+
     // Delete files (only those tracked by uhoh, not untracked)
     for path in &to_delete {
         let full = project_path.join(path);
@@ -128,20 +145,26 @@ pub fn cmd_restore(
     );
 
     for (path, hash, executable) in &to_restore {
-        let full_path = project_path.join(path);
+        // Basic traversal guard
         if path.contains("..") {
             tracing::warn!("Skipping suspicious path with '..': {}", path);
             continue;
         }
-        if !full_path.starts_with(project_path) {
-            tracing::warn!("Path escapes project root, skipping: {}", path);
-            continue;
+        // Canonicalize parent and ensure contained in project root
+        let full_path = project_path.join(path);
+        if let Some(parent) = full_path.parent() {
+            let canon_project = dunce::canonicalize(project_path).unwrap_or(project_path.to_path_buf());
+            let canon_parent = if parent.exists() { dunce::canonicalize(parent).unwrap_or(parent.to_path_buf()) } else { parent.to_path_buf() };
+            if !canon_parent.starts_with(&canon_project) {
+                tracing::warn!("Path escapes project root after canonicalization, skipping: {}", path);
+                continue;
+            }
         }
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let content = cas::read_blob(&blob_root, hash)?
-            .ok_or_else(|| anyhow::anyhow!("Blob {} missing for {}", &hash[..12], path))?;
+            .ok_or_else(|| anyhow::anyhow!("Blob {} missing for {}", &hash[..hash.len().min(12)], path))?;
         std::fs::write(&full_path, &content)
             .with_context(|| format!("Failed to write: {}", full_path.display()))?;
 

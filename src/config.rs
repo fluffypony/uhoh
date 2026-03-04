@@ -245,6 +245,13 @@ impl Config {
                 .with_context(|| format!("Failed to read config: {}", path.display()))?;
             let config: Config = toml::from_str(&content)
                 .with_context(|| format!("Failed to parse config: {}", path.display()))?;
+            // Basic validation
+            if config.watch.debounce_quiet_secs == 0 { anyhow::bail!("watch.debounce_quiet_secs must be > 0"); }
+            if config.watch.min_snapshot_interval_secs == 0 { anyhow::bail!("watch.min_snapshot_interval_secs must be > 0"); }
+            if !(0.0..=1.0).contains(&config.storage.storage_limit_fraction) || config.storage.storage_limit_fraction <= 0.0 {
+                anyhow::bail!("storage.storage_limit_fraction must be in (0.0, 1.0]");
+            }
+            if config.compaction.emergency_expire_hours == 0 { anyhow::bail!("compaction.emergency_expire_hours must be > 0"); }
             Ok(config)
         } else {
             let config = Config::default();
