@@ -82,7 +82,7 @@ uhoh undo                    # restores to just-before the marked operation
 
 In a project folder:
 - If the folder is not registered yet, `uhoh` will register it and take an initial snapshot.
-- If it is already registered, `uhoh` will take a quick snapshot and immediately revert your working tree to the previous snapshot. It’s a one‑keystroke safety net when an agent gets ahead of you.
+- If it is already registered, `uhoh` will display status and tips (undo, restore, log) without modifying your files.
 
 ## How it works
 

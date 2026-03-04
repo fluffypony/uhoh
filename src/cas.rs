@@ -93,6 +93,8 @@ pub fn store_blob_from_file(
     blob_root: &Path,
     file_path: &Path,
     max_copy_blob_bytes: u64,
+    max_binary_blob_bytes: u64,
+    max_text_blob_bytes: u64,
 ) -> Result<(String, u64, StorageMethod)> {
     let metadata = std::fs::metadata(file_path)
         .with_context(|| format!("Cannot stat: {}", file_path.display()))?;
@@ -134,7 +136,7 @@ pub fn store_blob_from_file(
         let head = &first_chunk[..first_chunk.len().min(8192)];
         content_inspector::inspect(head).is_binary()
     };
-    let cfg_limit = if is_binary { crate::config::default_max_binary_blob_bytes() } else { crate::config::default_max_text_blob_bytes() } as u64;
+    let cfg_limit = if is_binary { max_binary_blob_bytes } else { max_text_blob_bytes } as u64;
     let effective_limit = std::cmp::min(cfg_limit, max_copy_blob_bytes);
 
     // Try reflink

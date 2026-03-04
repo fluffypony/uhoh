@@ -552,6 +552,37 @@ fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bool, re
         println!("Moved {} corrupted blobs to {}", corrupted.len(), quarantine.display());
     }
 
+    // 5) Binary integrity check (non-fatal)
+    println!("\nBinary integrity check:");
+    let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("uhoh"));
+    let local_hash = std::fs::read(&exe_path)
+        .map(|b| blake3::hash(&b).to_hex().to_string())
+        .unwrap_or_else(|_| String::from("unknown"));
+    let version = env!("CARGO_PKG_VERSION");
+    let asset_name = format!("uhoh-{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    // Use current Tokio runtime to perform async DNS query
+    let dns = tokio::runtime::Handle::try_current()
+        .ok()
+        .and_then(|h| {
+            h.block_on(async {
+                uhoh::update::dns_verify_hash(version, &asset_name).await.ok()
+            })
+        });
+    match dns {
+        Some(expected) => {
+            if expected.eq_ignore_ascii_case(&local_hash) {
+                println!("  \u{2713} Binary hash matches DNS record");
+            } else {
+                println!("  \u{26A0} DNS hash mismatch");
+                println!("    Local:    {}", &local_hash[..local_hash.len().min(16)]);
+                println!("    Expected: {}", &expected[..expected.len().min(16)]);
+            }
+        }
+        None => {
+            println!("  \u{26A0} Could not verify via DNS (network/DNS unavailable)");
+        }
+    }
+
     Ok(())
 }
 

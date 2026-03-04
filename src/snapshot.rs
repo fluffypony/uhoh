@@ -137,6 +137,8 @@ pub fn create_snapshot(
             &blob_root,
             abs_path,
             config.storage.max_copy_blob_bytes,
+            config.storage.max_binary_blob_bytes,
+            config.storage.max_text_blob_bytes,
         ) {
             Ok((hash, size, method)) => {
                 let is_new_or_changed = prev_files
