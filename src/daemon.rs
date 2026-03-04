@@ -571,7 +571,13 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 static LAST_BACKUP: Lazy<StdMutex<Option<std::time::Instant>>> = Lazy::new(|| StdMutex::new(None));
                 let backup_interval = std::time::Duration::from_secs(config.update.check_interval_hours * 3600);
                 let do_backup = {
-                    let last = LAST_BACKUP.lock().unwrap();
+                    let last = match LAST_BACKUP.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => {
+                            tracing::warn!("LAST_BACKUP mutex poisoned, recovering state");
+                            poisoned.into_inner()
+                        }
+                    };
                     last.map(|t| t.elapsed() >= backup_interval).unwrap_or(true)
                 };
                 if do_backup {
@@ -1073,7 +1079,13 @@ fn check_moved_folders(
     use std::sync::Mutex;
     static FAILURES: Lazy<Mutex<std::collections::HashMap<String, u32>>> =
         Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
-    let mut failures = FAILURES.lock().unwrap();
+    let mut failures = match FAILURES.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("moved-folder failure tracker mutex poisoned, recovering state");
+            poisoned.into_inner()
+        }
+    };
     for project in projects {
         let path = Path::new(&project.current_path);
         if !path.exists() {

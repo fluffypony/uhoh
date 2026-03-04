@@ -379,8 +379,18 @@ fn handle_stdio_tool_call(
                 Ok(db) => {
                     let ledger =
                         crate::event_ledger::EventLedger::new(std::sync::Arc::new(db));
-                    let _ = ledger.flush();
-                    ledger.append(event).ok()
+                    if let Err(err) = ledger.flush() {
+                        tracing::error!(
+                            "failed to flush event ledger before STDIO pre_notify append: {err}"
+                        );
+                    }
+                    match ledger.append(event) {
+                        Ok(id) => Some(id),
+                        Err(err) => {
+                            tracing::error!("failed to append pre_notify event via ledger: {err}");
+                            None
+                        }
+                    }
                 }
                 Err(err) => {
                     tracing::error!("failed to reopen database for pre_notify append: {err}");

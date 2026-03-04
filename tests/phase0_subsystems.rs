@@ -352,3 +352,27 @@ fn db_guard_module_uses_trait_based_engine_dispatch() {
     assert!(source.contains("impl DbGuardEngine for PostgresEngine"));
     assert!(source.contains("impl DbGuardEngine for MysqlEngine"));
 }
+
+#[test]
+fn event_ledger_append_falls_back_to_direct_insert_when_flusher_not_started() {
+    let (_tmp, db) = temp_db();
+    let ledger = EventLedger::new(db.clone());
+
+    let event_id = ledger
+        .append(event("agent", "pre_notify", Some("src/lib.rs"), None))
+        .expect("append should succeed");
+    assert!(event_id > 0);
+
+    let fetched = db.event_ledger_get(event_id).expect("query ok");
+    assert!(fetched.is_some());
+}
+
+#[test]
+fn recovery_module_uses_machine_master_key_fallback_not_user_hostname() {
+    let source = std::fs::read_to_string("src/db_guard/recovery.rs")
+        .expect("read recovery module");
+    assert!(source.contains("MACHINE_KEY_FILE: &str = \"master.key\""));
+    assert!(source.contains("load_or_create_machine_key"));
+    assert!(!source.contains("HOSTNAME"));
+    assert!(!source.contains("uhoh:{}:{}"));
+}

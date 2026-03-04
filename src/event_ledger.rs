@@ -45,12 +45,17 @@ impl EventLedger {
                 if batch.is_empty() {
                     continue;
                 }
-                let _ = db.insert_event_ledger_batch(&batch);
+                if let Err(err) = db.insert_event_ledger_batch(&batch) {
+                    tracing::error!("failed to flush event ledger batch: {err}");
+                }
             }
         });
     }
 
     pub fn append(&self, event: NewEventLedgerEntry) -> Result<i64> {
+        if !self.started.load(Ordering::SeqCst) {
+            return self.db.insert_event_ledger(&event);
+        }
         if self.queue.push(event.clone()).is_err() {
             self.db.insert_event_ledger(&event)
         } else {

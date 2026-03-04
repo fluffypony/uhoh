@@ -464,6 +464,9 @@ fn load_or_create_machine_key(uhoh_dir: &std::path::Path) -> Result<[u8; 32]> {
 }
 
 fn derive_key_material_legacy(uhoh_dir: &std::path::Path) -> Result<[u8; 32]> {
+    tracing::warn!(
+        "Decrypting legacy UHOHENC1 artifact via compatibility path; migrate by re-writing artifact"
+    );
     if let Some(mut master) = read_master_key_from_env() {
         if let Some(mut raw_key) = decode_hex_key(&master) {
             let out = blake3::derive_key(RECOVERY_BLAKE3_CONTEXT, &raw_key);
