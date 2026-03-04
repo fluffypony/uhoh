@@ -23,9 +23,11 @@ use crate::subsystem::{AuditSource, Subsystem, SubsystemContext, SubsystemHealth
 pub struct AgentSubsystem {
     healthy: bool,
     intercept_started: bool,
+    fanotify_started: bool,
     proxy_started: bool,
     background_failures: std::sync::Arc<std::sync::atomic::AtomicU64>,
     intercept_task: Option<tokio::task::JoinHandle<()>>,
+    fanotify_task: Option<tokio::task::JoinHandle<()>>,
     proxy_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -34,9 +36,11 @@ impl AgentSubsystem {
         Self {
             healthy: true,
             intercept_started: false,
+            fanotify_started: false,
             proxy_started: false,
             background_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             intercept_task: None,
+            fanotify_task: None,
             proxy_task: None,
         }
     }
@@ -156,6 +160,23 @@ impl AgentSubsystem {
             }
             self.proxy_started = false;
         }
+
+        if self
+            .fanotify_task
+            .as_ref()
+            .map(|task| task.is_finished())
+            .unwrap_or(false)
+        {
+            if let Some(task) = self.fanotify_task.take() {
+                if let Err(err) = task.await {
+                    self.background_failures
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.healthy = false;
+                    tracing::error!("fanotify task panicked: {err}");
+                }
+            }
+            self.fanotify_started = false;
+        }
     }
 
     fn tick_agents(&mut self, ctx: &SubsystemContext, agents: &[AgentEntry]) -> Result<()> {
@@ -166,12 +187,6 @@ impl AgentSubsystem {
                 let agents_cl = agents.to_vec();
                 let failures = self.background_failures.clone();
                 self.intercept_task = Some(tokio::task::spawn_blocking(move || {
-                    #[cfg(target_os = "linux")]
-                    {
-                        if let Err(err) = fanotify::run_permission_monitor(&ctx_cl, &agents_cl) {
-                            tracing::debug!("fanotify monitor unavailable: {err}");
-                        }
-                    }
                     if let Err(err) = intercept::run_session_tailers(&ctx_cl, &agents_cl) {
                         failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!("session tailer thread failed: {err}");
@@ -179,6 +194,21 @@ impl AgentSubsystem {
                 }));
             }
         }
+
+        #[cfg(target_os = "linux")]
+        if ctx.config.agent.intercept_enabled && !self.fanotify_started {
+            self.fanotify_started = true;
+            let ctx_cl = ctx.clone();
+            let agents_cl = agents.to_vec();
+            let failures = self.background_failures.clone();
+            self.fanotify_task = Some(tokio::task::spawn_blocking(move || {
+                if let Err(err) = fanotify::run_permission_monitor(&ctx_cl, &agents_cl) {
+                    failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::debug!("fanotify monitor unavailable: {err}");
+                }
+            }));
+        }
+
         if ctx.config.agent.audit_enabled {
             audit::tick_audit(ctx, agents)?;
         }
