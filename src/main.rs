@@ -696,11 +696,67 @@ async fn main() -> Result<()> {
 
             cmd.env("UHOH_AGENT_RUNTIME_DIR", uhoh.join("agents/runtime"));
 
-            let status = cmd
-                .status()
-                .with_context(|| format!("Failed to run command: {}", command[0]))?;
-            if !status.success() {
-                anyhow::bail!("Command failed with status: {status}");
+            #[cfg(target_os = "linux")]
+            {
+                let mut child = cmd
+                    .spawn()
+                    .with_context(|| format!("Failed to run command: {}", command[0]))?;
+                let pid_u32 = child.id();
+                let pid = i32::try_from(pid_u32).unwrap_or(i32::MAX);
+                let mut pidfd = -1;
+                // Linux >=5.3 exposes pidfd_open for stable process handles.
+                unsafe {
+                    pidfd = libc::syscall(libc::SYS_pidfd_open, pid, 0) as i32;
+                }
+                if pidfd >= 0 {
+                    tracing::info!("pidfd supervision enabled for pid {}", pid);
+                    let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                    // Wait via pidfd so PID recycling cannot affect process tracking.
+                    let waited = unsafe {
+                        libc::waitid(
+                            libc::P_PIDFD,
+                            pidfd as u32,
+                            &mut status,
+                            libc::WEXITED | libc::WNOWAIT,
+                        )
+                    };
+                    unsafe {
+                        libc::close(pidfd);
+                    }
+                    if waited != 0 {
+                        tracing::warn!(
+                            "pidfd wait failed for pid {}, falling back to child.wait",
+                            pid
+                        );
+                    }
+                    let exit_status = child
+                        .wait()
+                        .with_context(|| format!("Failed to collect status for {}", command[0]))?;
+                    if !exit_status.success() {
+                        anyhow::bail!("Command failed with status: {exit_status}");
+                    }
+                } else {
+                    tracing::warn!(
+                        "pidfd_open unavailable; falling back to standard child wait for pid {}",
+                        pid
+                    );
+                    let status = child
+                        .wait()
+                        .with_context(|| format!("Failed to wait for command: {}", command[0]))?;
+                    if !status.success() {
+                        anyhow::bail!("Command failed with status: {status}");
+                    }
+                }
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                let status = cmd
+                    .status()
+                    .with_context(|| format!("Failed to run command: {}", command[0]))?;
+                if !status.success() {
+                    anyhow::bail!("Command failed with status: {status}");
+                }
             }
         }
     }

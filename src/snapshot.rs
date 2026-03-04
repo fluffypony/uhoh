@@ -537,15 +537,22 @@ pub fn create_snapshot(
         let blob_root = uhoh_dir.join("blobs");
         let mut diff_chunks = String::new();
         const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024; // 512KB cap for AI diff
+        let max_diff_chars = cfg_cloned.ai.max_context_tokens.saturating_mul(4);
+        let mut diff_chars = 0usize;
         for path in files_modified.iter().take(10) {
+            if diff_chars >= max_diff_chars {
+                diff_chunks.push_str("\n[Diff truncated: context budget reached]\n");
+                break;
+            }
             if let (Some(prev), Some((curr_hash, curr_stored))) =
                 (prev_files.get(path), current_hashes.get(path))
             {
                 if prev.stored && *curr_stored && !prev.hash.is_empty() && !curr_hash.is_empty() {
                     // Enforce size cap and skip binary
                     if prev.size > MAX_AI_DIFF_FILE_SIZE {
-                        diff_chunks
-                            .push_str(&format!("--- {path}\n[File too large for AI diff]\n"));
+                        let note = format!("--- {path}\n[File too large for AI diff]\n");
+                        diff_chars = diff_chars.saturating_add(note.len());
+                        diff_chunks.push_str(&note);
                         continue;
                     }
                     let old = crate::cas::read_blob(&blob_root, &prev.hash).ok().flatten();
@@ -556,22 +563,41 @@ pub fn create_snapshot(
                         if content_inspector::inspect(head_old).is_binary()
                             || content_inspector::inspect(head_new).is_binary()
                         {
-                            diff_chunks.push_str(&format!("--- {path}\n[Binary file]\n"));
+                            let note = format!("--- {path}\n[Binary file]\n");
+                            diff_chars = diff_chars.saturating_add(note.len());
+                            diff_chunks.push_str(&note);
                             continue;
                         }
                         if let (Ok(old_s), Ok(new_s)) =
                             (String::from_utf8(old), String::from_utf8(new))
                         {
                             let d = similar::TextDiff::from_lines(&old_s, &new_s);
-                            diff_chunks.push_str(&format!("--- a/{path}\n+++ b/{path}\n"));
+                            let header = format!("--- a/{path}\n+++ b/{path}\n");
+                            diff_chars = diff_chars.saturating_add(header.len());
+                            diff_chunks.push_str(&header);
                             for hunk in d.unified_diff().context_radius(2).iter_hunks() {
-                                diff_chunks.push_str(&format!("{}\n", hunk.header()));
+                                if diff_chars >= max_diff_chars {
+                                    diff_chunks
+                                        .push_str("\n[Diff truncated: context budget reached]\n");
+                                    break;
+                                }
+                                let hunk_header = format!("{}\n", hunk.header());
+                                diff_chars = diff_chars.saturating_add(hunk_header.len());
+                                diff_chunks.push_str(&hunk_header);
                                 for change in hunk.iter_changes() {
+                                    if diff_chars >= max_diff_chars {
+                                        diff_chunks.push_str(
+                                            "\n[Diff truncated: context budget reached]\n",
+                                        );
+                                        break;
+                                    }
                                     let sign = match change.tag() {
                                         similar::ChangeTag::Delete => '-',
                                         similar::ChangeTag::Insert => '+',
                                         similar::ChangeTag::Equal => ' ',
                                     };
+                                    diff_chars =
+                                        diff_chars.saturating_add(1 + change.to_string().len());
                                     diff_chunks.push(sign);
                                     diff_chunks.push_str(&change.to_string());
                                 }

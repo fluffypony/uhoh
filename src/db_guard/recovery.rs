@@ -214,7 +214,7 @@ pub fn decrypt_recovery_payload(payload: &[u8], uhoh_dir: &std::path::Path) -> R
         return decrypt_v2(payload, uhoh_dir);
     }
     if payload.starts_with(ENC_MAGIC_V1) {
-        return decrypt_v1_legacy(payload);
+        return decrypt_v1_legacy(payload, uhoh_dir);
     }
     Ok(payload.to_vec())
 }
@@ -332,11 +332,11 @@ fn decrypt_v2(payload: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {
     result
 }
 
-fn decrypt_v1_legacy(payload: &[u8]) -> Result<Vec<u8>> {
+fn decrypt_v1_legacy(payload: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {
     if payload.len() <= 20 {
         anyhow::bail!("Encrypted legacy recovery artifact is malformed");
     }
-    let mut key = derive_key_material_legacy();
+    let mut key = derive_key_material_legacy(uhoh_dir)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
     let nonce = Nonce::from_slice(&payload[8..20]);
     let ciphertext = &payload[20..];
@@ -405,23 +405,28 @@ fn load_or_create_machine_key(uhoh_dir: &std::path::Path) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-fn derive_key_material_legacy() -> [u8; 32] {
-    if let Ok(master) = std::env::var("UHOH_MASTER_KEY") {
-        if !master.trim().is_empty() {
-            let hash = blake3::hash(master.as_bytes());
-            let mut out = [0u8; 32];
-            out.copy_from_slice(hash.as_bytes());
-            return out;
+fn derive_key_material_legacy(uhoh_dir: &std::path::Path) -> Result<[u8; 32]> {
+    if let Some(mut master) = read_master_key_from_env() {
+        if let Some(mut raw_key) = decode_hex_key(&master) {
+            let out = blake3::derive_key(RECOVERY_BLAKE3_CONTEXT, &raw_key);
+            raw_key.zeroize();
+            master.zeroize();
+            return Ok(out);
         }
+        let salt = [0u8; 16];
+        let out = derive_argon2_key(&master, &salt)?;
+        master.zeroize();
+        return Ok(out);
     }
 
-    let user = std::env::var("USER").unwrap_or_default();
-    let host = std::env::var("HOSTNAME").unwrap_or_default();
-    let seed = format!("uhoh:{}:{}", user, host);
-    let hash = blake3::hash(seed.as_bytes());
-    let mut out = [0u8; 32];
-    out.copy_from_slice(hash.as_bytes());
-    out
+    tracing::warn!(
+        "Decrypting legacy recovery artifact using machine-local fallback key at ~/.uhoh/{}",
+        MACHINE_KEY_FILE
+    );
+    let mut machine_key = load_or_create_machine_key(uhoh_dir)?;
+    let out = blake3::derive_key(RECOVERY_BLAKE3_CONTEXT, &machine_key);
+    machine_key.zeroize();
+    Ok(out)
 }
 
 fn ensure_guard_dirs(

@@ -20,6 +20,8 @@ use notify::{RecursiveMode, Watcher as _};
 use once_cell::sync::Lazy;
 use std::sync::Mutex as StdMutex;
 
+const VACUUM_TIMEOUT_SECS: u64 = 30;
+
 // Removed duplicate is_uhoh_process_alive; use crate::platform::is_uhoh_process_alive instead
 
 /// Spawn daemon as a detached background process.
@@ -534,10 +536,24 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                         std::mem::drop(tokio::task::spawn_blocking(move || {
                             if let Ok(db) = crate::db::Database::open(&db_path_for_gc2) {
                                 let _ = crate::gc::run_gc(&uhoh_dir_cl2, &db);
-                                // After GC, VACUUM to reclaim free pages
-                                let _ = db.vacuum();
-                            }
-                        }));
+                                    // After GC, VACUUM to reclaim free pages with timeout guard.
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    let db_for_vacuum = db;
+                                    std::thread::spawn(move || {
+                                        let _ = tx.send(db_for_vacuum.vacuum());
+                                    });
+                                    match rx.recv_timeout(std::time::Duration::from_secs(
+                                        VACUUM_TIMEOUT_SECS,
+                                    )) {
+                                        Ok(Ok(())) => {}
+                                        Ok(Err(err)) => tracing::warn!("VACUUM failed: {}", err),
+                                        Err(_) => tracing::warn!(
+                                            "VACUUM timed out after {} seconds",
+                                            VACUUM_TIMEOUT_SECS
+                                        ),
+                                    }
+                                }
+                            }));
                             // Run VACUUM after large deletions to reclaim space
                             let db_path_for_gc3 = db_path_for_gc.clone();
                             let uhoh_dir_cl3 = uhoh_dir_cl.clone();
