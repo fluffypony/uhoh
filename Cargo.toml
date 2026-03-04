@@ -42,6 +42,7 @@ toml_edit = "0.22"
 
 # Diffing
 similar = { version = "2.7", features = ["unicode"] }
+base64 = "0.22"
 
 # Syntax highlighting (lazy-loaded)
 syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
@@ -87,7 +88,7 @@ indicatif = "0.17"
 semver = "1.0"
 
 # Cross-platform file locking
-fs2 = "0.4"
+fs4 = "0.8"
 which = "6"
 
 # Windows path canonicalization

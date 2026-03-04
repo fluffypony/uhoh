@@ -252,6 +252,8 @@ impl Config {
                 anyhow::bail!("storage.storage_limit_fraction must be in (0.0, 1.0]");
             }
             if config.compaction.emergency_expire_hours == 0 { anyhow::bail!("compaction.emergency_expire_hours must be > 0"); }
+            if config.ai.max_context_tokens == 0 { anyhow::bail!("ai.max_context_tokens must be > 0"); }
+            if !(1..=22).contains(&config.storage.compress_level) { anyhow::bail!("storage.compress_level must be between 1 and 22"); }
             Ok(config)
         } else {
             let config = Config::default();

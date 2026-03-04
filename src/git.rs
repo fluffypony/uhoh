@@ -89,7 +89,7 @@ pub fn cmd_gitstash(
     let mut upd = Command::new("git")
         .current_dir(project_path)
         .env("GIT_INDEX_FILE", &tmp_index)
-        .args(["update-index", "--index-info"])
+        .args(["update-index", "-z", "--index-info"])
         .stdin(std::process::Stdio::piped())
         .spawn()
         .context("Failed to spawn git update-index --index-info")?;
@@ -102,9 +102,11 @@ pub fn cmd_gitstash(
                 tracing::warn!("Skipping suspicious path in git stash: {}", path);
                 continue;
             }
+            // Symlink mode handling (120000) if snapshot recorded it as non-executable and content looks like link
             let mode = if exec_map.contains(path.as_str()) { "100755" } else { "100644" };
-            // Format: "<mode> <hash>\t<path>\n"
-            writeln!(sin, "{} {}\t{}", mode, blob_hash, path)?;
+            // Write NUL-terminated entries: "<mode> <hash>\t<path>\0"
+            use std::io::Write as _;
+            write!(sin, "{} {}\t{}\0", mode, blob_hash, path)?;
     }
     }
     let status = upd.wait()?;

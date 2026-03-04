@@ -145,17 +145,17 @@ pub fn cmd_cat(
 ) -> Result<()> {
     // Try RFC3339/timestamp formats first (less ambiguous), then base58 ID
     let snap = if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(id_str) {
-        // Find snapshot at or before timestamp
+        let target = ts.with_timezone(&chrono::Utc);
         database
             .list_snapshots(&project.hash)?
             .into_iter()
-            .find(|s| s.timestamp <= ts.to_rfc3339())
+            .find(|s| chrono::DateTime::parse_from_rfc3339(&s.timestamp).map(|d| d.with_timezone(&chrono::Utc) <= target).unwrap_or(false))
     } else if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(id_str, "%Y-%m-%dT%H:%M:%S") {
-        let ts = chrono::Utc.from_utc_datetime(&ts);
+        let target = chrono::Utc.from_utc_datetime(&ts);
         database
             .list_snapshots(&project.hash)?
             .into_iter()
-            .find(|s| s.timestamp <= ts.to_rfc3339())
+            .find(|s| chrono::DateTime::parse_from_rfc3339(&s.timestamp).map(|d| d.with_timezone(&chrono::Utc) <= target).unwrap_or(false))
     } else if let Some(_) = crate::cas::base58_to_id(id_str) {
         database.find_snapshot_by_base58(&project.hash, id_str)?
     } else {

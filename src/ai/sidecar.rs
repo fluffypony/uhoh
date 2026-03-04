@@ -121,9 +121,7 @@ pub fn get_or_spawn_port_with_ctx(model_path: &Path, uhoh_dir: &Path, idle_shutd
                 if gs.last_used.elapsed().as_secs() >= idle {
                     kill = true;
                 }
-            } else {
-                break;
-            }
+            } else { return; }
         }
         if kill {
             let mut guard = GLOBAL_SIDECAR.lock().unwrap();
@@ -131,7 +129,7 @@ pub fn get_or_spawn_port_with_ctx(model_path: &Path, uhoh_dir: &Path, idle_shutd
                 let _ = gs.child.kill();
                 let _ = gs.child.wait();
             }
-            break;
+            return;
         }
     });
 

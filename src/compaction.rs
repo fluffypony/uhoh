@@ -22,7 +22,8 @@ pub fn compact_project(
     let mut buckets_weekly: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
     // Snapshots are returned newest-first; process in that order so
-    // newer snapshots take precedence in each bucket.
+    // newer snapshots take precedence in each bucket. If this order ever changes,
+    // bucket retention would need to be revisited to ensure newer snapshots are kept.
     for snapshot in &snapshots {
         // Pinned snapshots: always keep
         if snapshot.pinned {
@@ -96,7 +97,8 @@ pub fn compact_project(
         };
 
         if dominated {
-            freed_bytes += database.estimate_snapshot_blob_size(snapshot.rowid)?;
+            let est = database.estimate_snapshot_blob_size(snapshot.rowid).unwrap_or(0);
+            freed_bytes = freed_bytes.saturating_add(est);
             database.delete_snapshot(snapshot.rowid)?;
         }
     }

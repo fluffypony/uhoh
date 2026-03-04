@@ -41,26 +41,45 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
     if target.exists() { return Ok(target); }
 
     tracing::info!("Downloading model {} from {}...", model.name, model.url);
-    let resp = reqwest::blocking::Client::new().get(&model.url).send()?;
-    if !resp.status().is_success() {
-        anyhow::bail!("Failed to download model: HTTP {}", resp.status());
-    }
-    let total = resp.content_length();
+    let client = reqwest::blocking::Client::new();
     let tmp = target.with_extension("downloading");
-    {
-        let mut out = std::fs::File::create(&tmp)?;
+    let mut start = 0u64;
+    if tmp.exists() {
+        if let Ok(meta) = std::fs::metadata(&tmp) { start = meta.len(); }
+    }
+    // HEAD to get length
+    let total = client.head(&model.url).send().ok().and_then(|r| r.headers().get(reqwest::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|s| s.parse::<u64>().ok()));
+    // Open file for append/create
+    let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&tmp)?;
+    // Show a progress bar if total known
+    let pb = total.map(|t| {
+        let bar = indicatif::ProgressBar::new(t);
+        bar.set_position(start);
+        bar.set_style(indicatif::ProgressStyle::default_bar().template("{spinner:.green} [{bar:40}] {bytes}/{total_bytes} ({eta})").unwrap());
+        bar
+    });
+    // Download loop with Range
+    let mut pos = start;
+    loop {
+        let mut req = client.get(&model.url);
+        if pos > 0 { req = req.header(reqwest::header::RANGE, format!("bytes={}-", pos)); }
+        let resp = req.send()?;
+        if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE { break; }
+        if !resp.status().is_success() { anyhow::bail!("Failed to download model: HTTP {}", resp.status()); }
         let mut reader = std::io::BufReader::new(resp);
         let mut buf = [0u8; 64 * 1024];
-        let mut downloaded = 0u64;
         loop {
             let n = reader.read(&mut buf)?;
             if n == 0 { break; }
             out.write_all(&buf[..n])?;
-            downloaded += n as u64;
-            if let Some(total) = total { if downloaded >= total { break; } }
+            pos += n as u64;
+            if let Some(ref bar) = pb { bar.set_position(pos); }
         }
-        out.sync_all()?;
+        out.flush()?;
+        if let Some(total) = total { if pos >= total { break; } }
     }
+    out.sync_all()?;
+    if let Some(bar) = pb { bar.finish_and_clear(); }
     std::fs::rename(&tmp, &target)?;
     Ok(target)
 }

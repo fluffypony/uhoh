@@ -106,7 +106,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let pid_file = std::fs::OpenOptions::new().write(true).create(true).open(&pid_path)?;
     #[cfg(unix)]
     {
-        use fs2::FileExt;
+        use fs4::FileExt;
         // If another daemon holds the lock, this will fail
         pid_file.try_lock_exclusive()?;
     }
@@ -119,7 +119,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     }
     #[cfg(not(unix))]
     {
-        use fs2::FileExt;
+        use fs4::FileExt;
         use std::io::{Seek, SeekFrom, Write};
         // Lock PID file on Windows too to prevent multiple daemons
         pid_file.try_lock_exclusive()?;
@@ -373,7 +373,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     }
                     break;
                 }
-                let mut total_freed = 0u64;
+                let _total_freed = 0u64; // unused placeholder; freed reported inside task
                 if let Ok(current_projects) = (&*database).list_projects() {
                     // Run compaction as a detached task; don't await inside main select loop
                     let db_path = uhoh_dir.join("uhoh.db");
@@ -385,7 +385,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                             let db = crate::db::Database::open(&db_path).ok();
                             let mut freed = 0u64;
                             if let Some(d) = db {
-                                for project in &current_projects {
+                                // Stagger compaction: run for a single project per tick to reduce contention
+                                if let Some(project) = current_projects.first() {
                                     if let Ok(f) = crate::compaction::compact_project(&d, &project.hash, &cfg) { freed = freed.saturating_add(f); }
                                 }
                             }
@@ -394,9 +395,19 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                         if freed > 100 * 1024 * 1024 {
                             tracing::info!("Compaction estimated freed {:.1} MB; triggering GC", freed as f64 / 1_048_576.0);
                             let uhoh_dir_cl = db_path_for_gc.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
+                        let db_path_for_gc2 = db_path_for_gc.clone();
+                        let uhoh_dir_cl2 = uhoh_dir_cl.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            if let Ok(db) = crate::db::Database::open(&db_path_for_gc2) {
+                                let _ = crate::gc::run_gc(&uhoh_dir_cl2, &db);
+                            }
+                        });
+                            // Run VACUUM after large deletions to reclaim space
+                            let db_path_for_gc3 = db_path_for_gc.clone();
+                            let uhoh_dir_cl3 = uhoh_dir_cl.clone();
                             let _ = tokio::task::spawn_blocking(move || {
-                                if let Ok(db) = crate::db::Database::open(&db_path_for_gc) {
-                                    let _ = crate::gc::run_gc(&uhoh_dir_cl, &db);
+                                if let Ok(db) = crate::db::Database::open(&db_path_for_gc3) {
+                                    let _ = db.backup_to(&uhoh_dir_cl3.join("vacuum.tmp")).ok();
                                 }
                             });
                         }
@@ -531,7 +542,7 @@ async fn process_pending_snapshots(
     let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
     let concurrency = std::cmp::max(1, (logical / 2).max(1));
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
-    let mut join = tokio::task::JoinSet::new();
+    let mut join: tokio::task::JoinSet<anyhow::Result<Option<u64>>> = tokio::task::JoinSet::new();
     for (project_path, state) in states.iter_mut() {
         if state.pending_changes.is_empty() {
             continue;
@@ -555,7 +566,6 @@ async fn process_pending_snapshots(
 
         if (quiet_elapsed || max_ceiling) && min_interval {
             let uhoh_dir_buf = uhoh_dir.to_path_buf();
-            let db_path = uhoh_dir_buf.join("uhoh.db");
             let project_hash = state.hash.clone();
             let proj_path = Path::new(project_path).to_path_buf();
             let cfg = config.clone();
@@ -564,11 +574,16 @@ async fn process_pending_snapshots(
             // Move minimal state needed; clear after join completes below
             let db_for_task = database.clone();
             join.spawn(async move {
+                let proj_hash_for_log = project_hash.clone();
                 let res = tokio::task::spawn_blocking(move || {
                     snapshot::create_snapshot(&uhoh_dir_buf, &db_for_task, &project_hash, &proj_path, "auto", None, &cfg, Some(&changed))
                 }).await;
                 drop(permit);
-                res.unwrap_or_else(|_| Ok(None))
+                match res {
+                    Ok(Ok(v)) => Ok(v),
+                    Ok(Err(e)) => { tracing::error!("Snapshot task failed for {}: {}", &proj_hash_for_log[..proj_hash_for_log.len().min(12)], e); Ok(None) },
+                    Err(e) => { tracing::error!("Snapshot task join error: {:?}", e); Ok(None) }
+                }
             });
         }
     }

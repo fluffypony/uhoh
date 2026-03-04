@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::ffi::OsString;
+use base64::Engine;
 
 /// How a blob was stored in the CAS.
 /// Numeric values can be persisted in the DB if needed.
@@ -364,6 +366,7 @@ pub fn id_to_base58(id: u64) -> String {
 
 pub fn base58_to_id(s: &str) -> Option<u64> {
     if s.is_empty() { return None; }
+    if s.len() > 22 { return None; }
     let bytes = bs58::decode(s)
         .with_alphabet(bs58::Alphabet::BITCOIN)
         .into_vec()
@@ -382,6 +385,53 @@ pub fn base58_to_id(s: &str) -> Option<u64> {
 /// Normalize a path to use forward slashes for cross-platform manifest storage.
 pub fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+/// Encode a relative path for manifest storage. If the path is valid UTF-8, normalize slashes.
+/// Otherwise, base64-encode the raw platform bytes with a "b64:" prefix.
+pub fn encode_relpath(rel: &Path) -> String {
+    if let Some(s) = rel.to_str() {
+        return normalize_path(Path::new(s));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = rel.as_os_str().as_bytes();
+        return format!("b64:{}", base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = rel.as_os_str().encode_wide().collect();
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
+        return format!("b64:{}", base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes));
+    }
+    normalize_path(rel)
+}
+
+/// Decode a manifest relative path back to a platform OsString.
+pub fn decode_relpath_to_os(s: &str) -> OsString {
+    if let Some(rest) = s.strip_prefix("b64:") {
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(rest) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStringExt;
+                return OsString::from_vec(bytes);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::ffi::OsStringExt;
+                let mut u16s = Vec::with_capacity(bytes.len() / 2);
+                let mut i = 0;
+                while i + 1 < bytes.len() {
+                    u16s.push(u16::from_le_bytes([bytes[i], bytes[i + 1]]));
+                    i += 2;
+                }
+                return OsString::from_wide(&u16s);
+            }
+        }
+    }
+    OsString::from(s)
 }
 
 /// Check if file is executable (Unix)

@@ -780,13 +780,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs2"
-version = "0.4.3"
+name = "fs4"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+checksum = "f7e180ac76c23b45e767bd7ae9579bc0bb458618c4bc71835926e098e61d15f8"
 dependencies = [
- "libc",
- "winapi",
+ "rustix 0.38.44",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2970,6 +2970,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "base64",
  "battery",
  "blake3",
  "bs58",
@@ -2979,7 +2980,7 @@ dependencies = [
  "dirs",
  "dunce",
  "ed25519-dalek",
- "fs2",
+ "fs4",
  "getrandom 0.2.17",
  "hex",
  "hickory-resolver",
