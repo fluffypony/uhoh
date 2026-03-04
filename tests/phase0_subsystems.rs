@@ -404,3 +404,11 @@ fn daemon_registers_maintenance_subsystem_for_compaction_backup_ai() {
     assert!(source.contains("fn name(&self) -> &str"));
     assert!(source.contains("\"daemon_maintenance\""));
 }
+
+#[test]
+fn snapshot_ai_diff_truncates_once_at_context_budget_limit() {
+    let source = std::fs::read_to_string("src/snapshot.rs").expect("read snapshot module");
+    assert!(source.contains("let mut diff_truncated = false;"));
+    assert!(source.contains("[Diff truncated]"));
+    assert!(source.contains("if diff_truncated {"));
+}

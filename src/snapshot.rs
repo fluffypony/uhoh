@@ -539,9 +539,12 @@ pub fn create_snapshot(
         const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024; // 512KB cap for AI diff
         let max_diff_chars = cfg_cloned.ai.max_context_tokens.saturating_mul(4);
         let mut diff_chars = 0usize;
+        let mut diff_truncated = false;
         for path in files_modified.iter().take(10) {
             if diff_chars >= max_diff_chars {
-                diff_chunks.push_str("\n[Diff truncated: context budget reached]\n");
+                if !diff_truncated {
+                    diff_chunks.push_str("\n[Diff truncated]\n");
+                }
                 break;
             }
             if let (Some(prev), Some((curr_hash, curr_stored))) =
@@ -553,6 +556,12 @@ pub fn create_snapshot(
                         let note = format!("--- {path}\n[File too large for AI diff]\n");
                         diff_chars = diff_chars.saturating_add(note.len());
                         diff_chunks.push_str(&note);
+                        if diff_chars >= max_diff_chars {
+                            if !diff_truncated {
+                                diff_chunks.push_str("\n[Diff truncated]\n");
+                            }
+                            break;
+                        }
                         continue;
                     }
                     let old = crate::cas::read_blob(&blob_root, &prev.hash).ok().flatten();
@@ -566,6 +575,12 @@ pub fn create_snapshot(
                             let note = format!("--- {path}\n[Binary file]\n");
                             diff_chars = diff_chars.saturating_add(note.len());
                             diff_chunks.push_str(&note);
+                            if diff_chars >= max_diff_chars {
+                                if !diff_truncated {
+                                    diff_chunks.push_str("\n[Diff truncated]\n");
+                                }
+                                break;
+                            }
                             continue;
                         }
                         if let (Ok(old_s), Ok(new_s)) =
@@ -577,8 +592,10 @@ pub fn create_snapshot(
                             diff_chunks.push_str(&header);
                             for hunk in d.unified_diff().context_radius(2).iter_hunks() {
                                 if diff_chars >= max_diff_chars {
-                                    diff_chunks
-                                        .push_str("\n[Diff truncated: context budget reached]\n");
+                                    if !diff_truncated {
+                                        diff_chunks.push_str("\n[Diff truncated]\n");
+                                        diff_truncated = true;
+                                    }
                                     break;
                                 }
                                 let hunk_header = format!("{}\n", hunk.header());
@@ -586,9 +603,10 @@ pub fn create_snapshot(
                                 diff_chunks.push_str(&hunk_header);
                                 for change in hunk.iter_changes() {
                                     if diff_chars >= max_diff_chars {
-                                        diff_chunks.push_str(
-                                            "\n[Diff truncated: context budget reached]\n",
-                                        );
+                                        if !diff_truncated {
+                                            diff_chunks.push_str("\n[Diff truncated]\n");
+                                            diff_truncated = true;
+                                        }
                                         break;
                                     }
                                     let sign = match change.tag() {
@@ -601,10 +619,19 @@ pub fn create_snapshot(
                                     diff_chunks.push(sign);
                                     diff_chunks.push_str(&change.to_string());
                                 }
+                                if diff_truncated {
+                                    break;
+                                }
+                            }
+                            if diff_truncated {
+                                break;
                             }
                         }
                     }
                 }
+            }
+            if diff_truncated {
+                break;
             }
         }
 
