@@ -90,6 +90,10 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
                                     "snapshot_id": { "type": "string" },
                                     "path": { "type": "string" },
                                     "project_hash": { "type": "string" },
+                                    "target_path": {
+                                        "type": "string",
+                                        "description": "Optional single file path to restore within the snapshot"
+                                    },
                                     "dry_run": { "type": "boolean", "default": true },
                                     "confirm": { "type": "boolean", "default": false }
                                 },
