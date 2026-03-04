@@ -19,7 +19,9 @@ use uhoh::snapshot;
 use uhoh::update;
 
 // Deduplicated: use library function for ~/.uhoh
-fn uhoh_dir() -> PathBuf { uhoh::uhoh_dir() }
+fn uhoh_dir() -> PathBuf {
+    uhoh::uhoh_dir()
+}
 
 fn ensure_uhoh_dir() -> Result<PathBuf> {
     let dir = uhoh_dir();
@@ -67,8 +69,9 @@ fn maybe_start_daemon(uhoh: &std::path::Path) -> Result<()> {
 
 fn resolve_project_path(path: Option<String>) -> Result<PathBuf> {
     let p = match path {
-        Some(s) => dunce::canonicalize(&s)
-            .with_context(|| format!("Cannot resolve path: {}", s))?,
+        Some(s) => {
+            dunce::canonicalize(&s).with_context(|| format!("Cannot resolve path: {}", s))?
+        }
         None => dunce::canonicalize(std::env::current_dir()?)
             .context("Cannot resolve current directory")?,
     };
@@ -123,7 +126,9 @@ async fn main() -> Result<()> {
     if let Some(old_pid) = cli.takeover {
         // Wait briefly for previous daemon to exit during self-update restart
         for _ in 0..50 {
-            if !platform::is_uhoh_process_alive(old_pid) { break; }
+            if !platform::is_uhoh_process_alive(old_pid) {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
@@ -139,7 +144,8 @@ async fn main() -> Result<()> {
                 if let Some(existing) = database.get_project(&existing_hash)? {
                     let canonical = dunce::canonicalize(&project_path)?;
                     if existing.current_path != canonical.to_string_lossy().as_ref() {
-                        database.update_project_path(&existing_hash, &canonical.to_string_lossy())?;
+                        database
+                            .update_project_path(&existing_hash, &canonical.to_string_lossy())?;
                         println!("Updated project path: {}", canonical.display());
                     } else {
                         println!("Already registered: {}", canonical.display());
@@ -150,7 +156,10 @@ async fn main() -> Result<()> {
 
             let git_dir = project_path.join(".git");
             if !git_dir.exists() {
-                warn!("Not a git repo. Marker at {0}/.uhoh — add to your ignore file.", project_path.display());
+                warn!(
+                    "Not a git repo. Marker at {0}/.uhoh — add to your ignore file.",
+                    project_path.display()
+                );
                 eprintln!("⚠ Warning: Not a git repo. Add `.uhoh` to your ignore file.");
             }
 
@@ -160,7 +169,16 @@ async fn main() -> Result<()> {
             println!("Registered: {}", canonical.display());
 
             let cfg = config::Config::load(&uhoh.join("config.toml"))?;
-            snapshot::create_snapshot(&uhoh, &database, &project_hash, &canonical, "manual", Some("Initial snapshot"), &cfg, None)?;
+            snapshot::create_snapshot(
+                &uhoh,
+                &database,
+                &project_hash,
+                &canonical,
+                "manual",
+                Some("Initial snapshot"),
+                &cfg,
+                None,
+            )?;
             println!("Initial snapshot created.");
         }
 
@@ -174,13 +192,18 @@ async fn main() -> Result<()> {
                     let cwd = dunce::canonicalize(std::env::current_dir()?)?;
                     database.find_project_by_path(&cwd)?
                 }
-            }.context("Project not found")?;
+            }
+            .context("Project not found")?;
             // Attempt to remove marker files
             let project_path = std::path::Path::new(&project.current_path);
             let marker_git = project_path.join(".git/.uhoh");
             let marker_root = project_path.join(".uhoh");
-            if marker_git.exists() { std::fs::remove_file(&marker_git).ok(); }
-            if marker_root.exists() { std::fs::remove_file(&marker_root).ok(); }
+            if marker_git.exists() {
+                std::fs::remove_file(&marker_git).ok();
+            }
+            if marker_root.exists() {
+                std::fs::remove_file(&marker_root).ok();
+            }
             database.remove_project(&project.hash)?;
             println!("Removed: {}", project.current_path);
         }
@@ -194,7 +217,13 @@ async fn main() -> Result<()> {
                     let exists = std::path::Path::new(&p.current_path).exists();
                     let status = if exists { "✓" } else { "✗ MISSING" };
                     let count = database.snapshot_count(&p.hash)?;
-                    println!("  {} {} ({} snapshots) [{}]", status, p.current_path, count, &p.hash[..p.hash.len().min(12)]);
+                    println!(
+                        "  {} {} ({} snapshots) [{}]",
+                        status,
+                        p.current_path,
+                        count,
+                        &p.hash[..p.hash.len().min(12)]
+                    );
                 }
             }
         }
@@ -208,15 +237,27 @@ async fn main() -> Result<()> {
                 for s in &snapshots {
                     let id_str = cas::id_to_base58(s.snapshot_id);
                     let pin = if s.pinned { " 📌" } else { "" };
-                    let msg = if s.message.is_empty() { String::new() } else { format!(" — {}", s.message) };
+                    let msg = if s.message.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", s.message)
+                    };
                     println!("  {} [{}] {}{}{}", s.timestamp, id_str, s.trigger, pin, msg);
                     // Show files with storage info
                     let files = database.get_snapshot_files(s.rowid)?;
                     for f in files.iter().take(10) {
-                        let method = match f.storage_method { 0 => "none", 1 => "copy", 2 => "reflink", 3 => "hardlink", _ => "none" };
+                        let method = match f.storage_method {
+                            0 => "none",
+                            1 => "copy",
+                            2 => "reflink",
+                            3 => "hardlink",
+                            _ => "none",
+                        };
                         println!("       {:>8}  {:>7}  {}", f.size, method, f.path);
                     }
-                    if files.len() > 10 { println!("       ... and {} more", files.len() - 10); }
+                    if files.len() > 10 {
+                        println!("       ... and {} more", files.len() - 10);
+                    }
                 }
             }
         }
@@ -224,16 +265,32 @@ async fn main() -> Result<()> {
         Commands::Commit { message, trigger } => {
             maybe_start_daemon(&uhoh)?;
             let project_path = dunce::canonicalize(std::env::current_dir()?)?;
-            let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
+            let project = database
+                .find_project_by_path(&project_path)?
+                .context("Not registered")?;
             let trigger_str = trigger.unwrap_or_else(|| "manual".to_string());
             let cfg = config::Config::load(&uhoh.join("config.toml"))?;
-            snapshot::create_snapshot(&uhoh, &database, &project.hash, &project_path, &trigger_str, message.as_deref(), &cfg, None)?;
+            snapshot::create_snapshot(
+                &uhoh,
+                &database,
+                &project.hash,
+                &project_path,
+                &trigger_str,
+                message.as_deref(),
+                &cfg,
+                None,
+            )?;
             println!("Snapshot created.");
         }
 
-        Commands::Restore { id, target, dry_run, force } => {
+        Commands::Restore {
+            id,
+            target,
+            dry_run,
+            force,
+        } => {
             let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
-            restore::cmd_restore(&uhoh, &database, &project, &id, dry_run, force)?;
+            let _ = restore::cmd_restore(&uhoh, &database, &project, &id, None, dry_run, force)?;
         }
 
         Commands::Gitstash { id, target } => {
@@ -243,19 +300,25 @@ async fn main() -> Result<()> {
 
         Commands::Diff { id1, id2 } => {
             let project_path = dunce::canonicalize(std::env::current_dir()?)?;
-            let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
+            let project = database
+                .find_project_by_path(&project_path)?
+                .context("Not registered")?;
             diff_view::cmd_diff(&uhoh, &database, &project, id1.as_deref(), id2.as_deref())?;
         }
 
         Commands::Cat { path, id } => {
             let project_path = dunce::canonicalize(std::env::current_dir()?)?;
-            let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
+            let project = database
+                .find_project_by_path(&project_path)?
+                .context("Not registered")?;
             diff_view::cmd_cat(&uhoh, &database, &project, &path, &id)?;
         }
 
         Commands::Log { path } => {
             let project_path = dunce::canonicalize(std::env::current_dir()?)?;
-            let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
+            let project = database
+                .find_project_by_path(&project_path)?
+                .context("Not registered")?;
             diff_view::cmd_log(&database, &project, &path)?;
         }
 
@@ -272,7 +335,9 @@ async fn main() -> Result<()> {
                 daemon::spawn_detached_daemon()?;
             }
         }
-        Commands::Stop => { daemon::stop_daemon(&uhoh)?; }
+        Commands::Stop => {
+            daemon::stop_daemon(&uhoh)?;
+        }
         Commands::Restart => {
             daemon::stop_daemon(&uhoh).ok();
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -284,7 +349,10 @@ async fn main() -> Result<()> {
             match action.as_str() {
                 "install" => git::install_hook(&project_path)?,
                 "remove" => git::remove_hook(&project_path)?,
-                other => anyhow::bail!("Unknown hook action: '{}'. Use 'install' or 'remove'.", other),
+                other => anyhow::bail!(
+                    "Unknown hook action: '{}'. Use 'install' or 'remove'.",
+                    other
+                ),
             }
         }
 
@@ -293,16 +361,28 @@ async fn main() -> Result<()> {
             match action {
                 Some(uhoh::cli::ConfigAction::Edit) => {
                     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-                    std::process::Command::new(&editor).arg(&config_path).status()?;
+                    std::process::Command::new(&editor)
+                        .arg(&config_path)
+                        .status()?;
                 }
                 Some(uhoh::cli::ConfigAction::Set { key, value }) => {
-                    let content = if config_path.exists() { std::fs::read_to_string(&config_path)? } else { String::new() };
-                    let mut doc: toml_edit::DocumentMut = content.parse().unwrap_or_else(|_| toml_edit::DocumentMut::new());
+                    let content = if config_path.exists() {
+                        std::fs::read_to_string(&config_path)?
+                    } else {
+                        String::new()
+                    };
+                    let mut doc: toml_edit::DocumentMut = content
+                        .parse()
+                        .unwrap_or_else(|_| toml_edit::DocumentMut::new());
                     let parts: Vec<&str> = key.split('.').collect();
                     match parts.as_slice() {
-                        [k] => { doc[*k] = toml_edit::value(parse_toml_value(&value)); }
-                        [a,b] => {
-                            if !doc.contains_key(a) { doc[*a] = toml_edit::Item::Table(toml_edit::Table::new()); }
+                        [k] => {
+                            doc[*k] = toml_edit::value(parse_toml_value(&value));
+                        }
+                        [a, b] => {
+                            if !doc.contains_key(a) {
+                                doc[*a] = toml_edit::Item::Table(toml_edit::Table::new());
+                            }
                             doc[*a][*b] = toml_edit::value(parse_toml_value(&value));
                         }
                         _ => anyhow::bail!("Key nesting deeper than 2 levels is not supported"),
@@ -311,12 +391,22 @@ async fn main() -> Result<()> {
                     println!("Set {} = {}", key, value);
                 }
                 Some(uhoh::cli::ConfigAction::Get { key }) => {
-                    let content = if config_path.exists() { std::fs::read_to_string(&config_path)? } else { String::new() };
-                    let doc: toml_edit::DocumentMut = content.parse().unwrap_or_else(|_| toml_edit::DocumentMut::new());
+                    let content = if config_path.exists() {
+                        std::fs::read_to_string(&config_path)?
+                    } else {
+                        String::new()
+                    };
+                    let doc: toml_edit::DocumentMut = content
+                        .parse()
+                        .unwrap_or_else(|_| toml_edit::DocumentMut::new());
                     let parts: Vec<&str> = key.split('.').collect();
                     let out = match parts.as_slice() {
                         [k] => doc.get(*k).map(|v| v.to_string()).unwrap_or_default(),
-                        [a,b] => doc.get(*a).and_then(|t| t.get(*b)).map(|v| v.to_string()).unwrap_or_default(),
+                        [a, b] => doc
+                            .get(*a)
+                            .and_then(|t| t.get(*b))
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
                         _ => String::new(),
                     };
                     println!("{}", out);
@@ -328,9 +418,17 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Gc => { gc::run_gc(&uhoh, &database)?; }
-        Commands::Update => { update::check_and_apply_update(&uhoh).await?; }
-        Commands::Doctor { fix, restore_latest, verify_install } => {
+        Commands::Gc => {
+            gc::run_gc(&uhoh, &database)?;
+        }
+        Commands::Update => {
+            update::check_and_apply_update(&uhoh).await?;
+        }
+        Commands::Doctor {
+            fix,
+            restore_latest,
+            verify_install,
+        } => {
             if verify_install {
                 return run_verify_install().await;
             }
@@ -342,12 +440,22 @@ async fn main() -> Result<()> {
             println!("Daemon: {}", if running { "running" } else { "stopped" });
             let projects = database.list_projects()?;
             println!("Projects: {}", projects.len());
-            let total: u64 = projects.iter().filter_map(|p| database.snapshot_count(&p.hash).ok()).sum();
+            let total: u64 = projects
+                .iter()
+                .filter_map(|p| database.snapshot_count(&p.hash).ok())
+                .sum();
             println!("Snapshots: {}", total);
             let size = database.get_blob_bytes().unwrap_or_else(|_| 0);
             println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0);
             let cfg = config::Config::load(&uhoh.join("config.toml")).unwrap_or_default();
-            println!("AI: {}", if cfg.ai.enabled { "enabled" } else { "disabled" });
+            println!(
+                "AI: {}",
+                if cfg.ai.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
             // Inception loop guard: warn if project includes ~/.uhoh
             let uhoh_path = uhoh::uhoh_dir();
             for p in &projects {
@@ -361,7 +469,9 @@ async fn main() -> Result<()> {
 
         Commands::Mark { label } => {
             let project_path = dunce::canonicalize(std::env::current_dir()?)?;
-            let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
+            let project = database
+                .find_project_by_path(&project_path)?
+                .context("Not registered")?;
             operations::cmd_mark(&database, &project, &label)?;
         }
         Commands::Undo { target } => {
@@ -373,18 +483,32 @@ async fn main() -> Result<()> {
             operations::cmd_list_operations(&database, &project)?;
         }
 
-        Commands::ServiceInstall => { platform::install_service()?; println!("Service installed."); }
-        Commands::ServiceRemove => { platform::remove_service()?; println!("Service removed."); }
+        Commands::ServiceInstall => {
+            platform::install_service()?;
+            println!("Service installed.");
+        }
+        Commands::ServiceRemove => {
+            platform::remove_service()?;
+            println!("Service removed.");
+        }
     }
 
     Ok(())
 }
 
 fn parse_toml_value(s: &str) -> toml_edit::Value {
-    if s.eq_ignore_ascii_case("true") { return toml_edit::Value::from(true); }
-    if s.eq_ignore_ascii_case("false") { return toml_edit::Value::from(false); }
-    if let Ok(i) = s.parse::<i64>() { return toml_edit::Value::from(i); }
-    if let Ok(f) = s.parse::<f64>() { return toml_edit::Value::from(f); }
+    if s.eq_ignore_ascii_case("true") {
+        return toml_edit::Value::from(true);
+    }
+    if s.eq_ignore_ascii_case("false") {
+        return toml_edit::Value::from(false);
+    }
+    if let Ok(i) = s.parse::<i64>() {
+        return toml_edit::Value::from(i);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return toml_edit::Value::from(f);
+    }
     toml_edit::Value::from(s.to_string())
 }
 
@@ -399,9 +523,11 @@ async fn run_zero_verb() -> Result<()> {
         let snaps = database.list_snapshots(&project.hash)?; // newest-first
         println!("uhoh is active in this directory.");
         if let Some(latest) = snaps.first() {
-            println!("Latest snapshot: {} ({})",
+            println!(
+                "Latest snapshot: {} ({})",
                 cas::id_to_base58(latest.snapshot_id),
-                latest.timestamp);
+                latest.timestamp
+            );
             println!("Total snapshots: {}", snaps.len());
         } else {
             println!("No snapshots yet.");
@@ -431,7 +557,10 @@ async fn run_zero_verb() -> Result<()> {
 
     let git_dir = project_path.join(".git");
     if !git_dir.exists() {
-        warn!("Not a git repo. Marker at {0}/.uhoh — add to your ignore file.", project_path.display());
+        warn!(
+            "Not a git repo. Marker at {0}/.uhoh — add to your ignore file.",
+            project_path.display()
+        );
         eprintln!("⚠ Warning: Not a git repo. Add `.uhoh` to your ignore file.");
     }
 
@@ -441,13 +570,27 @@ async fn run_zero_verb() -> Result<()> {
     println!("Registered: {}", canonical.display());
 
     let cfg = config::Config::load(&uhoh.join("config.toml"))?;
-    snapshot::create_snapshot(&uhoh, &database, &project_hash, &canonical, "manual", Some("Initial snapshot"), &cfg, None)?;
+    snapshot::create_snapshot(
+        &uhoh,
+        &database,
+        &project_hash,
+        &canonical,
+        "manual",
+        Some("Initial snapshot"),
+        &cfg,
+        None,
+    )?;
     println!("Initial snapshot created.");
 
     Ok(())
 }
 
-async fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bool, restore_latest: bool) -> Result<()> {
+async fn run_doctor(
+    uhoh_dir: &std::path::Path,
+    database: &db::Database,
+    fix: bool,
+    restore_latest: bool,
+) -> Result<()> {
     // 1) SQLite integrity check
     let mut integrity_ok = true;
     {
@@ -488,9 +631,15 @@ async fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bo
     let mut missing = Vec::new();
     for h in &referenced {
         let p = blob_root.join(&h[..h.len().min(2)]).join(h);
-        if !p.exists() { missing.push(h.clone()); }
+        if !p.exists() {
+            missing.push(h.clone());
+        }
     }
-    println!("Referenced blobs: {}, missing: {}", referenced.len(), missing.len());
+    println!(
+        "Referenced blobs: {}, missing: {}",
+        referenced.len(),
+        missing.len()
+    );
     if !missing.is_empty() {
         for m in missing.iter().take(10) {
             println!("  missing {}...", &m[..m.len().min(12)]);
@@ -501,19 +650,33 @@ async fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bo
     let mut orphans = Vec::new();
     if blob_root.exists() {
         for pref in std::fs::read_dir(&blob_root)? {
-            let pref = match pref { Ok(p) => p, Err(_) => continue };
-            if !pref.file_type()?.is_dir() { continue; }
-            if pref.file_name() == "tmp" { continue; }
+            let pref = match pref {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !pref.file_type()?.is_dir() {
+                continue;
+            }
+            if pref.file_name() == "tmp" {
+                continue;
+            }
             for e in std::fs::read_dir(pref.path())? {
-                let e = match e { Ok(v) => v, Err(_) => continue };
+                let e = match e {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
                 let name = e.file_name().to_string_lossy().to_string();
-                if !referenced.contains(&name) { orphans.push(e.path()); }
+                if !referenced.contains(&name) {
+                    orphans.push(e.path());
+                }
             }
         }
     }
     println!("Orphaned blobs: {}", orphans.len());
     if fix && !orphans.is_empty() {
-        for o in &orphans { let _ = std::fs::remove_file(o); }
+        for o in &orphans {
+            let _ = std::fs::remove_file(o);
+        }
         println!("Removed {} orphaned blobs", orphans.len());
     }
 
@@ -521,7 +684,9 @@ async fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bo
     let mut corrupted = Vec::new();
     for h in &referenced {
         let p = blob_root.join(&h[..h.len().min(2)]).join(h);
-        if !p.exists() { continue; }
+        if !p.exists() {
+            continue;
+        }
         match std::fs::read(&p) {
             Ok(bytes) => {
                 let actual = blake3::hash(&bytes).to_hex().to_string();
@@ -546,7 +711,11 @@ async fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bo
             let target = quarantine.join(format!("corrupt-{}-{}.blob", &h[..h.len().min(12)], ts));
             let _ = std::fs::rename(p, target);
         }
-        println!("Moved {} corrupted blobs to {}", corrupted.len(), quarantine.display());
+        println!(
+            "Moved {} corrupted blobs to {}",
+            corrupted.len(),
+            quarantine.display()
+        );
     }
 
     // 5) Binary integrity check (non-fatal)
@@ -558,7 +727,9 @@ async fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bo
     let version = env!("CARGO_PKG_VERSION");
     let asset_name = format!("uhoh-{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     // Perform async DNS query via update module
-    let dns = uhoh::update::dns_verify_hash(version, &asset_name).await.ok();
+    let dns = uhoh::update::dns_verify_hash(version, &asset_name)
+        .await
+        .ok();
     match dns {
         Some(expected) => {
             if expected.eq_ignore_ascii_case(&local_hash) {
@@ -578,10 +749,8 @@ async fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bo
 }
 
 async fn run_verify_install() -> Result<()> {
-    let exe_path = std::env::current_exe()
-        .context("Could not determine path to running binary")?;
-    let exe_bytes = std::fs::read(&exe_path)
-        .context("Could not read running binary")?;
+    let exe_path = std::env::current_exe().context("Could not determine path to running binary")?;
+    let exe_bytes = std::fs::read(&exe_path).context("Could not read running binary")?;
 
     let local_hash = blake3::hash(&exe_bytes).to_hex().to_string();
     let version = env!("CARGO_PKG_VERSION");

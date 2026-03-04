@@ -1,6 +1,6 @@
 use axum::{
-    extract::State,
     extract::Request,
+    extract::State,
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -46,10 +46,7 @@ pub async fn auth_middleware(headers: HeaderMap, request: Request, next: Next) -
         return next.run(request).await;
     }
 
-    let expected = request
-        .extensions()
-        .get::<AuthToken>()
-        .map(|t| t.0.clone());
+    let expected = request.extensions().get::<AuthToken>().map(|t| t.0.clone());
 
     if let Some(expected) = expected {
         if let Some(auth_header) = headers.get("authorization") {

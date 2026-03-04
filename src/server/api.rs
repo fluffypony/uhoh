@@ -57,8 +57,16 @@ pub async fn list_projects(State(state): State<AppState>) -> impl IntoResponse {
                 .collect();
             (StatusCode::OK, Json(json!({ "projects": list }))).into_response()
         }
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -70,7 +78,9 @@ pub async fn list_snapshots(
     let db = state.database.clone();
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
-    let result = tokio::task::spawn_blocking(move || db.list_snapshots_paginated(&hash, limit, offset)).await;
+    let result =
+        tokio::task::spawn_blocking(move || db.list_snapshots_paginated(&hash, limit, offset))
+            .await;
     match result {
         Ok(Ok(snapshots)) => {
             let list: Vec<Value> = snapshots
@@ -90,8 +100,16 @@ pub async fn list_snapshots(
                 .collect();
             Json(json!({ "snapshots": list })).into_response()
         }
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -130,8 +148,16 @@ pub async fn get_snapshot_files(
     .await;
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -139,7 +165,14 @@ fn build_file_tree(files: &[crate::db::FileEntryRow]) -> Value {
     let mut root: BTreeMap<String, Value> = BTreeMap::new();
     for file in files {
         let parts: Vec<&str> = file.path.split('/').collect();
-        insert_into_tree(&mut root, &parts, &file.path, &file.hash, file.size, file.is_symlink);
+        insert_into_tree(
+            &mut root,
+            &parts,
+            &file.path,
+            &file.hash,
+            file.size,
+            file.is_symlink,
+        );
     }
     json!(root.values().cloned().collect::<Vec<_>>())
 }
@@ -177,8 +210,16 @@ fn insert_into_tree(
         .or_insert_with(|| json!({"type": "directory", "name": dir_name, "children": {}}));
     if let Some(children) = entry.get_mut("children") {
         if let Some(obj) = children.as_object_mut() {
-            let mut child_map: BTreeMap<String, Value> = obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            insert_into_tree(&mut child_map, &parts[1..], full_path, blob_hash, size, is_symlink);
+            let mut child_map: BTreeMap<String, Value> =
+                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            insert_into_tree(
+                &mut child_map,
+                &parts[1..],
+                full_path,
+                blob_hash,
+                size,
+                is_symlink,
+            );
             *children = json!(child_map);
         }
     }
@@ -230,7 +271,8 @@ pub async fn get_diff(
                 .iter()
                 .find(|f| f.path == file.path)
                 .map(|f| f.hash.as_str());
-            let new_content = crate::cas::read_blob(&uhoh_dir.join("blobs"), &file.hash)?.unwrap_or_default();
+            let new_content =
+                crate::cas::read_blob(&uhoh_dir.join("blobs"), &file.hash)?.unwrap_or_default();
             let old_content = if let Some(base_hash) = base_hash {
                 if base_hash == file.hash {
                     continue;
@@ -239,7 +281,12 @@ pub async fn get_diff(
             } else {
                 Vec::new()
             };
-            let diff = crate::diff_view::compute_structured_diff(&old_content, &new_content, &file.path, true);
+            let diff = crate::diff_view::compute_structured_diff(
+                &old_content,
+                &new_content,
+                &file.path,
+                true,
+            );
             diffs.push(serde_json::to_value(diff)?);
         }
 
@@ -263,8 +310,16 @@ pub async fn get_diff(
     .await;
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -276,7 +331,10 @@ pub async fn get_file_content(
     let uhoh_dir = state.uhoh_dir.clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
         let project = resolve::resolve_project(&db, Some(&hash), None)?;
-        resolve::validate_path_within_project(std::path::Path::new(&project.current_path), &file_path)?;
+        resolve::validate_path_within_project(
+            std::path::Path::new(&project.current_path),
+            &file_path,
+        )?;
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
             .ok_or_else(|| anyhow::anyhow!("Snapshot not found"))?;
@@ -305,8 +363,16 @@ pub async fn get_file_content(
             )
                 .into_response()
         }
-        Ok(Err(e)) => (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -318,7 +384,10 @@ pub async fn create_snapshot(
     let db = state.database.clone();
     let cfg = state.config.clone();
     let uhoh_dir = state.uhoh_dir.clone();
-    let message = body.get("message").and_then(|v| v.as_str()).map(str::to_string);
+    let message = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let event_tx = state.event_tx.clone();
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
@@ -354,8 +423,16 @@ pub async fn create_snapshot(
     .await;
     match result {
         Ok(Ok(value)) => (StatusCode::CREATED, Json(value)).into_response(),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -364,8 +441,18 @@ pub async fn restore_snapshot(
     Path((hash, snap_id)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let dry_run = body.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(true);
-    let confirm = body.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    let dry_run = body
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let confirm = body
+        .get("confirm")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let target_path = body
+        .get("target_path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     if !dry_run && !confirm {
         return (
             StatusCode::BAD_REQUEST,
@@ -381,6 +468,7 @@ pub async fn restore_snapshot(
     let event_tx = state.event_tx.clone();
     let restore_key = hash.clone();
     let hash_for_unlock = hash.clone();
+    let target_path_for_task = target_path.clone();
 
     if !dry_run {
         let mut locks = restore_locks.lock().await;
@@ -395,52 +483,83 @@ pub async fn restore_snapshot(
     }
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-        if !dry_run {
-            let guard_key = format!("api:{}", restore_key);
+        let project = resolve::resolve_project(&db, Some(&hash), None)?;
+        if let Some(tp) = target_path_for_task.as_deref() {
+            resolve::validate_path_within_project(std::path::Path::new(&project.current_path), tp)?;
+        }
+
+        struct RestoreFlagGuard {
+            flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Drop for RestoreFlagGuard {
+            fn drop(&mut self) {
+                self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let _restore_guard = if !dry_run {
             loop {
                 if !restore_in_progress.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                if guard_key.is_empty() {
-                    break;
-                }
             }
-        }
+            Some(RestoreFlagGuard {
+                flag: restore_in_progress.clone(),
+            })
+        } else {
+            None
+        };
 
-        let project = resolve::resolve_project(&db, Some(&hash), None)?;
-        let restore_result = crate::restore::cmd_restore(&uhoh_dir, &db, &project, &snap_id, dry_run, true);
-        if !dry_run {
-            restore_in_progress.store(false, std::sync::atomic::Ordering::SeqCst);
-        }
-        restore_result?;
+        let outcome = crate::restore::cmd_restore(
+            &uhoh_dir,
+            &db,
+            &project,
+            &snap_id,
+            target_path_for_task.as_deref(),
+            dry_run,
+            true,
+        )?;
 
-        if !dry_run {
+        if !dry_run && outcome.applied {
             let _ = event_tx.send(crate::server::events::ServerEvent::SnapshotRestored {
                 project_hash: project.hash.clone(),
-                snapshot_id: snap_id.clone(),
-                files_modified: 0,
-                files_deleted: 0,
+                snapshot_id: outcome.snapshot_id.clone(),
+                files_modified: outcome.files_restored,
+                files_deleted: outcome.files_deleted,
             });
         }
 
         Ok(json!({
-            "restored": !dry_run,
-            "dry_run": dry_run,
-            "snapshot_id": snap_id,
+            "restored": outcome.applied,
+            "dry_run": outcome.dry_run,
+            "snapshot_id": outcome.snapshot_id,
+            "files_modified": outcome.files_restored,
+            "files_deleted": outcome.files_deleted,
+            "files_to_modify": outcome.files_to_restore,
+            "files_to_delete": outcome.files_to_delete,
         }))
     })
     .await;
 
     if !dry_run {
         let mut locks = restore_locks.lock().await;
+        locks.remove(&restore_key);
         locks.remove(&hash_for_unlock);
     }
 
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -452,7 +571,9 @@ pub async fn search(
     let q = params.q.clone();
     let project = params.project.clone();
     let limit = params.limit.unwrap_or(50);
-    let result = tokio::task::spawn_blocking(move || db.search_snapshots(&q, project.as_deref(), limit)).await;
+    let result =
+        tokio::task::spawn_blocking(move || db.search_snapshots(&q, project.as_deref(), limit))
+            .await;
     match result {
         Ok(Ok(results)) => {
             let list: Vec<Value> = results
@@ -470,8 +591,16 @@ pub async fn search(
                 .collect();
             Json(json!({ "results": list })).into_response()
         }
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -511,9 +640,17 @@ pub async fn get_timeline(
                 },
                 "total_snapshots": summaries.len(),
             }))
-                .into_response()
+            .into_response()
         }
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }

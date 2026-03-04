@@ -101,7 +101,9 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
                 error: None,
                 id: request.id,
             },
-            "tools/call" => handle_stdio_tool_call(&database, &uhoh_dir, config, request.id, request.params),
+            "tools/call" => {
+                handle_stdio_tool_call(&database, &uhoh_dir, config, request.id, request.params)
+            }
             _ => JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 result: None,
@@ -212,41 +214,43 @@ fn handle_stdio_tool_call(
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
             let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             match crate::resolve::resolve_project(database, path.or(hash), None) {
-                Ok(project) => match database.list_snapshots_paginated(&project.hash, limit, offset) {
-                    Ok(snapshots) => {
-                        let list: Vec<Value> = snapshots
-                            .iter()
-                            .map(|s| {
-                                json!({
-                                    "id": crate::cas::id_to_base58(s.snapshot_id),
-                                    "timestamp": s.timestamp,
-                                    "trigger": s.trigger,
-                                    "message": s.message,
-                                    "file_count": s.file_count,
+                Ok(project) => {
+                    match database.list_snapshots_paginated(&project.hash, limit, offset) {
+                        Ok(snapshots) => {
+                            let list: Vec<Value> = snapshots
+                                .iter()
+                                .map(|s| {
+                                    json!({
+                                        "id": crate::cas::id_to_base58(s.snapshot_id),
+                                        "timestamp": s.timestamp,
+                                        "trigger": s.trigger,
+                                        "message": s.message,
+                                        "file_count": s.file_count,
+                                    })
                                 })
-                            })
-                            .collect();
-                        JsonRpcResponse {
-                            jsonrpc: "2.0".to_string(),
-                            result: Some(json!({
-                                "content": [{"type":"text", "text": format!("{} snapshots found", list.len())}],
-                                "snapshots": list,
-                            })),
-                            error: None,
-                            id,
+                                .collect();
+                            JsonRpcResponse {
+                                jsonrpc: "2.0".to_string(),
+                                result: Some(json!({
+                                    "content": [{"type":"text", "text": format!("{} snapshots found", list.len())}],
+                                    "snapshots": list,
+                                })),
+                                error: None,
+                                id,
+                            }
                         }
+                        Err(e) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            result: None,
+                            error: Some(JsonRpcError {
+                                code: -32000,
+                                message: e.to_string(),
+                                data: None,
+                            }),
+                            id,
+                        },
                     }
-                    Err(e) => JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        result: None,
-                        error: Some(JsonRpcError {
-                            code: -32000,
-                            message: e.to_string(),
-                            data: None,
-                        }),
-                        id,
-                    },
-                },
+                }
                 Err(e) => JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
                     result: None,
@@ -275,8 +279,14 @@ fn handle_stdio_tool_call(
                     }
                 }
             };
-            let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(true);
-            let confirm = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+            let dry_run = args
+                .get("dry_run")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let confirm = args
+                .get("confirm")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if !dry_run && !confirm {
                 return JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
@@ -298,10 +308,11 @@ fn handle_stdio_tool_call(
                     database,
                     &project,
                     &snapshot_id,
+                    args.get("target_path").and_then(|v| v.as_str()),
                     dry_run,
                     true,
                 ) {
-                    Ok(()) => JsonRpcResponse {
+                    Ok(outcome) => JsonRpcResponse {
                         jsonrpc: "2.0".to_string(),
                         result: Some(json!({
                             "content": [{
@@ -312,8 +323,12 @@ fn handle_stdio_tool_call(
                                     format!("Snapshot {} restored successfully", snapshot_id)
                                 }
                             }],
-                            "restored": !dry_run,
+                            "restored": outcome.applied,
                             "dry_run": dry_run,
+                            "files_modified": outcome.files_restored,
+                            "files_deleted": outcome.files_deleted,
+                            "files_to_modify": outcome.files_to_restore,
+                            "files_to_delete": outcome.files_to_delete,
                         })),
                         error: None,
                         id,

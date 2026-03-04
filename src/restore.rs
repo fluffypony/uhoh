@@ -1,11 +1,22 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
-use std::path::Path;
 use std::io::IsTerminal;
+use std::path::Path;
 
 use crate::cas;
 use crate::db::{Database, ProjectEntry};
 use crate::snapshot;
+
+#[derive(Debug, Clone)]
+pub struct RestoreOutcome {
+    pub snapshot_id: String,
+    pub dry_run: bool,
+    pub applied: bool,
+    pub files_restored: usize,
+    pub files_deleted: usize,
+    pub files_to_restore: Vec<String>,
+    pub files_to_delete: Vec<String>,
+}
 
 pub fn restore_symlink_target(content: &[u8], full_path: &Path) -> Result<()> {
     if full_path.symlink_metadata().is_ok() {
@@ -34,19 +45,17 @@ pub fn restore_symlink_target(content: &[u8], full_path: &Path) -> Result<()> {
                 );
                 std::fs::write(full_path, content)?;
             }
-            Err(e) => {
-                match std::os::windows::fs::symlink_dir(target_path, full_path) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        tracing::warn!(
-                            "Cannot create symlink at {}: {}. Writing target as regular file.",
-                            full_path.display(),
-                            e
-                        );
-                        std::fs::write(full_path, content)?;
-                    }
+            Err(e) => match std::os::windows::fs::symlink_dir(target_path, full_path) {
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        "Cannot create symlink at {}: {}. Writing target as regular file.",
+                        full_path.display(),
+                        e
+                    );
+                    std::fs::write(full_path, content)?;
                 }
-            }
+            },
         }
     }
 
@@ -56,11 +65,7 @@ pub fn restore_symlink_target(content: &[u8], full_path: &Path) -> Result<()> {
 fn check_no_symlink_parents(restore_base: &Path, target: &Path) -> Result<()> {
     if let Ok(relative) = target.strip_prefix(restore_base) {
         let mut current = restore_base.to_path_buf();
-        for component in relative
-            .parent()
-            .unwrap_or(Path::new(""))
-            .components()
-        {
+        for component in relative.parent().unwrap_or(Path::new("")).components() {
             current.push(component);
             if let Ok(meta) = current.symlink_metadata() {
                 if meta.file_type().is_symlink() {
@@ -82,7 +87,10 @@ fn validate_restore_path(project_path: &Path, relative_path: &str) -> Result<()>
     }
     for component in rel.components() {
         if matches!(component, std::path::Component::ParentDir) {
-            anyhow::bail!("Path traversal detected in snapshot manifest: {}", relative_path);
+            anyhow::bail!(
+                "Path traversal detected in snapshot manifest: {}",
+                relative_path
+            );
         }
     }
 
@@ -106,59 +114,90 @@ pub fn cmd_restore(
     database: &Database,
     project: &ProjectEntry,
     id_str: &str,
+    target_path: Option<&str>,
     dry_run: bool,
     force: bool,
-) -> Result<()> {
+) -> Result<RestoreOutcome> {
     let snap = database
         .find_snapshot_by_base58(&project.hash, id_str)?
         .context("Snapshot not found")?;
+    let snap_id_str = cas::id_to_base58(snap.snapshot_id);
 
     let project_path = Path::new(&project.current_path);
     let blob_root = uhoh_dir.join("blobs");
-    let target_files = database.get_snapshot_files(snap.rowid)?;
+    let mut target_files = database.get_snapshot_files(snap.rowid)?;
+
+    let target_filter = target_path
+        .map(|path| {
+            validate_restore_path(project_path, path)?;
+            Ok::<String, anyhow::Error>(if path.starts_with("b64:") {
+                path.to_string()
+            } else {
+                cas::encode_relpath(Path::new(path))
+            })
+        })
+        .transpose()?;
+
+    if let Some(filter) = target_filter.as_ref() {
+        target_files.retain(|file| file.path == *filter);
+        if target_files.is_empty() {
+            anyhow::bail!(
+                "File '{}' was not found in snapshot {}",
+                target_path.unwrap_or_default(),
+                snap_id_str
+            );
+        }
+    }
 
     // Build set of target paths
     let target_paths: HashSet<String> = target_files.iter().map(|f| f.path.clone()).collect();
 
     // Load current snapshot to determine what's tracked (only delete tracked files)
-    let current_tracked: HashSet<String> = if let Some(current_rowid) =
-        database.latest_snapshot_rowid(&project.hash)?
-    {
-        database
-            .get_snapshot_files(current_rowid)?
-            .iter()
-            .map(|f| f.path.clone())
-            .collect()
-    } else {
-        // No previous snapshot: treat existing files as potentially tracked
-        {
-            let mut set = HashSet::new();
-            for e in crate::ignore_rules::build_walker(project_path) {
-                if let Ok(ent) = e {
-                    if ent
-                        .file_type()
-                        .map_or(false, |ft| ft.is_file() || ft.is_symlink())
-                    {
-                        if let Ok(rel) = ent.path().strip_prefix(project_path) {
-                            set.insert(crate::cas::encode_relpath(rel));
+    let current_tracked: HashSet<String> =
+        if let Some(current_rowid) = database.latest_snapshot_rowid(&project.hash)? {
+            database
+                .get_snapshot_files(current_rowid)?
+                .iter()
+                .map(|f| f.path.clone())
+                .collect()
+        } else {
+            // No previous snapshot: treat existing files as potentially tracked
+            {
+                let mut set = HashSet::new();
+                for e in crate::ignore_rules::build_walker(project_path) {
+                    if let Ok(ent) = e {
+                        if ent
+                            .file_type()
+                            .map_or(false, |ft| ft.is_file() || ft.is_symlink())
+                        {
+                            if let Ok(rel) = ent.path().strip_prefix(project_path) {
+                                set.insert(crate::cas::encode_relpath(rel));
+                            }
                         }
                     }
                 }
+                set
             }
-            set
-        }
-    };
+        };
 
     let mut to_delete: Vec<String> = Vec::new();
     let mut to_restore: Vec<(std::path::PathBuf, String, bool, bool)> = Vec::new(); // (path, hash, executable, is_symlink)
 
     let mut cleanup_staging: Option<std::path::PathBuf> = None;
 
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<RestoreOutcome> {
         // Files to delete: in current manifest but not in target manifest
-        for path in &current_tracked {
-            if !target_paths.contains(path) {
-                to_delete.push(path.clone());
+        if let Some(filter) = target_filter.as_ref() {
+            if current_tracked.contains(filter) && !target_paths.contains(filter) {
+                validate_restore_path(project_path, filter)?;
+                to_delete.push(filter.clone());
+            }
+        } else {
+            for path in &current_tracked {
+                if !target_paths.contains(path) {
+                    validate_restore_path(project_path, path)?;
+                    to_delete.push(path.clone());
+                }
             }
         }
 
@@ -179,12 +218,30 @@ pub fn cmd_restore(
         if dry_run {
             println!("Dry run — changes that would be applied:");
             for path in &to_delete {
-                println!("  DELETE {}", path);
+                println!("  DELETE {}", cas::decode_relpath_to_os(path).display());
             }
             for (path, _, _, _) in &to_restore {
                 println!("  RESTORE {}", path.display());
             }
-            return Ok(());
+            return Ok(RestoreOutcome {
+                snapshot_id: snap_id_str.clone(),
+                dry_run: true,
+                applied: false,
+                files_restored: to_restore.len(),
+                files_deleted: to_delete.len(),
+                files_to_restore: to_restore
+                    .iter()
+                    .map(|(path, _, _, _)| path.to_string_lossy().to_string())
+                    .collect(),
+                files_to_delete: to_delete
+                    .iter()
+                    .map(|path| {
+                        cas::decode_relpath_to_os(path)
+                            .to_string_lossy()
+                            .to_string()
+                    })
+                    .collect(),
+            });
         }
 
         if to_delete.len() > 10 && !force {
@@ -203,7 +260,15 @@ pub fn cmd_restore(
             std::io::stdin().read_line(&mut input)?;
             if !input.trim().eq_ignore_ascii_case("y") {
                 println!("Aborted.");
-                return Ok(());
+                return Ok(RestoreOutcome {
+                    snapshot_id: snap_id_str.clone(),
+                    dry_run: false,
+                    applied: false,
+                    files_restored: 0,
+                    files_deleted: 0,
+                    files_to_restore: Vec::new(),
+                    files_to_delete: Vec::new(),
+                });
             }
         }
 
@@ -241,7 +306,10 @@ pub fn cmd_restore(
             }
         }
         if !missing_blobs.is_empty() {
-            eprintln!("ERROR: {} blob(s) missing; aborting restore.", missing_blobs.len());
+            eprintln!(
+                "ERROR: {} blob(s) missing; aborting restore.",
+                missing_blobs.len()
+            );
             for (p, h) in missing_blobs.iter().take(10) {
                 let short = &h[..h.len().min(12)];
                 eprintln!("  - {} ({}...)", p, short);
@@ -250,9 +318,11 @@ pub fn cmd_restore(
         }
 
         let now = chrono::Utc::now();
-        let nanos_i64: i64 = now
-            .timestamp_nanos_opt()
-            .unwrap_or_else(|| ((now.timestamp() as i128) * 1_000_000_000).try_into().unwrap_or(0));
+        let nanos_i64: i64 = now.timestamp_nanos_opt().unwrap_or_else(|| {
+            ((now.timestamp() as i128) * 1_000_000_000)
+                .try_into()
+                .unwrap_or(0)
+        });
         let unique_suffix = format!("{}-{}", std::process::id(), nanos_i64);
         let restore_tmp = project_path.join(format!(".uhoh-restore-tmp-{}", unique_suffix));
         std::fs::create_dir_all(&restore_tmp)?;
@@ -266,7 +336,11 @@ pub fn cmd_restore(
         );
 
         for (path, hash, executable, is_symlink) in &to_restore {
-            if path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            if path.is_absolute()
+                || path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
                 tracing::warn!("Skipping suspicious path: {}", path.display());
                 continue;
             }
@@ -279,12 +353,20 @@ pub fn cmd_restore(
 
             if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
                 if meta.file_type().is_symlink() {
-                    anyhow::bail!("Refusing to overwrite symlinked file: {}", full_path.display());
+                    anyhow::bail!(
+                        "Refusing to overwrite symlinked file: {}",
+                        full_path.display()
+                    );
                 }
             }
 
-            let content = cas::read_blob(&blob_root, hash)?
-                .ok_or_else(|| anyhow::anyhow!("Blob {} missing for {}", &hash[..hash.len().min(12)], path.display()))?;
+            let content = cas::read_blob(&blob_root, hash)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Blob {} missing for {}",
+                    &hash[..hash.len().min(12)],
+                    path.display()
+                )
+            })?;
 
             if *is_symlink {
                 restore_symlink_target(&content, &full_path)?;
@@ -305,6 +387,7 @@ pub fn cmd_restore(
         bar.finish_and_clear();
 
         for path in &to_delete {
+            validate_restore_path(project_path, path)?;
             let dst = project_path.join(crate::cas::decode_relpath_to_os(path));
             if dst.is_file() {
                 let _ = std::fs::remove_file(&dst);
@@ -328,8 +411,13 @@ pub fn cmd_restore(
             } else {
                 let _ = std::fs::remove_file(&final_dest);
             }
-            std::fs::rename(&staged, &final_dest)
-                .with_context(|| format!("Failed to move {} -> {}", staged.display(), final_dest.display()))?;
+            std::fs::rename(&staged, &final_dest).with_context(|| {
+                format!(
+                    "Failed to move {} -> {}",
+                    staged.display(),
+                    final_dest.display()
+                )
+            })?;
         }
 
         let _ = std::fs::remove_dir_all(&restore_tmp);
@@ -345,29 +433,48 @@ pub fn cmd_restore(
                 }
             }
             if root != base {
-                if std::fs::read_dir(root).map(|mut it| it.next().is_none()).unwrap_or(false) {
+                if std::fs::read_dir(root)
+                    .map(|mut it| it.next().is_none())
+                    .unwrap_or(false)
+                {
                     let _ = std::fs::remove_dir(root);
                 }
             }
         }
         remove_empty_dirs(project_path, project_path);
 
-        Ok(())
+        Ok(RestoreOutcome {
+            snapshot_id: snap_id_str.clone(),
+            dry_run: false,
+            applied: true,
+            files_restored: to_restore.len(),
+            files_deleted: to_delete.len(),
+            files_to_restore: to_restore
+                .iter()
+                .map(|(path, _, _, _)| path.to_string_lossy().to_string())
+                .collect(),
+            files_to_delete: to_delete
+                .iter()
+                .map(|path| {
+                    cas::decode_relpath_to_os(path)
+                        .to_string_lossy()
+                        .to_string()
+                })
+                .collect(),
+        })
     })();
 
     if let Some(staging) = cleanup_staging {
         let _ = std::fs::remove_dir_all(staging);
     }
 
-    result?;
+    let outcome = result?;
+    if outcome.applied {
+        println!(
+            "Restored to snapshot {} ({} files restored, {} deleted)",
+            outcome.snapshot_id, outcome.files_restored, outcome.files_deleted
+        );
+    }
 
-    let snap_id_str = cas::id_to_base58(snap.snapshot_id);
-    println!(
-        "Restored to snapshot {} ({} files restored, {} deleted)",
-        snap_id_str,
-        to_restore.len(),
-        to_delete.len()
-    );
-
-    Ok(())
+    Ok(outcome)
 }

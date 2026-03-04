@@ -65,7 +65,10 @@ pub fn resolve_project(
     }
 
     if projects.len() == 1 {
-        return Ok(projects.into_iter().next().expect("single project exists"));
+        if let Some(project) = projects.first() {
+            let project = project.clone();
+            return Ok(project);
+        }
     }
 
     bail!(

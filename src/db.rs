@@ -199,8 +199,12 @@ impl Database {
         }
 
         if version < 3 {
-            let _ = conn.execute_batch("ALTER TABLE snapshots ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;");
-            let _ = conn.execute_batch("ALTER TABLE snapshot_files ADD COLUMN is_symlink INTEGER NOT NULL DEFAULT 0;");
+            let _ = conn.execute_batch(
+                "ALTER TABLE snapshots ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;",
+            );
+            let _ = conn.execute_batch(
+                "ALTER TABLE snapshot_files ADD COLUMN is_symlink INTEGER NOT NULL DEFAULT 0;",
+            );
             conn.execute_batch("PRAGMA user_version = 3;")?;
         }
 
@@ -241,7 +245,7 @@ impl Database {
                 );
                 INSERT OR IGNORE INTO stats (key, value) VALUES ('blob_bytes', 0);
                 PRAGMA user_version = 5;
-                "
+                ",
             )?;
         }
 
@@ -257,7 +261,7 @@ impl Database {
                     file_paths
                 );
                 PRAGMA user_version = 6;
-                "
+                ",
             )?;
         }
 
@@ -316,7 +320,14 @@ impl Database {
         // Escape SQL wildcards in user-provided prefix
         let mut esc = String::new();
         for ch in prefix.chars() {
-            match ch { '%' | '_' => { esc.push('['); esc.push(ch); esc.push(']'); } _ => esc.push(ch) }
+            match ch {
+                '%' | '_' => {
+                    esc.push('[');
+                    esc.push(ch);
+                    esc.push(']');
+                }
+                _ => esc.push(ch),
+            }
         }
         let pattern = format!("{}%", esc);
 
@@ -329,7 +340,8 @@ impl Database {
         if count > 1 {
             anyhow::bail!(
                 "Ambiguous hash prefix '{}' matches {} projects. Use a longer prefix.",
-                prefix, count
+                prefix,
+                count
             );
         }
 
@@ -377,14 +389,18 @@ impl Database {
 
     pub fn remove_project(&self, hash: &str) -> Result<()> {
         let conn = self.conn();
+        conn.execute(
+            "DELETE FROM search_index WHERE project_hash = ?1",
+            params![hash],
+        )?;
         conn.execute("DELETE FROM projects WHERE hash = ?1", params![hash])?;
         Ok(())
     }
 
     pub fn list_projects(&self) -> Result<Vec<ProjectEntry>> {
         let conn = self.conn();
-        let mut stmt =
-            conn.prepare("SELECT hash, current_path, created_at FROM projects ORDER BY created_at")?;
+        let mut stmt = conn
+            .prepare("SELECT hash, current_path, created_at FROM projects ORDER BY created_at")?;
         let rows = stmt.query_map([], |row| {
             Ok(ProjectEntry {
                 hash: row.get(0)?,
@@ -446,12 +462,21 @@ impl Database {
                 params![id + 1, project_hash],
             )?;
             id
-        } else { snapshot_id };
+        } else {
+            snapshot_id
+        };
 
         tx.execute(
             "INSERT INTO snapshots (project_hash, snapshot_id, timestamp, trigger, message, pinned)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![project_hash, snapshot_id, timestamp, trigger, message, pinned as i32],
+            params![
+                project_hash,
+                snapshot_id,
+                timestamp,
+                trigger,
+                message,
+                pinned as i32
+            ],
         )?;
         let rowid = tx.last_insert_rowid();
 
@@ -460,7 +485,17 @@ impl Database {
                 "INSERT INTO snapshot_files (snapshot_rowid, path, hash, size, stored, executable, mtime, storage_method, is_symlink)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
-            for SnapFileEntry { path, hash, size, stored, executable, mtime, storage_method, is_symlink } in files {
+            for SnapFileEntry {
+                path,
+                hash,
+                size,
+                stored,
+                executable,
+                mtime,
+                storage_method,
+                is_symlink,
+            } in files
+            {
                 file_stmt.execute(params![
                     rowid,
                     path,
@@ -481,7 +516,14 @@ impl Database {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for (path, hash, size, stored, storage_method) in deleted {
-                del_stmt.execute(params![rowid, path, hash, size, *stored as i32, storage_method])?;
+                del_stmt.execute(params![
+                    rowid,
+                    path,
+                    hash,
+                    size,
+                    *stored as i32,
+                    storage_method
+                ])?;
             }
         }
 
@@ -598,7 +640,8 @@ impl Database {
                         file_count: row.get::<_, i64>(6)? as u64,
                     })
                 })?;
-                rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(Into::into)
             }
             (Some(from), None) => {
                 let mut stmt = conn.prepare(
@@ -619,7 +662,8 @@ impl Database {
                         file_count: row.get::<_, i64>(6)? as u64,
                     })
                 })?;
-                rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(Into::into)
             }
             (None, Some(to)) => {
                 let mut stmt = conn.prepare(
@@ -640,7 +684,8 @@ impl Database {
                         file_count: row.get::<_, i64>(6)? as u64,
                     })
                 })?;
-                rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(Into::into)
             }
             (Some(from), Some(to)) => {
                 let mut stmt = conn.prepare(
@@ -661,7 +706,8 @@ impl Database {
                         file_count: row.get::<_, i64>(6)? as u64,
                     })
                 })?;
-                rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(Into::into)
             }
         }
     }
@@ -708,8 +754,7 @@ impl Database {
         project_hash: &str,
         base58_id: &str,
     ) -> Result<Option<SnapshotRow>> {
-        let snapshot_id = crate::cas::base58_to_id(base58_id)
-            .context("Invalid snapshot ID")?;
+        let snapshot_id = crate::cas::base58_to_id(base58_id).context("Invalid snapshot ID")?;
         let conn = self.conn();
         conn.query_row(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
@@ -750,7 +795,16 @@ impl Database {
             let mtime = row.get::<_, Option<i64>>(5).ok().flatten();
             let storage_method = row.get::<_, i64>(6).unwrap_or(1);
             let is_symlink = row.get::<_, Option<i32>>(7).ok().flatten().unwrap_or(0) != 0;
-            Ok(FileEntryRow { path, hash, size, stored, executable, mtime, storage_method, is_symlink })
+            Ok(FileEntryRow {
+                path,
+                hash,
+                size,
+                stored,
+                executable,
+                mtime,
+                storage_method,
+                is_symlink,
+            })
         })?;
         let mut entries = Vec::new();
         for row in rows {
@@ -770,7 +824,16 @@ impl Database {
             let size = row.get::<_, i64>(2)? as u64;
             let stored = row.get::<_, i32>(3)? != 0;
             let storage_method = row.get::<_, i64>(4).unwrap_or(1);
-            Ok(FileEntryRow { path, hash, size, stored, executable: false, mtime: None, storage_method, is_symlink: false })
+            Ok(FileEntryRow {
+                path,
+                hash,
+                size,
+                stored,
+                executable: false,
+                mtime: None,
+                storage_method,
+                is_symlink: false,
+            })
         })?;
         let mut entries = Vec::new();
         for row in rows {
@@ -830,7 +893,8 @@ impl Database {
         for row in rows {
             set.insert(row?);
         }
-        let mut stmt2 = conn.prepare("SELECT DISTINCT hash FROM snapshot_deleted WHERE stored = 1")?;
+        let mut stmt2 =
+            conn.prepare("SELECT DISTINCT hash FROM snapshot_deleted WHERE stored = 1")?;
         let rows2 = stmt2.query_map([], |row| row.get::<_, String>(0))?;
         for row in rows2 {
             set.insert(row?);
@@ -841,6 +905,10 @@ impl Database {
     /// Delete old snapshots (used by compaction)
     pub fn delete_snapshot(&self, rowid: i64) -> Result<()> {
         let conn = self.conn();
+        conn.execute(
+            "DELETE FROM search_index WHERE snapshot_rowid = ?1",
+            params![rowid],
+        )?;
         conn.execute("DELETE FROM snapshots WHERE rowid = ?1", params![rowid])?;
         Ok(())
     }
@@ -997,10 +1065,17 @@ impl Database {
              LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })?;
         let mut out = Vec::new();
-        for r in rows { out.push(r?); }
+        for r in rows {
+            out.push(r?);
+        }
         Ok(out)
     }
 
@@ -1019,11 +1094,13 @@ impl Database {
             "UPDATE pending_ai_summaries SET attempts = attempts + 1 WHERE snapshot_rowid = ?1",
             params![snapshot_rowid],
         )?;
-        let attempts: i64 = conn.query_row(
-            "SELECT attempts FROM pending_ai_summaries WHERE snapshot_rowid = ?1",
-            params![snapshot_rowid],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let attempts: i64 = conn
+            .query_row(
+                "SELECT attempts FROM pending_ai_summaries WHERE snapshot_rowid = ?1",
+                params![snapshot_rowid],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         Ok(attempts)
     }
 
@@ -1113,7 +1190,16 @@ impl Database {
     pub fn list_operations(
         &self,
         project_hash: &str,
-    ) -> Result<Vec<(i64, String, String, Option<String>, Option<u64>, Option<u64>)>> {
+    ) -> Result<
+        Vec<(
+            i64,
+            String,
+            String,
+            Option<String>,
+            Option<u64>,
+            Option<u64>,
+        )>,
+    > {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, label, started_at, ended_at, first_snapshot_id, last_snapshot_id
@@ -1216,7 +1302,9 @@ impl Database {
             })
         })?;
         let mut snapshots = Vec::new();
-        for row in rows { snapshots.push(row?); }
+        for row in rows {
+            snapshots.push(row?);
+        }
         Ok(snapshots)
     }
 
@@ -1292,7 +1380,7 @@ pub struct SnapFileEntry {
     pub executable: bool,
     pub mtime: Option<i64>,
     pub storage_method: i64,
-        pub is_symlink: bool,
-    }
+    pub is_symlink: bool,
+}
 pub type DeletedFile = (String, String, u64, bool, i64); // (path, hash, size, stored, storage_method)
 pub type TreeHash = (String, String); // (dir_path, tree_hash)

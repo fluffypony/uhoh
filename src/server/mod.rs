@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::config::ServerConfig;
 use crate::db::Database;
@@ -62,10 +63,22 @@ pub async fn start_server(
             "/api/v1/projects/:hash/snapshots",
             get(api::list_snapshots).post(api::create_snapshot),
         )
-        .route("/api/v1/projects/:hash/snapshots/:id/files", get(api::get_snapshot_files))
-        .route("/api/v1/projects/:hash/snapshots/:id/diff", get(api::get_diff))
-        .route("/api/v1/projects/:hash/snapshots/:id/file/*path", get(api::get_file_content))
-        .route("/api/v1/projects/:hash/restore/:id", post(api::restore_snapshot))
+        .route(
+            "/api/v1/projects/:hash/snapshots/:id/files",
+            get(api::get_snapshot_files),
+        )
+        .route(
+            "/api/v1/projects/:hash/snapshots/:id/diff",
+            get(api::get_diff),
+        )
+        .route(
+            "/api/v1/projects/:hash/snapshots/:id/file/*path",
+            get(api::get_file_content),
+        )
+        .route(
+            "/api/v1/projects/:hash/restore/:id",
+            post(api::restore_snapshot),
+        )
         .route("/api/v1/search", get(api::search))
         .route("/api/v1/projects/:hash/timeline", get(api::get_timeline))
         .route("/ws", get(ws::websocket_handler))
@@ -75,7 +88,17 @@ pub async fn start_server(
         app = app.fallback(get(serve_ui));
     }
 
-    app = app.route_layer(middleware::from_fn_with_state(config.port, host_validation_middleware));
+    app = app.layer(
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any),
+    );
+
+    app = app.route_layer(middleware::from_fn_with_state(
+        config.port,
+        host_validation_middleware,
+    ));
 
     if config.require_auth {
         app = app
@@ -85,7 +108,9 @@ pub async fn start_server(
     let app = app.with_state(state.clone());
 
     let bind_addr = format!("{}:{}", config.bind_address, config.port);
-    let addr: SocketAddr = bind_addr.parse().map_err(|_| anyhow::anyhow!("Invalid bind address"))?;
+    let addr: SocketAddr = bind_addr
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid bind address"))?;
     if !addr.ip().is_loopback() {
         anyhow::bail!("Server must bind to loopback for security");
     }

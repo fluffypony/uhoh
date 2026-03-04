@@ -1,9 +1,4 @@
-use axum::{
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -99,7 +94,11 @@ fn tool_definitions() -> Value {
                         "path": { "type": "string" },
                         "project_hash": { "type": "string" },
                         "dry_run": { "type": "boolean", "default": true },
-                        "confirm": { "type": "boolean", "default": false }
+                        "confirm": { "type": "boolean", "default": false },
+                        "target_path": {
+                            "type": "string",
+                            "description": "Optional single file path to restore within the snapshot"
+                        }
                     },
                     "required": ["snapshot_id"]
                 }
@@ -110,9 +109,20 @@ fn tool_definitions() -> Value {
 
 pub async fn handle_mcp(
     State(state): State<AppState>,
-    _headers: HeaderMap,
+    headers: axum::http::HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
+    if !super::auth::validate_host(&headers, state.config.server.port) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(JsonRpcResponse::error(
+                request.id,
+                -32600,
+                "Invalid Host header".to_string(),
+            )),
+        );
+    }
+
     if request.jsonrpc != "2.0" {
         return (
             StatusCode::BAD_REQUEST,
@@ -150,7 +160,11 @@ pub async fn handle_mcp(
     (StatusCode::OK, Json(response))
 }
 
-async fn handle_tools_call(state: AppState, id: Option<Value>, params: Option<Value>) -> JsonRpcResponse {
+async fn handle_tools_call(
+    state: AppState,
+    id: Option<Value>,
+    params: Option<Value>,
+) -> JsonRpcResponse {
     let params = match params {
         Some(v) => v,
         None => return JsonRpcResponse::error(id, -32602, "Missing params".to_string()),
@@ -171,9 +185,18 @@ async fn tool_create_snapshot(state: AppState, id: Option<Value>, args: Value) -
     let cfg = state.config.clone();
     let uhoh_dir = state.uhoh_dir.clone();
     let event_tx = state.event_tx.clone();
-    let path = args.get("path").and_then(|v| v.as_str()).map(str::to_string);
-    let hash = args.get("project_hash").and_then(|v| v.as_str()).map(str::to_string);
-    let message = args.get("message").and_then(|v| v.as_str()).map(str::to_string);
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let hash = args
+        .get("project_hash")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let message = args
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
         let project = resolve::resolve_project(&db, path.as_deref().or(hash.as_deref()), None)?;
@@ -223,8 +246,14 @@ async fn tool_create_snapshot(state: AppState, id: Option<Value>, args: Value) -
 
 async fn tool_list_snapshots(state: AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
     let db = state.database.clone();
-    let path = args.get("path").and_then(|v| v.as_str()).map(str::to_string);
-    let hash = args.get("project_hash").and_then(|v| v.as_str()).map(str::to_string);
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let hash = args
+        .get("project_hash")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
@@ -266,8 +295,18 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
         Some(v) => v.to_string(),
         None => return JsonRpcResponse::error(id, -32602, "Missing snapshot_id".to_string()),
     };
-    let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(true);
-    let confirm = args.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let confirm = args
+        .get("confirm")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let target_path = args
+        .get("target_path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     if !dry_run && !confirm {
         return JsonRpcResponse::error(
             id,
@@ -277,8 +316,15 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
     }
 
     let db = state.database.clone();
-    let path = args.get("path").and_then(|v| v.as_str()).map(str::to_string);
-    let hash = args.get("project_hash").and_then(|v| v.as_str()).map(str::to_string);
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let hash = args
+        .get("project_hash")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let target_path_for_task = target_path.clone();
     let path_for_lock = path.clone();
     let hash_for_lock = hash.clone();
     let uhoh_dir = state.uhoh_dir.clone();
@@ -304,49 +350,66 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
         let project = resolve::resolve_project(&db, path.as_deref().or(hash.as_deref()), None)?;
-
-        if dry_run {
-            crate::restore::cmd_restore(
-                &uhoh_dir,
-                &db,
-                &project,
-                &snapshot_id,
-                true,
-                true,
-            )?;
-            return Ok(json!({
-                "content": [{"type":"text", "text": format!("Dry run complete for snapshot {}", snapshot_id)}],
-                "dry_run": true,
-            }));
+        if let Some(tp) = target_path_for_task.as_deref() {
+            resolve::validate_path_within_project(std::path::Path::new(&project.current_path), tp)?;
         }
 
-        loop {
-            if !restore_in_progress.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                break;
+        struct RestoreFlagGuard {
+            flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Drop for RestoreFlagGuard {
+            fn drop(&mut self) {
+                self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let restore_result = crate::restore::cmd_restore(
+
+        let _restore_guard = if !dry_run {
+            loop {
+                if !restore_in_progress.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Some(RestoreFlagGuard {
+                flag: restore_in_progress.clone(),
+            })
+        } else {
+            None
+        };
+
+        let outcome = crate::restore::cmd_restore(
             &uhoh_dir,
             &db,
             &project,
             &snapshot_id,
-            false,
+            target_path_for_task.as_deref(),
+            dry_run,
             true,
-        );
-        restore_in_progress.store(false, std::sync::atomic::Ordering::SeqCst);
-        restore_result?;
+        )?;
 
-        let _ = event_tx.send(crate::server::events::ServerEvent::SnapshotRestored {
-            project_hash: project.hash,
-            snapshot_id: snapshot_id.clone(),
-            files_modified: 0,
-            files_deleted: 0,
-        });
+        if !dry_run && outcome.applied {
+            let _ = event_tx.send(crate::server::events::ServerEvent::SnapshotRestored {
+                project_hash: project.hash,
+                snapshot_id: outcome.snapshot_id.clone(),
+                files_modified: outcome.files_restored,
+                files_deleted: outcome.files_deleted,
+            });
+        }
 
         Ok(json!({
-            "content": [{"type":"text", "text": format!("Snapshot {} restored", snapshot_id)}],
-            "restored": true,
+            "content": [{"type":"text", "text": if dry_run {
+                format!("Dry run complete for snapshot {}", snapshot_id)
+            } else if outcome.applied {
+                format!("Snapshot {} restored", snapshot_id)
+            } else {
+                format!("Restore for snapshot {} was not applied", snapshot_id)
+            }}],
+            "restored": outcome.applied,
+            "dry_run": outcome.dry_run,
+            "files_modified": outcome.files_restored,
+            "files_deleted": outcome.files_deleted,
+            "files_to_modify": outcome.files_to_restore,
+            "files_to_delete": outcome.files_to_delete,
         }))
     })
     .await;

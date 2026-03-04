@@ -17,7 +17,9 @@ pub fn cmd_mark(database: &Database, project: &ProjectEntry, label: &str) -> Res
             .map(|s| s.snapshot_id)
             .unwrap_or(0);
         database.close_operation_with_last(op_id, latest)?;
-        tracing::info!("Closed previous active operation at {}",{ cas::id_to_base58(latest) });
+        tracing::info!("Closed previous active operation at {}", {
+            cas::id_to_base58(latest)
+        });
     }
 
     // Start a new operation and set its first_snapshot_id to current latest snapshot
@@ -29,7 +31,11 @@ pub fn cmd_mark(database: &Database, project: &ProjectEntry, label: &str) -> Res
         .unwrap_or(0);
     database.set_operation_first_snapshot(op_id, current)?;
 
-    println!("Operation marked: \"{}\" (from snapshot {})", label, cas::id_to_base58(current));
+    println!(
+        "Operation marked: \"{}\" (from snapshot {})",
+        label,
+        cas::id_to_base58(current)
+    );
     println!("Changes until the next `uhoh mark` or `uhoh undo` will be grouped.");
     Ok(())
 }
@@ -43,7 +49,11 @@ pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) ->
             .map(|s| s.snapshot_id)
             .unwrap_or(0);
         database.close_operation_with_last(op_id, latest)?;
-        tracing::info!("Closed active operation: {} at {}", label, cas::id_to_base58(latest));
+        tracing::info!(
+            "Closed active operation: {} at {}",
+            label,
+            cas::id_to_base58(latest)
+        );
     }
 
     // Find the last completed operation
@@ -61,18 +71,20 @@ pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) ->
     match restore_snap {
         Some(snap) => {
             let id_str = cas::id_to_base58(snap.snapshot_id);
-            println!("Undoing operation \"{}\": restoring to snapshot {}", label, id_str);
+            println!(
+                "Undoing operation \"{}\": restoring to snapshot {}",
+                label, id_str
+            );
             crate::restore::cmd_restore(
-                uhoh_dir,
-                database,
-                project,
-                &id_str,
-                false,
+                uhoh_dir, database, project, &id_str, None, false,
                 true, // force (since this is an undo, we're intentional)
             )?;
         }
         None => {
-            println!("No snapshot found before operation \"{}\". Cannot undo.", label);
+            println!(
+                "No snapshot found before operation \"{}\". Cannot undo.",
+                label
+            );
         }
     }
 
@@ -87,12 +99,23 @@ pub fn cmd_list_operations(database: &Database, project: &ProjectEntry) -> Resul
     }
     println!("Operations for {}:", project.current_path);
     for (id, label, started, ended, first_snap, last_snap) in &ops {
-        let status = if ended.is_some() { "completed" } else { "active" };
+        let status = if ended.is_some() {
+            "completed"
+        } else {
+            "active"
+        };
         let snap_range = match (first_snap, last_snap) {
-            (Some(f), Some(l)) => format!("snapshots {}..{}", cas::id_to_base58(*f), cas::id_to_base58(*l)),
+            (Some(f), Some(l)) => format!(
+                "snapshots {}..{}",
+                cas::id_to_base58(*f),
+                cas::id_to_base58(*l)
+            ),
             _ => "no snapshots".to_string(),
         };
-        println!("  #{} [{}] \"{}\" started={} {}", id, status, label, started, snap_range);
+        println!(
+            "  #{} [{}] \"{}\" started={} {}",
+            id, status, label, started, snap_range
+        );
     }
     Ok(())
 }
