@@ -1126,8 +1126,18 @@ fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Resul
             session: _,
             cascade,
         } => {
-            if let Some(id) = cascade.or(*event_id) {
-                database.event_ledger_mark_resolved(id)?;
+            if let Some(root_id) = *cascade {
+                let ids = database.event_ledger_descendant_ids(root_id)?;
+                for id in &ids {
+                    database.event_ledger_mark_resolved(*id)?;
+                }
+                println!(
+                    "Marked event #{} and {} downstream event(s) as resolved",
+                    root_id,
+                    ids.len().saturating_sub(1)
+                );
+            } else if let Some(id) = event_id {
+                database.event_ledger_mark_resolved(*id)?;
                 println!("Marked event #{} as resolved", id);
             } else {
                 anyhow::bail!("Provide event id or --cascade");

@@ -1815,6 +1815,27 @@ impl Database {
         Ok(())
     }
 
+    pub fn event_ledger_descendant_ids(&self, root_id: i64) -> Result<Vec<i64>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE descendants(id) AS (
+                 SELECT ?1
+                 UNION ALL
+                 SELECT e.id
+                 FROM event_ledger e
+                 JOIN descendants d ON e.causal_parent = d.id
+             )
+             SELECT id FROM descendants",
+        )?;
+
+        let rows = stmt.query_map(params![root_id], |row| row.get::<_, i64>(0))?;
+        let mut out = Vec::new();
+        for id in rows {
+            out.push(id?);
+        }
+        Ok(out)
+    }
+
     pub fn add_db_guard(
         &self,
         name: &str,

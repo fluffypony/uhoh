@@ -223,3 +223,21 @@ fn cli_timeline_source_filter_and_since_window() {
     assert!(stdout_all.contains("db_guard"));
     assert!(stdout_all.contains("agent"));
 }
+
+#[test]
+fn cli_agent_undo_cascade_marks_descendants_resolved() {
+    let (home, root, child) = make_cli_home_with_events();
+
+    let (ok, stdout, _stderr) = run_cli(
+        home.path(),
+        &["agent", "undo", "--cascade", &root.to_string()],
+    );
+    assert!(ok);
+    assert!(stdout.contains("downstream event"));
+
+    let db = Database::open(&home.path().join(".uhoh/uhoh.db")).unwrap();
+    let root_row = db.event_ledger_get(root).unwrap().unwrap();
+    let child_row = db.event_ledger_get(child).unwrap().unwrap();
+    assert!(root_row.resolved);
+    assert!(child_row.resolved);
+}
