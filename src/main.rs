@@ -405,7 +405,7 @@ async fn run_zero_verb() -> Result<()> {
                 restore::cmd_restore(&uhoh, &database, &project, &id_str, false, true)?;
                 println!("Reverted to snapshot {}", id_str);
             } else {
-                println!("No previous snapshot to revert to.");
+                println!("No previous snapshot to revert to; quick snapshot saved.");
             }
         }
         return Ok(());

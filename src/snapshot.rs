@@ -390,6 +390,9 @@ fn is_likely_git_operation(project_path: &Path) -> bool {
         git_dir.join("REBASE_HEAD"),
         git_dir.join("CHERRY_PICK_HEAD"),
         git_dir.join("BISECT_LOG"),
+        git_dir.join("ORIG_HEAD"),
+        git_dir.join("refs/stash"),
+        git_dir.join("logs/refs/stash"),
     ];
     for indicator in &indicators {
         if let Ok(meta) = std::fs::metadata(indicator) {
