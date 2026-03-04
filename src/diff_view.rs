@@ -102,7 +102,7 @@ pub fn cmd_diff(
             continue;
         }
 
-        let display_path = if let Some(rest) = path.strip_prefix("b64:") {
+        let display_path = if path.strip_prefix("b64:").is_some() {
             let os = crate::cas::decode_relpath_to_os(path);
             os.to_string_lossy().into_owned()
         } else { path.to_string() };

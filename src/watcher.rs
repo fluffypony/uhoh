@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::PathBuf;
-use tokio::sync::mpsc;
 
 use crate::daemon::WatchEvent;
 

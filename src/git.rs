@@ -107,7 +107,6 @@ pub fn cmd_gitstash(
             // Symlink mode handling (120000) if snapshot recorded it as non-executable and content looks like link
             let mode = if symlink_map.contains(path.as_str()) { "120000" } else if exec_map.contains(path.as_str()) { "100755" } else { "100644" };
             // Write NUL-terminated entries: "<mode> <hash>\t<path>\0"
-            use std::io::Write as _;
             write!(sin, "{} {}\t{}\0", mode, blob_hash, path)?;
     }
     }

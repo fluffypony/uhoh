@@ -102,22 +102,6 @@ fn resolve_target_project(
     }
 }
 
-fn dir_size(path: &std::path::Path) -> u64 {
-    let mut total = 0u64;
-    if let Ok(entries) = std::fs::read_dir(path) {
-        for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                if meta.is_dir() {
-                    total += dir_size(&entry.path());
-                } else {
-                    total += meta.len();
-                }
-            }
-        }
-    }
-    total
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -359,14 +343,12 @@ async fn main() -> Result<()> {
             let cfg = config::Config::load(&uhoh.join("config.toml")).unwrap_or_default();
             println!("AI: {}", if cfg.ai.enabled { "enabled" } else { "disabled" });
             // Inception loop guard: warn if project includes ~/.uhoh
-            if let Some(home) = dirs::home_dir() {
-                let uhoh_path = uhoh::uhoh_dir();
-                for p in &projects {
-                    let proj_path = std::path::Path::new(&p.current_path);
-                    if uhoh_path.starts_with(proj_path) {
-                        println!("Warning: Project {} includes the uhoh data directory; this may cause snapshot loops.", p.current_path);
-                        break;
-                    }
+            let uhoh_path = uhoh::uhoh_dir();
+            for p in &projects {
+                let proj_path = std::path::Path::new(&p.current_path);
+                if uhoh_path.starts_with(proj_path) {
+                    println!("Warning: Project {} includes the uhoh data directory; this may cause snapshot loops.", p.current_path);
+                    break;
                 }
             }
         }

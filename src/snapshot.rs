@@ -48,7 +48,6 @@ pub fn create_snapshot(
     // Track current path -> (hash, stored) for diff building
     let mut current_hashes: HashMap<String, (String, bool)> = HashMap::new();
 
-    let incremental = changed_paths.is_some();
     if let Some(paths) = changed_paths {
         // If any changed path is a directory or equals project root, fall back to full scan
         let mut requires_full = false;
@@ -478,35 +477,6 @@ fn load_previous_snapshot_files(
         }
     }
     Ok(map)
-}
-
-/// Check if .git/HEAD changed recently (indicating a branch switch).
-fn is_likely_git_operation(project_path: &Path) -> bool {
-    let git_dir = project_path.join(".git");
-    let now = std::time::SystemTime::now();
-    let threshold = std::time::Duration::from_secs(10);
-    let indicators = [
-        git_dir.join("HEAD"),
-        git_dir.join("index.lock"),
-        git_dir.join("MERGE_HEAD"),
-        git_dir.join("REBASE_HEAD"),
-        git_dir.join("CHERRY_PICK_HEAD"),
-        git_dir.join("BISECT_LOG"),
-        git_dir.join("ORIG_HEAD"),
-        git_dir.join("refs/stash"),
-        git_dir.join("logs/refs/stash"),
-    ];
-    for indicator in &indicators {
-        if let Ok(meta) = std::fs::metadata(indicator) {
-            if let Ok(mtime) = meta.modified() {
-                if let Ok(age) = now.duration_since(mtime) {
-                    if age < threshold { return true; }
-                }
-            }
-        }
-    }
-    if git_dir.join("index.lock").exists() { return true; }
-    false
 }
 
 // Tree hash computation removed to reduce overhead; table preserved for potential future use.

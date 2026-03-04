@@ -88,7 +88,7 @@ impl Database {
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         match self.conn.lock() {
             Ok(guard) => guard,
-            Err(poisoned) => {
+            Err(_poisoned) => {
                 tracing::error!("Database mutex poisoned. Aborting to avoid inconsistent state.");
                 std::process::abort();
             }

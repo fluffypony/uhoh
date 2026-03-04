@@ -323,7 +323,10 @@ pub fn encode_relpath(rel: &Path) -> String {
         let bytes: &[u8] = unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
         return format!("b64:{}", base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes));
     }
-    normalize_path(rel)
+    #[cfg(not(any(unix, windows)))]
+    {
+        normalize_path(rel)
+    }
 }
 
 /// Decode a manifest relative path back to a platform OsString.
