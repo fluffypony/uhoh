@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::SeekFrom;
 use std::path::Path;
 
 use anyhow::Result;
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 
 use crate::db::AgentEntry;
 use crate::event_ledger::new_event;
@@ -29,27 +29,27 @@ pub async fn run_session_tailers_async(ctx: &SubsystemContext, agents: &[AgentEn
             };
 
             let entry = offsets.entry(agent.name.clone()).or_insert(0);
-            *entry = tail_one_file(ctx, agent, &session_path, *entry)?;
+            *entry = async_tail_one_file(ctx, agent, &session_path, *entry).await?;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 
-fn tail_one_file(
+async fn async_tail_one_file(
     ctx: &SubsystemContext,
     agent: &AgentEntry,
     path: &Path,
     offset: u64,
 ) -> Result<u64> {
-    let file = File::open(path)?;
+    let file = tokio::fs::File::open(path).await?;
     let mut reader = BufReader::new(file);
-    reader.seek(SeekFrom::Start(offset))?;
+    reader.seek(SeekFrom::Start(offset)).await?;
 
     let mut new_offset = offset;
     let mut carry = String::new();
     loop {
         let mut line = String::new();
-        let bytes = reader.read_line(&mut line)?;
+        let bytes = reader.read_line(&mut line).await?;
         if bytes == 0 {
             break;
         }
@@ -60,14 +60,14 @@ fn tail_one_file(
         }
         let raw = std::mem::take(&mut carry);
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw.trim()) {
-            process_jsonl_event(ctx, agent, &json)?;
+            process_jsonl_event(ctx, agent, &json).await?;
         }
     }
 
     Ok(new_offset)
 }
 
-fn process_jsonl_event(
+async fn process_jsonl_event(
     ctx: &SubsystemContext,
     agent: &AgentEntry,
     event: &serde_json::Value,
@@ -91,7 +91,7 @@ fn process_jsonl_event(
     if let Some(path) = target_path.as_deref() {
         let p = Path::new(path);
         if p.exists() {
-            let bytes = std::fs::read(p)?;
+            let bytes = tokio::fs::read(p).await?;
             let (hash, _) = crate::cas::store_blob(&ctx.uhoh_dir.join("blobs"), &bytes)?;
             pre_state_ref = Some(hash);
         }

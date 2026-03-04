@@ -69,11 +69,13 @@ fn event(
 async fn subsystem_manager_starts_reports_health_and_shuts_down() {
     let (tmp, db) = temp_db();
     let ledger = EventLedger::new(db.clone());
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
     let ctx = SubsystemContext {
         database: db,
         event_ledger: ledger,
         config: uhoh::config::Config::default(),
         uhoh_dir: tmp.path().to_path_buf(),
+        server_event_tx: event_tx,
     };
 
     let counters = TestCounters {
@@ -375,4 +377,30 @@ fn recovery_module_uses_machine_master_key_fallback_not_user_hostname() {
     assert!(source.contains("load_or_create_machine_key"));
     assert!(!source.contains("HOSTNAME"));
     assert!(!source.contains("uhoh:{}:{}"));
+}
+
+#[test]
+fn agent_subsystem_escalates_panics_to_failed_health_state() {
+    let source = std::fs::read_to_string("src/agent/mod.rs").expect("read agent subsystem");
+    assert!(source.contains("fatal_error: Option<String>"));
+    assert!(source.contains("SubsystemHealth::Failed(message.clone())"));
+    assert!(source.contains("task panicked"));
+}
+
+#[test]
+fn intercept_tailer_uses_async_fs_and_sleep_primitives() {
+    let source = std::fs::read_to_string("src/agent/intercept.rs").expect("read intercept tailer");
+    assert!(source.contains("tokio::fs::File::open"));
+    assert!(source.contains("tokio::fs::read"));
+    assert!(source.contains("tokio::time::sleep"));
+    assert!(!source.contains("std::thread::sleep"));
+}
+
+#[test]
+fn daemon_registers_maintenance_subsystem_for_compaction_backup_ai() {
+    let source = std::fs::read_to_string("src/daemon.rs").expect("read daemon");
+    assert!(source.contains("struct DaemonMaintenanceSubsystem"));
+    assert!(source.contains("subsystem_manager_inner.register(Box::new(DaemonMaintenanceSubsystem::new(&config)))"));
+    assert!(source.contains("fn name(&self) -> &str"));
+    assert!(source.contains("\"daemon_maintenance\""));
 }

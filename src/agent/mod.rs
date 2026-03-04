@@ -22,6 +22,7 @@ use crate::subsystem::{AuditSource, Subsystem, SubsystemContext, SubsystemHealth
 
 pub struct AgentSubsystem {
     healthy: bool,
+    fatal_error: Option<String>,
     intercept_started: bool,
     fanotify_started: bool,
     proxy_started: bool,
@@ -36,6 +37,7 @@ impl AgentSubsystem {
     pub fn new() -> Self {
         Self {
             healthy: true,
+            fatal_error: None,
             intercept_started: false,
             fanotify_started: false,
             proxy_started: false,
@@ -114,6 +116,9 @@ impl Subsystem for AgentSubsystem {
     }
 
     fn health_check(&self) -> SubsystemHealth {
+        if let Some(message) = &self.fatal_error {
+            return SubsystemHealth::Failed(message.clone());
+        }
         if self.healthy {
             if self.fanotify_started {
                 SubsystemHealth::HealthyWithAudit(AuditSource::Fanotify)
@@ -152,12 +157,14 @@ impl AgentSubsystem {
                         self.background_failures
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         self.healthy = false;
+                        self.fatal_error = Some(format!("session tailer task failed: {err}"));
                         tracing::error!("session tailer task failed: {err}");
                     }
                     Err(err) => {
                         self.background_failures
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         self.healthy = false;
+                        self.fatal_error = Some(format!("session tailer task panicked: {err}"));
                         tracing::error!("session tailer task panicked: {err}");
                     }
                 }
@@ -178,12 +185,14 @@ impl AgentSubsystem {
                         self.background_failures
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         self.healthy = false;
+                        self.fatal_error = Some(format!("mcp proxy task failed: {err}"));
                         tracing::error!("mcp proxy task failed: {err}");
                     }
                     Err(err) => {
                         self.background_failures
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         self.healthy = false;
+                        self.fatal_error = Some(format!("mcp proxy task panicked: {err}"));
                         tracing::error!("mcp proxy task panicked: {err}");
                     }
                 }
@@ -203,6 +212,7 @@ impl AgentSubsystem {
                     self.background_failures
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     self.healthy = false;
+                    self.fatal_error = Some(format!("fanotify task panicked: {err}"));
                     tracing::error!("fanotify task panicked: {err}");
                 }
             }

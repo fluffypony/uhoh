@@ -11,9 +11,21 @@ use crate::db::Database;
 use crate::event_ledger::EventLedger;
 
 #[derive(Debug, Clone)]
+pub enum AuditSource {
+    None,
+    Fanotify,
+    OpenBsm,
+}
+
+#[derive(Debug, Clone)]
 pub enum SubsystemHealth {
     Healthy,
+    HealthyWithAudit(AuditSource),
     Degraded(String),
+    DegradedWithAudit {
+        message: String,
+        source: AuditSource,
+    },
     Failed(String),
 }
 
@@ -23,6 +35,7 @@ pub struct SubsystemContext {
     pub event_ledger: EventLedger,
     pub config: crate::config::Config,
     pub uhoh_dir: std::path::PathBuf,
+    pub server_event_tx: tokio::sync::broadcast::Sender<crate::server::events::ServerEvent>,
 }
 
 #[async_trait]

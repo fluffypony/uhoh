@@ -13,14 +13,201 @@ use crate::db::Database;
 use crate::event_ledger::EventLedger;
 use crate::notifications::NotificationPipeline;
 use crate::snapshot;
-use crate::subsystem::{SubsystemContext, SubsystemManager};
+use crate::subsystem::{Subsystem, SubsystemContext, SubsystemHealth, SubsystemManager};
 use crate::watcher;
 use notify::{RecursiveMode, Watcher as _};
-// already imported above
-use once_cell::sync::Lazy;
-use std::sync::Mutex as StdMutex;
 
-const VACUUM_TIMEOUT_SECS: u64 = 30;
+struct DaemonMaintenanceSubsystem {
+    compaction_index: usize,
+    last_backup: Option<std::time::Instant>,
+    sidecar_check_interval: std::time::Duration,
+    last_sidecar_check: Option<std::time::Instant>,
+}
+
+impl DaemonMaintenanceSubsystem {
+    fn new(config: &Config) -> Self {
+        Self {
+            compaction_index: 0,
+            last_backup: None,
+            sidecar_check_interval: std::time::Duration::from_secs(
+                config.sidecar_update.check_interval_hours * 3600,
+            ),
+            last_sidecar_check: None,
+        }
+    }
+
+    async fn run_tick(&mut self, ctx: &SubsystemContext) {
+        let db_projects = {
+            let db = ctx.database.clone();
+            match tokio::task::spawn_blocking(move || db.list_projects()).await {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    tracing::warn!("Failed to poll projects on maintenance tick: {}", e);
+                    Vec::new()
+                }
+                Err(e) => {
+                    tracing::warn!("Failed joining maintenance project poll task: {:?}", e);
+                    Vec::new()
+                }
+            }
+        };
+
+        if !db_projects.is_empty() {
+            let db_path = ctx.uhoh_dir.join("uhoh.db");
+            let cfg = ctx.config.compaction.clone();
+            let idx = self.compaction_index;
+            let projects = db_projects.clone();
+            tokio::spawn(async move {
+                let freed = tokio::task::spawn_blocking(move || {
+                    let db = crate::db::Database::open(&db_path).ok();
+                    let mut freed = 0u64;
+                    if let Some(d) = db {
+                        let project = &projects[idx % projects.len()];
+                        if let Ok(f) = crate::compaction::compact_project(&d, &project.hash, &cfg) {
+                            freed = freed.saturating_add(f);
+                        }
+                    }
+                    freed
+                })
+                .await
+                .unwrap_or(0);
+                if freed > 100 * 1024 * 1024 {
+                    tracing::info!(
+                        "Compaction estimated freed {:.1} MB; triggering GC",
+                        freed as f64 / 1_048_576.0
+                    );
+                }
+            });
+            self.compaction_index = self.compaction_index.wrapping_add(1);
+        }
+
+        let backup_interval = std::time::Duration::from_secs(ctx.config.update.check_interval_hours * 3600);
+        let do_backup = self
+            .last_backup
+            .map(|t| t.elapsed() >= backup_interval)
+            .unwrap_or(true);
+        if do_backup {
+            let backups_dir = ctx.uhoh_dir.join("backups");
+            let _ = std::fs::create_dir_all(&backups_dir);
+            let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+            let backup_path = backups_dir.join(format!("uhoh-{ts}.db"));
+            let db_for_backup = ctx.database.clone();
+            let backup_path_cl = backup_path.clone();
+            let backup_res =
+                tokio::task::spawn_blocking(move || database_backup_to(&db_for_backup, &backup_path_cl)).await;
+            if let Err(e) = backup_res.unwrap_or_else(|e| Err(anyhow::anyhow!("{e:?}"))) {
+                tracing::warn!("Database backup failed: {}", e);
+            } else {
+                if let Ok(entries) = std::fs::read_dir(&backups_dir) {
+                    let mut files: Vec<_> = entries.flatten().collect();
+                    files.sort_by_key(|e| e.file_name());
+                    if files.len() > 14 {
+                        let to_remove = files.len() - 14;
+                        for e in files.iter().take(to_remove) {
+                            let _ = std::fs::remove_file(e.path());
+                        }
+                    }
+                }
+                self.last_backup = Some(std::time::Instant::now());
+            }
+        }
+
+        let _ = ctx.database.prune_ai_queue_ttl(7);
+
+        let mut tick_sys = sysinfo::System::new();
+        tick_sys.refresh_memory();
+        if crate::ai::should_run_ai_with(&ctx.config.ai, &tick_sys) {
+            process_ai_summary_queue(&ctx.uhoh_dir, &ctx.database, &ctx.config, &ctx.server_event_tx)
+                .await;
+        }
+
+        self.sidecar_check_interval =
+            std::time::Duration::from_secs(ctx.config.sidecar_update.check_interval_hours * 3600);
+        if ctx.config.sidecar_update.auto_update {
+            let should_check = self
+                .last_sidecar_check
+                .map(|last| last.elapsed() >= self.sidecar_check_interval)
+                .unwrap_or(true);
+            if should_check {
+                self.last_sidecar_check = Some(std::time::Instant::now());
+                let sidecar_dir = ctx.uhoh_dir.join("sidecar");
+                let repo = ctx.config.sidecar_update.llama_repo.clone();
+                let pin = ctx.config.sidecar_update.pin_version.clone();
+                let event_tx = ctx.server_event_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let before = crate::ai::sidecar_update::read_manifest(&sidecar_dir).map(|m| m.version);
+                    match crate::ai::sidecar_update::run_update_check(
+                        &sidecar_dir,
+                        &repo,
+                        pin.as_deref(),
+                        || {
+                            crate::ai::sidecar::shutdown_global_sidecar();
+                        },
+                    ) {
+                        Ok(true) => {
+                            let after = crate::ai::sidecar_update::read_manifest(&sidecar_dir)
+                                .map(|m| m.version)
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let _ = event_tx.send(crate::server::events::ServerEvent::SidecarUpdated {
+                                old_version: before,
+                                new_version: after,
+                            });
+                        }
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!("Sidecar update check failed: {}", e),
+                    }
+                });
+            }
+        }
+
+        if let Err(e) = crate::ai::mlx_update::maybe_run_mlx_auto_update(
+            &ctx.config.ai,
+            &ctx.uhoh_dir,
+            Some(&ctx.server_event_tx),
+        )
+        .await
+        {
+            let _ = ctx
+                .server_event_tx
+                .send(crate::server::events::ServerEvent::MlxUpdateStatus {
+                    status: "failed".to_string(),
+                    detail: e.to_string(),
+                });
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Subsystem for DaemonMaintenanceSubsystem {
+    fn name(&self) -> &str {
+        "daemon_maintenance"
+    }
+
+    async fn run(
+        &mut self,
+        shutdown: tokio_util::sync::CancellationToken,
+        ctx: SubsystemContext,
+    ) -> Result<()> {
+        let mut tick_interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = tick_interval.tick() => {
+                    self.run_tick(&ctx).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn health_check(&self) -> SubsystemHealth {
+        SubsystemHealth::Healthy
+    }
+}
 
 // Removed duplicate is_uhoh_process_alive; use crate::platform::is_uhoh_process_alive instead
 
@@ -123,6 +310,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let mut subsystem_manager_inner = SubsystemManager::new(5, Duration::from_secs(600));
     subsystem_manager_inner.register(Box::new(crate::db_guard::DbGuardSubsystem::new()));
     subsystem_manager_inner.register(Box::new(crate::agent::AgentSubsystem::new()));
+    subsystem_manager_inner.register(Box::new(DaemonMaintenanceSubsystem::new(&config)));
     let subsystem_manager = Arc::new(Mutex::new(subsystem_manager_inner));
 
     {
@@ -131,6 +319,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
             event_ledger: event_ledger.clone(),
             config: config.clone(),
             uhoh_dir: uhoh_dir.clone(),
+            server_event_tx: server_event_tx.clone(),
         };
         subsystem_manager.lock().await.start_all(ctx).await;
     }
@@ -154,10 +343,6 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     } else {
         None
     };
-
-    let mut last_sidecar_check: Option<std::time::Instant> = None;
-    let mut sidecar_check_interval =
-        std::time::Duration::from_secs(config.sidecar_update.check_interval_hours * 3600);
 
     #[cfg(windows)]
     let _daemon_mutex = {
@@ -325,14 +510,12 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     // Backoff state for watcher recovery
     let mut recover_attempts: u32 = 0;
     let mut next_recover_at: Option<Instant> = None;
-    let mut tick_interval = tokio::time::interval(Duration::from_secs(60));
     let mut update_check_interval = tokio::time::interval(Duration::from_secs(
         config.update.check_interval_hours * 3600,
     ));
     let mut debounce_interval =
         tokio::time::interval(Duration::from_secs(config.watch.debounce_quiet_secs));
     let update_trigger = uhoh_dir.join(".update-ready");
-    let mut compaction_index: usize = 0;
 
     tracing::info!("Daemon running, watching {} projects", projects.len());
 
@@ -418,7 +601,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     &server_event_tx,
                 ).await;
             }
-            _ = tick_interval.tick() => {
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {
                 // Live-reload configuration and update relevant timers
                 if let Ok(new_cfg) = Config::load(&config_path) {
                     // Update live-safe fields
@@ -427,9 +610,6 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     }
                     if new_cfg.update.check_interval_hours != config.update.check_interval_hours {
                         update_check_interval = tokio::time::interval(Duration::from_secs(new_cfg.update.check_interval_hours * 3600));
-                    }
-                    if new_cfg.sidecar_update.check_interval_hours != config.sidecar_update.check_interval_hours {
-                        sidecar_check_interval = std::time::Duration::from_secs(new_cfg.sidecar_update.check_interval_hours * 3600);
                     }
                     config = new_cfg;
                 }
@@ -505,173 +685,13 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     }
                     break;
                 }
-                let current_projects = db_projects;
-                if !current_projects.is_empty() {
-                    // Run compaction as a detached task; don't await inside main select loop
-                    let db_path = uhoh_dir.join("uhoh.db");
-                    let cfg = config.compaction.clone();
-                    let local_compaction_index = compaction_index;
-                    tokio::spawn({
-                        let db_path_for_gc = db_path.clone();
-                        async move {
-                        let freed = tokio::task::spawn_blocking(move || {
-                            let db = crate::db::Database::open(&db_path).ok();
-                            let mut freed = 0u64;
-                            if let Some(d) = db {
-                                // Stagger compaction: run for a single project per tick to reduce contention
-                                if !current_projects.is_empty() {
-                                    let idx = local_compaction_index % current_projects.len();
-                                    let project = &current_projects[idx];
-                                    if let Ok(f) = crate::compaction::compact_project(&d, &project.hash, &cfg) { freed = freed.saturating_add(f); }
-                                }
-                            }
-                            freed
-                        }).await.unwrap_or(0);
-                        if freed > 100 * 1024 * 1024 {
-                            tracing::info!("Compaction estimated freed {:.1} MB; triggering GC", freed as f64 / 1_048_576.0);
-                            let uhoh_dir_cl = db_path_for_gc.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
-                        let db_path_for_gc2 = db_path_for_gc.clone();
-                        let uhoh_dir_cl2 = uhoh_dir_cl.clone();
-                        std::mem::drop(tokio::task::spawn_blocking(move || {
-                            if let Ok(db) = crate::db::Database::open(&db_path_for_gc2) {
-                                let _ = crate::gc::run_gc(&uhoh_dir_cl2, &db);
-                                    // After GC, VACUUM to reclaim free pages with timeout guard.
-                                    let (tx, rx) = std::sync::mpsc::channel();
-                                    let db_for_vacuum = db;
-                                    std::thread::spawn(move || {
-                                        let _ = tx.send(db_for_vacuum.vacuum());
-                                    });
-                                    match rx.recv_timeout(std::time::Duration::from_secs(
-                                        VACUUM_TIMEOUT_SECS,
-                                    )) {
-                                        Ok(Ok(())) => {}
-                                        Ok(Err(err)) => tracing::warn!("VACUUM failed: {}", err),
-                                        Err(_) => tracing::warn!(
-                                            "VACUUM timed out after {} seconds",
-                                            VACUUM_TIMEOUT_SECS
-                                        ),
-                                    }
-                                }
-                            }));
-                            // Run VACUUM after large deletions to reclaim space
-                            let db_path_for_gc3 = db_path_for_gc.clone();
-                            let uhoh_dir_cl3 = uhoh_dir_cl.clone();
-                            std::mem::drop(tokio::task::spawn_blocking(move || {
-                                if let Ok(db) = crate::db::Database::open(&db_path_for_gc3) {
-                                    let _ = db.backup_to(&uhoh_dir_cl3.join("vacuum.tmp")).ok();
-                                }
-                            }));
-                        }
-                    }});
-                    compaction_index = compaction_index.wrapping_add(1);
-                }
-                // GC is handled within the detached task when needed
-
-                // Periodic database backup (daily by default, tied to update.check_interval_hours)
-                static LAST_BACKUP: Lazy<StdMutex<Option<std::time::Instant>>> = Lazy::new(|| StdMutex::new(None));
-                let backup_interval = std::time::Duration::from_secs(config.update.check_interval_hours * 3600);
-                let do_backup = {
-                    let last = match LAST_BACKUP.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => {
-                            tracing::warn!("LAST_BACKUP mutex poisoned, recovering state");
-                            poisoned.into_inner()
-                        }
-                    };
-                    last.map(|t| t.elapsed() >= backup_interval).unwrap_or(true)
-                };
-                if do_backup {
-                    let backups_dir = uhoh_dir.join("backups");
-                    let _ = std::fs::create_dir_all(&backups_dir);
-                    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-                    let backup_path = backups_dir.join(format!("uhoh-{ts}.db"));
-                    let db_for_backup = database.clone();
-                    let backup_path_cl = backup_path.clone();
-                    let backup_res = tokio::task::spawn_blocking(move || database_backup_to(&db_for_backup, &backup_path_cl)).await;
-                    if let Err(e) = backup_res.unwrap_or_else(|e| Err(anyhow::anyhow!("{e:?}"))) {
-                        tracing::warn!("Database backup failed: {}", e);
-                    } else {
-                        // Best-effort rotation: keep last 14 backups
-                        if let Ok(entries) = std::fs::read_dir(&backups_dir) {
-                            let mut files: Vec<_> = entries.flatten().collect();
-                            files.sort_by_key(|e| e.file_name());
-                            if files.len() > 14 {
-                                let to_remove = files.len() - 14;
-                                for e in files.iter().take(to_remove) { let _ = std::fs::remove_file(e.path()); }
-                            }
-                        }
-                        if let Ok(mut last) = LAST_BACKUP.lock() { *last = Some(std::time::Instant::now()); }
-                    }
-                }
-
-                let _ = database.prune_ai_queue_ttl(7);
-
-                // Process deferred AI summaries when conditions allow (cache sysinfo per tick)
-                let mut tick_sys = sysinfo::System::new();
-                tick_sys.refresh_memory();
-                if crate::ai::should_run_ai_with(&config.ai, &tick_sys) {
-                    process_ai_summary_queue(&uhoh_dir, &database, &config, &server_event_tx).await;
-                }
-
-                if config.sidecar_update.auto_update {
-                    let should_check = match last_sidecar_check {
-                        None => true,
-                        Some(last) => last.elapsed() >= sidecar_check_interval,
-                    };
-
-                    if should_check {
-                        last_sidecar_check = Some(std::time::Instant::now());
-                        let sidecar_dir = uhoh_dir.join("sidecar");
-                        let repo = config.sidecar_update.llama_repo.clone();
-                        let pin = config.sidecar_update.pin_version.clone();
-                        let event_tx = server_event_tx.clone();
-
-                        tokio::task::spawn_blocking(move || {
-                            let before = crate::ai::sidecar_update::read_manifest(&sidecar_dir)
-                                .map(|m| m.version);
-                            match crate::ai::sidecar_update::run_update_check(
-                                &sidecar_dir,
-                                &repo,
-                                pin.as_deref(),
-                                || {
-                                    crate::ai::sidecar::shutdown_global_sidecar();
-                                },
-                            ) {
-                                Ok(true) => {
-                                    let after = crate::ai::sidecar_update::read_manifest(&sidecar_dir)
-                                        .map(|m| m.version)
-                                        .unwrap_or_else(|| "unknown".to_string());
-                                    let _ = event_tx.send(crate::server::events::ServerEvent::SidecarUpdated {
-                                        old_version: before,
-                                        new_version: after,
-                                    });
-                                }
-                                Ok(false) => {}
-                                Err(e) => tracing::warn!("Sidecar update check failed: {}", e),
-                            }
-                        });
-
-                        if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-                            if let Some(version) = crate::ai::sidecar_update::check_mlx_lm_version() {
-                                tracing::debug!("mlx_lm version: {}", version);
-                            }
-                        }
-                    }
-                }
-
-                if let Err(e) = crate::ai::mlx_update::maybe_run_mlx_auto_update(&config.ai, &uhoh_dir, Some(&server_event_tx)).await {
-                    let _ = server_event_tx.send(crate::server::events::ServerEvent::MlxUpdateStatus {
-                        status: "failed".to_string(),
-                        detail: e.to_string(),
-                    });
-                }
-
                 {
                     let ctx = SubsystemContext {
                         database: database.clone(),
                         event_ledger: event_ledger.clone(),
                         config: config.clone(),
                         uhoh_dir: uhoh_dir.clone(),
+                        server_event_tx: server_event_tx.clone(),
                     };
                     subsystem_manager.lock().await.tick_restart(ctx).await;
                 }
