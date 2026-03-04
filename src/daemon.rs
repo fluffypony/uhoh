@@ -637,7 +637,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     }
                 }
 
-                if let Err(e) = crate::ai::mlx_update::maybe_run_mlx_auto_update(&config.ai, &uhoh_dir).await {
+                if let Err(e) = crate::ai::mlx_update::maybe_run_mlx_auto_update(&config.ai, &uhoh_dir, Some(&server_event_tx)).await {
                     let _ = server_event_tx.send(crate::server::events::ServerEvent::MlxUpdateStatus {
                         status: "failed".to_string(),
                         detail: e.to_string(),

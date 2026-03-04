@@ -1,4 +1,61 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentProfile {
+    #[serde(default)]
+    pub profile_version: Option<u32>,
+    pub name: String,
+    #[serde(default)]
+    pub session_log_pattern: String,
+    #[serde(default)]
+    pub process_names: Vec<String>,
+    #[serde(default)]
+    pub data_dirs: Vec<String>,
+    #[serde(default)]
+    pub config_files: Vec<String>,
+    #[serde(default)]
+    pub personality_files: Vec<String>,
+    #[serde(default)]
+    pub memory_dirs: Vec<String>,
+    #[serde(default)]
+    pub tool_names_write: Vec<String>,
+    #[serde(default)]
+    pub tool_names_exec: Vec<String>,
+    #[serde(default)]
+    pub tool_call_format: Option<String>,
+}
+
+pub fn load_agent_profile(path: &std::path::Path) -> Result<AgentProfile> {
+    validate_profile_path(path)?;
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read profile: {}", path.display()))?;
+    let profile: AgentProfile = toml::from_str(&raw)
+        .with_context(|| format!("Failed to parse profile TOML: {}", path.display()))?;
+    if profile.name.trim().is_empty() {
+        anyhow::bail!("Agent profile name cannot be empty");
+    }
+    if profile.session_log_pattern.trim().is_empty() {
+        anyhow::bail!("Agent profile must define session_log_pattern");
+    }
+    Ok(profile)
+}
+
+pub fn resolve_session_log_path(pattern: &str) -> Result<Option<std::path::PathBuf>> {
+    let expanded = expand_home(pattern);
+    let mut matches = Vec::new();
+    for entry in glob::glob(&expanded)? {
+        let path = match entry {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if path.is_file() {
+            matches.push(path);
+        }
+    }
+    matches.sort();
+    Ok(matches.pop())
+}
 
 pub fn validate_profile_path(path: &std::path::Path) -> Result<()> {
     let home =
@@ -8,4 +65,13 @@ pub fn validate_profile_path(path: &std::path::Path) -> Result<()> {
         anyhow::bail!("Profile path must be inside the user home directory");
     }
     Ok(())
+}
+
+fn expand_home(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
 }

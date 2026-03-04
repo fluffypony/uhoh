@@ -32,7 +32,13 @@ pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
                 let _ = ctx.event_ledger.append(event);
                 let upstream = resolve_upstream_addr();
                 if let Err(e) =
-                    handle_connection(stream, &upstream, &ctx.uhoh_dir, &ctx.event_ledger)
+                    handle_connection(
+                        stream,
+                        &upstream,
+                        &ctx.uhoh_dir,
+                        &ctx.event_ledger,
+                        &ctx.config,
+                    )
                 {
                     let mut event = new_event("agent", "mcp_proxy_connection_failed", "warn");
                     event.detail = Some(format!("peer={}, error={}", addr, e));
@@ -58,6 +64,7 @@ fn handle_connection(
     upstream_addr: &str,
     uhoh_dir: &Path,
     ledger: &crate::event_ledger::EventLedger,
+    config: &crate::config::Config,
 ) -> Result<()> {
     let mut upstream = TcpStream::connect(upstream_addr)
         .with_context(|| format!("Failed connecting MCP upstream: {upstream_addr}"))?;
@@ -79,7 +86,7 @@ fn handle_connection(
                 .map(|m| m == "tools/call")
                 .unwrap_or(false)
             {
-                intercept_tool_call(&json, uhoh_dir, ledger)?;
+                intercept_tool_call(&json, uhoh_dir, ledger, config, &mut upstream)?;
             }
         }
 
@@ -102,6 +109,8 @@ fn intercept_tool_call(
     call: &serde_json::Value,
     uhoh_dir: &Path,
     ledger: &crate::event_ledger::EventLedger,
+    config: &crate::config::Config,
+    upstream: &mut TcpStream,
 ) -> Result<()> {
     let tool = call
         .pointer("/params/name")
@@ -135,6 +144,28 @@ fn intercept_tool_call(
         }
     }
 
+    let is_dangerous = is_dangerous_tool_call(tool, path.as_deref(), &config.agent.dangerous_patterns);
+    if is_dangerous {
+        let mut danger = new_event("agent", "dangerous_agent_action", "critical");
+        danger.path = path.clone();
+        danger.pre_state_ref = pre_state_ref.clone();
+        danger.detail = Some(
+            serde_json::json!({
+                "tool": tool,
+                "args": args,
+                "on_dangerous_change": config.agent.on_dangerous_change,
+            })
+            .to_string(),
+        );
+        let _ = ledger.append(danger);
+
+        if config.agent.on_dangerous_change.eq_ignore_ascii_case("pause") {
+            let pause_ms = std::time::Duration::from_millis(500);
+            std::thread::sleep(pause_ms);
+            let _ = upstream;
+        }
+    }
+
     let mut event = new_event("agent", "tool_call", "info");
     event.path = path;
     event.pre_state_ref = pre_state_ref;
@@ -147,6 +178,15 @@ fn intercept_tool_call(
     );
     let _ = ledger.append(event);
     Ok(())
+}
+
+fn is_dangerous_tool_call(tool: &str, path: Option<&str>, patterns: &[String]) -> bool {
+    let tool_l = tool.to_ascii_lowercase();
+    let path_l = path.unwrap_or_default().to_ascii_lowercase();
+    patterns.iter().any(|pattern| {
+        let p = pattern.to_ascii_lowercase();
+        tool_l.contains(&p) || path_l.contains(&p)
+    })
 }
 
 fn resolve_upstream_addr() -> String {

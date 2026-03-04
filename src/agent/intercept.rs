@@ -13,12 +13,23 @@ pub fn run_session_tailers(ctx: &SubsystemContext, agents: &[AgentEntry]) -> Res
     let mut offsets: HashMap<String, u64> = HashMap::new();
     loop {
         for agent in agents {
-            let profile_path = expand_home(&agent.profile_path);
-            if !Path::new(&profile_path).exists() {
+            let profile_toml = expand_home(&agent.profile_path);
+            let profile_path = Path::new(&profile_toml);
+            if !profile_path.exists() {
                 continue;
             }
+
+            let Ok(profile) = crate::agent::profiles::load_agent_profile(profile_path) else {
+                continue;
+            };
+            let Ok(Some(session_path)) =
+                crate::agent::profiles::resolve_session_log_path(&profile.session_log_pattern)
+            else {
+                continue;
+            };
+
             let entry = offsets.entry(agent.name.clone()).or_insert(0);
-            *entry = tail_one_file(ctx, agent, Path::new(&profile_path), *entry)?;
+            *entry = tail_one_file(ctx, agent, &session_path, *entry)?;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
