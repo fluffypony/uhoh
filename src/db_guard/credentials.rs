@@ -11,6 +11,16 @@ const CRED_VERSION: u8 = 1;
 const CRED_KDF_ARGON2ID: u8 = 0;
 const CRED_KDF_BLAKE3: u8 = 1;
 const CRED_CONTEXT: &str = "uhoh::credentials::enc-v1";
+const ARGON2_MEMORY_KIB: u32 = 19 * 1024;
+const ARGON2_TIME_COST: u32 = 2;
+const ARGON2_PARALLELISM: u32 = 1;
+
+#[derive(Debug, Clone)]
+struct EncEntry {
+    key: String,
+    nonce: [u8; 12],
+    ciphertext: Vec<u8>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialMaterial {
@@ -128,22 +138,44 @@ fn encrypt_credentials_map(
         (CRED_KDF_ARGON2ID, derive_argon2_key(&master, &salt)?)
     };
 
-    let serialized = serde_json::to_vec(map)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-    let mut nonce = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut nonce);
-    let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), serialized.as_ref())
-        .map_err(|_| anyhow::anyhow!("Failed to encrypt credentials"))?;
+    let mut entries = Vec::with_capacity(map.len());
+    for (logical_key, material) in map {
+        let serialized = serde_json::to_vec(material)?;
+        let mut nonce = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce);
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce), serialized.as_ref())
+            .map_err(|_| anyhow::anyhow!("Failed to encrypt credential entry"))?;
+        entries.push(EncEntry {
+            key: logical_key.clone(),
+            nonce,
+            ciphertext,
+        });
+    }
 
     let mut out = Vec::new();
     out.extend_from_slice(CRED_MAGIC);
     out.push(CRED_VERSION);
     out.push(kdf_id);
     out.extend_from_slice(&salt);
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
-    out.extend_from_slice(&ciphertext);
+    if kdf_id == CRED_KDF_ARGON2ID {
+        out.extend_from_slice(&ARGON2_MEMORY_KIB.to_be_bytes());
+        out.extend_from_slice(&ARGON2_TIME_COST.to_be_bytes());
+        out.extend_from_slice(&ARGON2_PARALLELISM.to_be_bytes());
+    }
+    out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    for entry in entries {
+        let key_bytes = entry.key.as_bytes();
+        if key_bytes.len() > u16::MAX as usize {
+            anyhow::bail!("Credential key is too long");
+        }
+        out.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+        out.extend_from_slice(key_bytes);
+        out.extend_from_slice(&entry.nonce);
+        out.extend_from_slice(&(entry.ciphertext.len() as u32).to_be_bytes());
+        out.extend_from_slice(&entry.ciphertext);
+    }
 
     master.zeroize();
     Ok(out)
@@ -152,7 +184,7 @@ fn encrypt_credentials_map(
 fn decrypt_credentials_map(
     payload: &[u8],
 ) -> Result<std::collections::BTreeMap<String, CredentialMaterial>> {
-    if payload.len() < 8 + 1 + 1 + 16 + 12 + 4 {
+    if payload.len() < 8 + 1 + 1 + 16 + 4 {
         anyhow::bail!("Encrypted credentials file is malformed");
     }
     if &payload[..8] != CRED_MAGIC {
@@ -165,40 +197,102 @@ fn decrypt_credentials_map(
     let kdf_id = payload[9];
     let mut salt = [0u8; 16];
     salt.copy_from_slice(&payload[10..26]);
-    let mut nonce = [0u8; 12];
-    nonce.copy_from_slice(&payload[26..38]);
-    let len = u32::from_be_bytes(payload[38..42].try_into().unwrap_or([0u8; 4])) as usize;
-    if payload.len() < 42 + len {
-        anyhow::bail!("Encrypted credentials ciphertext is truncated");
+    let mut cursor = 26usize;
+    if kdf_id == CRED_KDF_ARGON2ID {
+        if payload.len() < cursor + 12 {
+            anyhow::bail!("Encrypted credentials Argon2 metadata is truncated");
+        }
+        cursor += 12;
     }
-    let ciphertext = &payload[42..42 + len];
 
     let mut master = std::env::var("UHOH_MASTER_KEY")
         .context("UHOH_MASTER_KEY is required to read encrypted credentials")?;
-    let key = match kdf_id {
+    let mut key = match kdf_id {
         CRED_KDF_BLAKE3 => {
-            let hex_key = decode_hex_key(&master)
+            let mut hex_key = decode_hex_key(&master)
                 .ok_or_else(|| anyhow::anyhow!("UHOH_MASTER_KEY must be 64-char hex"))?;
-            blake3::derive_key(CRED_CONTEXT, &hex_key)
+            let derived = blake3::derive_key(CRED_CONTEXT, &hex_key);
+            hex_key.zeroize();
+            derived
         }
         CRED_KDF_ARGON2ID => derive_argon2_key(&master, &salt)?,
         _ => anyhow::bail!("Unsupported credentials file KDF"),
     };
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-    let plaintext = cipher
-        .decrypt(Nonce::from_slice(&nonce), ciphertext)
-        .map_err(|_| anyhow::anyhow!("Failed to decrypt credentials"))?;
-    master.zeroize();
+    let mut out = std::collections::BTreeMap::new();
 
-    let out = serde_json::from_slice(&plaintext)
-        .context("Failed to parse decrypted credentials payload")?;
+    // Backward compatibility for older single-ciphertext payloads.
+    if payload.len() >= 42 {
+        let old_len = u32::from_be_bytes(payload[38..42].try_into().unwrap_or([0u8; 4])) as usize;
+        if payload.len() >= 42 + old_len {
+            let mut nonce = [0u8; 12];
+            nonce.copy_from_slice(&payload[26..38]);
+            let ciphertext = &payload[42..42 + old_len];
+            if let Ok(plaintext) = cipher.decrypt(Nonce::from_slice(&nonce), ciphertext) {
+                if let Ok(map) = serde_json::from_slice::<
+                    std::collections::BTreeMap<String, CredentialMaterial>,
+                >(&plaintext)
+                {
+                    master.zeroize();
+                    key.zeroize();
+                    return Ok(map);
+                }
+            }
+        }
+    }
+
+    if payload.len() < cursor + 4 {
+        anyhow::bail!("Encrypted credentials entry header is truncated");
+    }
+    let entry_count =
+        u32::from_be_bytes(payload[cursor..cursor + 4].try_into().unwrap_or([0u8; 4])) as usize;
+    cursor += 4;
+
+    for _ in 0..entry_count {
+        if payload.len() < cursor + 2 {
+            anyhow::bail!("Encrypted credentials key length is truncated");
+        }
+        let key_len =
+            u16::from_be_bytes(payload[cursor..cursor + 2].try_into().unwrap_or([0u8; 2])) as usize;
+        cursor += 2;
+        if payload.len() < cursor + key_len + 12 + 4 {
+            anyhow::bail!("Encrypted credentials entry is truncated");
+        }
+        let key_name = String::from_utf8(payload[cursor..cursor + key_len].to_vec())
+            .context("Encrypted credentials key is not valid UTF-8")?;
+        cursor += key_len;
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&payload[cursor..cursor + 12]);
+        cursor += 12;
+        let cipher_len =
+            u32::from_be_bytes(payload[cursor..cursor + 4].try_into().unwrap_or([0u8; 4])) as usize;
+        cursor += 4;
+        if payload.len() < cursor + cipher_len {
+            anyhow::bail!("Encrypted credentials ciphertext entry is truncated");
+        }
+        let ciphertext = &payload[cursor..cursor + cipher_len];
+        cursor += cipher_len;
+        let plaintext = cipher
+            .decrypt(Nonce::from_slice(&nonce), ciphertext)
+            .map_err(|_| anyhow::anyhow!("Failed to decrypt credentials entry"))?;
+        let material: CredentialMaterial = serde_json::from_slice(&plaintext)
+            .context("Failed to parse decrypted credential entry payload")?;
+        out.insert(key_name, material);
+    }
+    master.zeroize();
+    key.zeroize();
     Ok(out)
 }
 
 fn derive_argon2_key(master: &str, salt: &[u8; 16]) -> Result<[u8; 32]> {
-    let params = Params::new(19 * 1024, 2, 1, Some(32))
-        .map_err(|e| anyhow::anyhow!("Invalid Argon2 params: {e}"))?;
+    let params = Params::new(
+        ARGON2_MEMORY_KIB,
+        ARGON2_TIME_COST,
+        ARGON2_PARALLELISM,
+        Some(32),
+    )
+    .map_err(|e| anyhow::anyhow!("Invalid Argon2 params: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = [0u8; 32];
     argon2

@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-use landlock::{path_beneath_rules, AccessFs, Ruleset};
+use landlock::{path_beneath_rules, AccessFs, LandlockStatus, Ruleset, RulesetStatus, ABI};
 
 pub fn sandbox_supported() -> bool {
     #[cfg(target_os = "linux")]
@@ -14,7 +14,13 @@ pub fn sandbox_supported() -> bool {
 
 #[cfg(target_os = "linux")]
 fn runtime_probe() -> anyhow::Result<()> {
-    let abi = landlock::ABI::V1;
+    let abi = match LandlockStatus::default() {
+        LandlockStatus::Available { effective_abi, .. } => effective_abi,
+        _ => ABI::Unsupported,
+    };
+    if abi == ABI::Unsupported {
+        anyhow::bail!("Landlock unsupported or disabled");
+    }
     let _ = Ruleset::default().handle_access(AccessFs::from_all(abi))?;
     Ok(())
 }
@@ -27,7 +33,13 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
         }
     }
 
-    let abi = landlock::ABI::V1;
+    let abi = match LandlockStatus::default() {
+        LandlockStatus::Available { effective_abi, .. } => effective_abi,
+        _ => ABI::Unsupported,
+    };
+    if abi == ABI::Unsupported {
+        anyhow::bail!("Landlock unsupported or disabled");
+    }
     let mut ruleset = Ruleset::default()
         .handle_access(AccessFs::from_all(abi))?
         .create()?;
@@ -54,10 +66,8 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
     ruleset = ruleset.add_rules(path_beneath_rules(&refs, AccessFs::from_all(abi)))?;
     let status = ruleset.restrict_self()?;
     match status.ruleset {
-        landlock::RulesetStatus::NotEnforced => {
-            anyhow::bail!("Landlock not enforced on this kernel")
-        }
-        _ => Ok(()),
+        RulesetStatus::FullyEnforced | RulesetStatus::PartiallyEnforced => Ok(()),
+        RulesetStatus::NotEnforced => anyhow::bail!("Landlock not enforced on this kernel"),
     }
 }
 

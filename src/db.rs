@@ -1737,17 +1737,18 @@ impl Database {
         let limit = 10_000i64;
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "WITH RECURSIVE descendants(id) AS (
-                 SELECT ?1
+            "WITH RECURSIVE descendants(id, depth) AS (
+                 SELECT ?1, 0
                  UNION ALL
-                 SELECT e.id
+                 SELECT e.id, d.depth + 1
                  FROM event_ledger e
                  JOIN descendants d ON e.causal_parent = d.id
+                 WHERE d.depth < ?2
              )
-             SELECT id FROM descendants LIMIT ?2",
+             SELECT id FROM descendants LIMIT ?3",
         )?;
 
-        let rows = stmt.query_map(params![root_id, limit], |row| row.get::<_, i64>(0))?;
+        let rows = stmt.query_map(params![root_id, limit, limit], |row| row.get::<_, i64>(0))?;
         let mut out = Vec::new();
         for id in rows {
             out.push(id?);
@@ -1766,15 +1767,16 @@ impl Database {
         let limit = 10_000i64;
         let conn = self.conn();
         let count: i64 = conn.query_row(
-            "WITH RECURSIVE descendants(id) AS (
-                 SELECT ?1
+            "WITH RECURSIVE descendants(id, depth) AS (
+                 SELECT ?1, 0
                  UNION ALL
-                 SELECT e.id
+                 SELECT e.id, d.depth + 1
                  FROM event_ledger e
                  JOIN descendants d ON e.causal_parent = d.id
+                 WHERE d.depth < ?2
              )
              SELECT COUNT(*) FROM descendants",
-            params![root_id],
+            params![root_id, limit],
             |row| row.get(0),
         )?;
         if count >= limit {
@@ -1785,17 +1787,18 @@ impl Database {
             );
         }
         let changed = conn.execute(
-            "WITH RECURSIVE descendants(id) AS (
-                 SELECT ?1
+            "WITH RECURSIVE descendants(id, depth) AS (
+                 SELECT ?1, 0
                  UNION ALL
-                 SELECT e.id
+                 SELECT e.id, d.depth + 1
                  FROM event_ledger e
                  JOIN descendants d ON e.causal_parent = d.id
+                 WHERE d.depth < ?2
              )
              UPDATE event_ledger
              SET resolved = 1
              WHERE id IN (SELECT id FROM descendants)",
-            params![root_id],
+            params![root_id, limit],
         )?;
         Ok(changed)
     }
@@ -1808,18 +1811,19 @@ impl Database {
         let limit = 10_000i64;
         let conn = self.conn();
         let count: i64 = conn.query_row(
-            "WITH RECURSIVE descendants(id) AS (
-                 SELECT ?1
+            "WITH RECURSIVE descendants(id, depth) AS (
+                 SELECT ?1, 0
                  UNION ALL
-                 SELECT e.id
+                 SELECT e.id, d.depth + 1
                  FROM event_ledger e
                  JOIN descendants d ON e.causal_parent = d.id
+                 WHERE d.depth < ?2
              )
              SELECT COUNT(*)
              FROM event_ledger
              WHERE id IN (SELECT id FROM descendants)
-               AND session_id = ?2",
-            params![root_id, session_id],
+               AND session_id = ?3",
+            params![root_id, limit, session_id],
             |row| row.get(0),
         )?;
         if count >= limit {
@@ -1830,12 +1834,13 @@ impl Database {
             );
         }
         let changed = conn.execute(
-            "WITH RECURSIVE descendants(id) AS (
-                 SELECT ?1
+            "WITH RECURSIVE descendants(id, depth) AS (
+                 SELECT ?1, 0
                  UNION ALL
-                 SELECT e.id
+                 SELECT e.id, d.depth + 1
                  FROM event_ledger e
                  JOIN descendants d ON e.causal_parent = d.id
+                 WHERE d.depth < ?2
              )
              UPDATE event_ledger
              SET resolved = 1
@@ -1843,9 +1848,9 @@ impl Database {
                  SELECT id
                  FROM event_ledger
                  WHERE id IN (SELECT id FROM descendants)
-                   AND session_id = ?2
+                   AND session_id = ?3
              )",
-            params![root_id, session_id],
+            params![root_id, limit, session_id],
         )?;
         Ok(changed)
     }
