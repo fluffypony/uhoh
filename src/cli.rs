@@ -165,6 +165,16 @@ pub enum Commands {
     /// Trace backward from a path in the event ledger
     Blame { path: String },
 
+    /// Unified chronological event ledger view
+    Timeline {
+        /// Filter by event source (`fs`, `db`, `agent`)
+        #[arg(long)]
+        source: Option<String>,
+        /// Relative lookback window (examples: `30m`, `1h`, `2d`)
+        #[arg(long)]
+        since: Option<String>,
+    },
+
     /// Launch a command under uhoh runtime controls
     Run {
         #[arg(trailing_var_arg = true)]

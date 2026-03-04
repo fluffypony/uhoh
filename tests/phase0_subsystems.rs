@@ -137,6 +137,27 @@ fn make_cli_home_with_events() -> (TempDir, i64, i64) {
     (home, root, child)
 }
 
+fn make_cli_home_with_timeline_events() -> TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let uhoh_dir = home.path().join(".uhoh");
+    std::fs::create_dir_all(&uhoh_dir).unwrap();
+
+    let db = Database::open(&uhoh_dir.join("uhoh.db")).unwrap();
+    let mut fs_event = event("fs", "file_write", Some("src/lib.rs"), None);
+    fs_event.detail = Some("timeline-fs".to_string());
+    db.insert_event_ledger(&fs_event).unwrap();
+
+    let mut db_event = event("db_guard", "drop_table", Some("users"), None);
+    db_event.detail = Some("timeline-db".to_string());
+    db.insert_event_ledger(&db_event).unwrap();
+
+    let mut agent_event = event("agent", "tool_call", Some("src/main.rs"), None);
+    agent_event.detail = Some("timeline-agent".to_string());
+    db.insert_event_ledger(&agent_event).unwrap();
+
+    home
+}
+
 fn apply_home_env(cmd: &mut TestCommand, home: &Path) {
     cmd.env("HOME", home);
     cmd.env("USERPROFILE", home);
@@ -183,4 +204,22 @@ fn cli_blame_reports_when_path_not_found() {
     let (ok, stdout, _stderr) = run_cli(home.path(), &["blame", "missing/file.rs"]);
     assert!(ok);
     assert!(stdout.contains("No events found for path missing/file.rs"));
+}
+
+#[test]
+fn cli_timeline_source_filter_and_since_window() {
+    let home = make_cli_home_with_timeline_events();
+
+    let (ok, stdout, _stderr) = run_cli(home.path(), &["timeline", "--source", "agent", "--since", "1h"]);
+    assert!(ok);
+    assert!(stdout.contains("agent"));
+    assert!(stdout.contains("tool_call"));
+    assert!(!stdout.contains("db_guard"));
+    assert!(!stdout.contains("fs"));
+
+    let (ok_all, stdout_all, _stderr_all) = run_cli(home.path(), &["timeline", "--since", "1h"]);
+    assert!(ok_all);
+    assert!(stdout_all.contains("fs"));
+    assert!(stdout_all.contains("db_guard"));
+    assert!(stdout_all.contains("agent"));
 }

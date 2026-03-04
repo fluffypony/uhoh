@@ -560,6 +560,59 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Timeline { source, since } => {
+            let normalized_source = source
+                .as_deref()
+                .map(normalize_timeline_source)
+                .transpose()?;
+            let since_cutoff = since
+                .as_deref()
+                .map(parse_since_cutoff)
+                .transpose()?;
+
+            let events = database.event_ledger_recent(None, None, None, 1000)?;
+            let mut filtered = Vec::new();
+            for entry in events {
+                if let Some(ref src) = normalized_source {
+                    if !source_matches(src, &entry.source) {
+                        continue;
+                    }
+                }
+
+                if let Some(cutoff) = since_cutoff {
+                    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&entry.ts) else {
+                        continue;
+                    };
+                    if ts.with_timezone(&chrono::Utc) < cutoff {
+                        continue;
+                    }
+                }
+
+                filtered.push(entry);
+            }
+            filtered.reverse();
+
+            if filtered.is_empty() {
+                println!("No timeline events matched filters");
+            } else {
+                for entry in filtered {
+                    println!(
+                        "#{} {} {} [{}] {}{}",
+                        entry.id,
+                        entry.ts,
+                        entry.source,
+                        entry.severity,
+                        entry.event_type,
+                        entry
+                            .path
+                            .as_deref()
+                            .map(|p| format!(" path={p}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+        }
+
         Commands::Run { command } => {
             if command.is_empty() {
                 anyhow::bail!("No command provided");
@@ -1182,6 +1235,59 @@ fn expand_home_path(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+fn normalize_timeline_source(source: &str) -> Result<String> {
+    let source = source.trim().to_ascii_lowercase();
+    let normalized = match source.as_str() {
+        "fs" | "filesystem" => "fs",
+        "db" | "db_guard" | "database" => "db_guard",
+        "agent" => "agent",
+        _ => {
+            anyhow::bail!(
+                "Invalid --source '{}'. Expected one of: fs, db, agent",
+                source
+            )
+        }
+    };
+    Ok(normalized.to_string())
+}
+
+fn source_matches(requested: &str, event_source: &str) -> bool {
+    match requested {
+        "db_guard" => event_source == "db_guard" || event_source == "db",
+        "fs" => event_source == "fs",
+        "agent" => event_source == "agent",
+        _ => event_source == requested,
+    }
+}
+
+fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    let s = raw.trim();
+    if s.is_empty() {
+        anyhow::bail!("--since cannot be empty");
+    }
+    if s.len() < 2 {
+        anyhow::bail!("Invalid --since format '{}'; use forms like 30m, 1h, 2d", raw);
+    }
+
+    let (num_part, unit_part) = s.split_at(s.len() - 1);
+    let qty: i64 = num_part
+        .parse()
+        .with_context(|| format!("Invalid --since quantity '{}'", num_part))?;
+    if qty <= 0 {
+        anyhow::bail!("--since quantity must be positive");
+    }
+
+    let delta = match unit_part.to_ascii_lowercase().as_str() {
+        "s" => chrono::Duration::seconds(qty),
+        "m" => chrono::Duration::minutes(qty),
+        "h" => chrono::Duration::hours(qty),
+        "d" => chrono::Duration::days(qty),
+        _ => anyhow::bail!("Invalid --since unit '{}'. Use one of s, m, h, d", unit_part),
+    };
+
+    Ok(chrono::Utc::now() - delta)
 }
 
 fn parse_toml_value(s: &str) -> toml_edit::Value {
