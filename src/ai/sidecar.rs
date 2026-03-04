@@ -13,73 +13,6 @@ enum Backend {
     MlxLm { python: PathBuf },
 }
 
-pub struct Sidecar {
-    child: Option<Child>,
-    port: u16,
-}
-
-impl Sidecar {
-    /// Spawn the inference sidecar on an ephemeral port.
-    pub fn spawn(model_path: &Path, uhoh_dir: &Path) -> Result<Self> {
-        // Bind to port 0 = OS assigns an ephemeral port; add a simple retry in case of TOCTOU
-        let (listener, port) = match find_available_port_listener() {
-            Ok(v) => v,
-            Err(_) => find_available_port_listener()?,
-        };
-
-        let backend = detect_backend(uhoh_dir)?;
-        // Release listener just before spawn to minimize race
-        drop(listener);
-        let child = spawn_backend(&backend, model_path, uhoh_dir, port)?;
-
-        let sidecar = Sidecar { child: Some(child), port };
-
-        // Wait for sidecar to be ready with exponential backoff
-        sidecar.wait_for_ready()?;
-
-        Ok(sidecar)
-    }
-
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-
-    /// Wait for the sidecar's health endpoint to respond.
-    fn wait_for_ready(&self) -> Result<()> {
-        let mut delay = Duration::from_millis(100);
-        let max_wait = Duration::from_secs(30);
-        let start = std::time::Instant::now();
-
-        loop {
-            if start.elapsed() > max_wait {
-                anyhow::bail!("Sidecar did not become ready within 30 seconds");
-            }
-
-            let url = format!("http://127.0.0.1:{}/health", self.port);
-            match reqwest::blocking::get(&url) {
-                Ok(resp) if resp.status().is_success() => return Ok(()),
-                _ => {}
-            }
-
-            std::thread::sleep(delay);
-            delay = std::cmp::min(delay * 2, Duration::from_secs(2));
-        }
-    }
-
-    pub fn shutdown(&mut self) {
-        if let Some(ref mut child) = self.child {
-            child.kill().ok();
-            child.wait().ok();
-        }
-        self.child = None;
-    }
-}
-
-impl Drop for Sidecar {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
 
 fn find_available_port_listener() -> Result<(std::net::TcpListener, u16)> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -139,10 +72,30 @@ pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs:
     }
 
     // Spawn new sidecar
-    let (listener, port) = find_available_port_listener()?;
     let backend = detect_backend(uhoh_dir)?;
-    drop(listener);
-    let child = spawn_backend(&backend, model_path, uhoh_dir, port)?;
+    // Try up to 3 attempts with fresh ephemeral ports to avoid TOCTOU on bind
+    let (child, port) = {
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut out: Option<(Child, u16)> = None;
+        for _ in 0..3 {
+            let (listener, port) = find_available_port_listener()?;
+            drop(listener);
+            match spawn_backend(&backend, model_path, uhoh_dir, port) {
+                Ok(child) => {
+                    // Wait for readiness before returning
+                    if wait_for_ready_blocking(port, Duration::from_secs(30)).is_ok() {
+                        out = Some((child, port));
+                        break;
+                    } else {
+                        last_err = Some(anyhow::anyhow!("sidecar not ready on port {}", port));
+                        continue;
+                    }
+                }
+                Err(e) => { last_err = Some(e); continue; }
+            }
+        }
+        match out { Some(v) => v, None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Failed to spawn sidecar"))) }
+    };
 
     // Store globally and start idle watcher thread
     {
@@ -189,6 +142,22 @@ pub fn shutdown_global_sidecar() {
             let _ = gs.child.kill();
             let _ = gs.child.wait();
         }
+    }
+}
+
+fn wait_for_ready_blocking(port: u16, max_wait: Duration) -> Result<()> {
+    let mut delay = Duration::from_millis(100);
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > max_wait {
+            anyhow::bail!("Sidecar did not become ready within {:?}", max_wait);
+        }
+        let url = format!("http://127.0.0.1:{}/health", port);
+        if let Ok(resp) = reqwest::blocking::get(&url) {
+            if resp.status().is_success() { return Ok(()); }
+        }
+        std::thread::sleep(delay);
+        delay = std::cmp::min(delay * 2, Duration::from_secs(2));
     }
 }
 

@@ -14,8 +14,10 @@ pub fn generate_summary_blocking(
     diff_text: &str,
     files: &FileChangeSummary,
 ) -> Result<String> {
+    // Cap to a safe upper bound to prevent runaway contexts
+    let capped_tokens = std::cmp::min(config.ai.max_context_tokens, 8192);
     // Truncate diff to configured max context (rough 4 chars/token) with UTF-8 boundary safety
-    let max_chars = config.ai.max_context_tokens.saturating_mul(4);
+    let max_chars = capped_tokens.saturating_mul(4);
     let truncated = if diff_text.len() > max_chars {
         let mut cut = max_chars;
         while cut > 0 && !diff_text.is_char_boundary(cut) { cut -= 1; }
@@ -46,19 +48,24 @@ pub fn generate_summary_blocking(
         files.added.join(", "), files.deleted.join(", "), files.modified.join(", "), truncated
     );
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?;
-    let resp: serde_json::Value = client
-        .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
-        .json(&serde_json::json!({
-            "model": model.name,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 256,
-            "temperature": 0.3,
-        }))
-        .send()?
-        .json()?;
+    let resp: serde_json::Value = std::thread::spawn(move || -> anyhow::Result<serde_json::Value> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
+        let r = client
+            .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+            .json(&serde_json::json!({
+                "model": model.name,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 256,
+                "temperature": 0.3,
+            }))
+            .send()?
+            .json()?;
+        Ok(r)
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("HTTP join error"))??;
 
     Ok(resp["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string())
 }

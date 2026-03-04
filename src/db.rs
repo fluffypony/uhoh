@@ -73,7 +73,7 @@ impl Database {
     pub fn backup_to(&self, path: &std::path::Path) -> Result<()> {
         let src = self.conn();
         let mut dest = rusqlite::Connection::open(path)?;
-        let mut backup = rusqlite::backup::Backup::new(&*src, &mut dest)?;
+        let backup = rusqlite::backup::Backup::new(&*src, &mut dest)?;
         backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
         #[cfg(unix)]
         {
@@ -89,7 +89,7 @@ impl Database {
             .lock()
             .unwrap_or_else(|poisoned| {
                 tracing::warn!("Database mutex was poisoned, recovering");
-                let mut inner = poisoned.into_inner();
+                let inner = poisoned.into_inner();
                 // Attempt to rollback any in-progress transaction
                 let _ = inner.execute_batch("ROLLBACK");
                 inner

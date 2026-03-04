@@ -115,8 +115,8 @@ pub enum Commands {
 
     /// View or edit configuration
     Config {
-        /// Optional: "edit" to open in $EDITOR
-        subcommand: Option<String>,
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
     },
 
     /// Manual garbage collection of orphaned blobs
@@ -163,4 +163,19 @@ pub enum Commands {
     /// Remove system service
     #[command(name = "service-remove", hide = true)]
     ServiceRemove,
+}
+
+#[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Open the config file in $EDITOR
+    Edit,
+    /// Set a key to a value (supports up to two-level nesting: section.key)
+    Set {
+        key: String,
+        value: String,
+    },
+    /// Get the current value for a key
+    Get {
+        key: String,
+    },
 }

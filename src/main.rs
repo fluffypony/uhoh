@@ -18,8 +18,8 @@ use uhoh::restore;
 use uhoh::snapshot;
 use uhoh::update;
 
-// Use the platform-provided uhoh_dir; deduplicated here for clarity
-fn uhoh_dir() -> PathBuf { uhoh::platform::uhoh_dir() }
+// Deduplicated: use library function for ~/.uhoh
+fn uhoh_dir() -> PathBuf { uhoh::uhoh_dir() }
 
 fn ensure_uhoh_dir() -> Result<PathBuf> {
     let dir = uhoh_dir();
@@ -298,39 +298,40 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Config { subcommand } => {
+        Commands::Config { action } => {
             let config_path = uhoh.join("config.toml");
-            match subcommand.as_deref() {
-                Some("edit") => {
+            match action {
+                Some(uhoh::cli::ConfigAction::Edit) => {
                     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
                     std::process::Command::new(&editor).arg(&config_path).status()?;
                 }
-                Some("set") => {
-                    // Expect: uhoh config set <key> <value>
-                    let args: Vec<String> = std::env::args().collect();
-                    // Find the position of "set" and read two following tokens
-                    let set_pos = args.iter().position(|a| a == "set");
-                    if set_pos.is_none() || args.len() <= set_pos.unwrap() + 2 {
-                        println!("Usage: uhoh config set <key> <value>");
-                    } else {
-                        let key = args[set_pos.unwrap() + 1].clone();
-                        let value = args[set_pos.unwrap() + 2].clone();
-                        let content = if config_path.exists() { std::fs::read_to_string(&config_path)? } else { String::new() };
-                        let mut doc: toml_edit::DocumentMut = content.parse().unwrap_or_else(|_| toml_edit::DocumentMut::new());
-                        let parts: Vec<&str> = key.split('.').collect();
-                        match parts.as_slice() {
-                            [k] => { doc[*k] = toml_edit::value(parse_toml_value(&value)); }
-                            [a,b] => {
-                                if !doc.contains_key(a) { doc[*a] = toml_edit::Item::Table(toml_edit::Table::new()); }
-                                doc[*a][*b] = toml_edit::value(parse_toml_value(&value));
-                            }
-                            _ => anyhow::bail!("Key nesting deeper than 2 levels is not supported"),
+                Some(uhoh::cli::ConfigAction::Set { key, value }) => {
+                    let content = if config_path.exists() { std::fs::read_to_string(&config_path)? } else { String::new() };
+                    let mut doc: toml_edit::DocumentMut = content.parse().unwrap_or_else(|_| toml_edit::DocumentMut::new());
+                    let parts: Vec<&str> = key.split('.').collect();
+                    match parts.as_slice() {
+                        [k] => { doc[*k] = toml_edit::value(parse_toml_value(&value)); }
+                        [a,b] => {
+                            if !doc.contains_key(a) { doc[*a] = toml_edit::Item::Table(toml_edit::Table::new()); }
+                            doc[*a][*b] = toml_edit::value(parse_toml_value(&value));
                         }
-                        std::fs::write(&config_path, doc.to_string())?;
-                        println!("Set {} = {}", key, value);
+                        _ => anyhow::bail!("Key nesting deeper than 2 levels is not supported"),
                     }
+                    std::fs::write(&config_path, doc.to_string())?;
+                    println!("Set {} = {}", key, value);
                 }
-                _ => {
+                Some(uhoh::cli::ConfigAction::Get { key }) => {
+                    let content = if config_path.exists() { std::fs::read_to_string(&config_path)? } else { String::new() };
+                    let doc: toml_edit::DocumentMut = content.parse().unwrap_or_else(|_| toml_edit::DocumentMut::new());
+                    let parts: Vec<&str> = key.split('.').collect();
+                    let out = match parts.as_slice() {
+                        [k] => doc.get(*k).map(|v| v.to_string()).unwrap_or_default(),
+                        [a,b] => doc.get(*a).and_then(|t| t.get(*b)).map(|v| v.to_string()).unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    println!("{}", out);
+                }
+                None => {
                     let cfg = config::Config::load(&config_path)?;
                     println!("{}", toml::to_string_pretty(&cfg)?);
                 }

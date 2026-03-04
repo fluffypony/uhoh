@@ -292,6 +292,7 @@ fn maybe_decompress(data: &[u8]) -> Result<Vec<u8>> {
 pub fn id_to_base58(id: u64) -> String {
     // Note: base58 for zero is a single '1'. We never assign snapshot id 0.
     // Guard: if id==0 is somehow passed, return empty to avoid ambiguity with ID 1.
+    // This behavior is documented in README under Tips.
     if id == 0 { return String::new(); }
     let bytes = id.to_be_bytes();
     // Strip leading zero bytes for shorter IDs
