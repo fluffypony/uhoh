@@ -1,0 +1,2 @@
+This directory contains optional AI features used by uhoh for local-only change summaries.
+They are disabled by default and require an external sidecar (llama.cpp's llama-server).

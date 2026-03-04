@@ -1,0 +1,326 @@
+use anyhow::{Context, Result};
+use clap::Parser;
+use std::path::PathBuf;
+use tracing::warn;
+
+use uhoh::cas;
+use uhoh::cli::{Cli, Commands};
+use uhoh::config;
+use uhoh::daemon;
+use uhoh::db;
+use uhoh::diff_view;
+use uhoh::gc;
+use uhoh::git;
+use uhoh::marker;
+use uhoh::operations;
+use uhoh::platform;
+use uhoh::restore;
+use uhoh::snapshot;
+use uhoh::update;
+
+fn uhoh_dir() -> PathBuf {
+    dirs::home_dir()
+        .expect("Could not determine home directory")
+        .join(".uhoh")
+}
+
+fn ensure_uhoh_dir() -> Result<PathBuf> {
+    let dir = uhoh_dir();
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).context("Failed to create ~/.uhoh directory")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    let blobs_dir = dir.join("blobs");
+    if !blobs_dir.exists() {
+        std::fs::create_dir_all(&blobs_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&blobs_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(dir)
+}
+
+fn is_daemon_running(uhoh: &std::path::Path) -> bool {
+    let pid_path = uhoh.join("daemon.pid");
+    match std::fs::read_to_string(&pid_path) {
+        Ok(pid_str) => {
+            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                daemon::is_uhoh_process_alive(pid)
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn maybe_start_daemon(uhoh: &std::path::Path) -> Result<()> {
+    if !is_daemon_running(uhoh) {
+        tracing::info!("Daemon not running, starting automatically...");
+        daemon::spawn_detached_daemon()?;
+    }
+    Ok(())
+}
+
+fn resolve_project_path(path: Option<String>) -> Result<PathBuf> {
+    let p = match path {
+        Some(s) => dunce::canonicalize(&s)
+            .with_context(|| format!("Cannot resolve path: {}", s))?,
+        None => dunce::canonicalize(std::env::current_dir()?)
+            .context("Cannot resolve current directory")?,
+    };
+    Ok(p)
+}
+
+fn resolve_target_project(
+    _uhoh: &std::path::Path,
+    database: &db::Database,
+    target: Option<&str>,
+) -> Result<db::ProjectEntry> {
+    match target {
+        Some(t) => {
+            let as_path = PathBuf::from(t);
+            if as_path.exists() {
+                let canonical = dunce::canonicalize(&as_path)?;
+                return database
+                    .find_project_by_path(&canonical)?
+                    .context("Not a registered uhoh project");
+            }
+            database
+                .find_project_by_hash_prefix(t)?
+                .context("No project matching that identifier")
+        }
+        None => {
+            let cwd = dunce::canonicalize(std::env::current_dir()?)?;
+            database
+                .find_project_by_path(&cwd)?
+                .context("Not a registered uhoh project. Run `uhoh add` first.")
+        }
+    }
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    total += dir_size(&entry.path());
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
+
+    let cli = Cli::parse();
+    let uhoh = ensure_uhoh_dir()?;
+    let database = db::Database::open(&uhoh.join("uhoh.db"))?;
+
+    match cli.command {
+        Commands::Add { path } => {
+            maybe_start_daemon(&uhoh)?;
+            let project_path = resolve_project_path(path)?;
+
+            if let Some(existing_hash) = marker::read_marker(&project_path)? {
+                if let Some(existing) = database.get_project(&existing_hash)? {
+                    let canonical = dunce::canonicalize(&project_path)?;
+                    if existing.current_path != canonical.to_string_lossy().as_ref() {
+                        database.update_project_path(&existing_hash, &canonical.to_string_lossy())?;
+                        println!("Updated project path: {}", canonical.display());
+                    } else {
+                        println!("Already registered: {}", canonical.display());
+                    }
+                    return Ok(());
+                }
+            }
+
+            let git_dir = project_path.join(".git");
+            if !git_dir.exists() {
+                warn!("Not a git repo. Marker at {0}/.uhoh — add to your ignore file.", project_path.display());
+                eprintln!("⚠ Warning: Not a git repo. Add `.uhoh` to your ignore file.");
+            }
+
+            let project_hash = marker::create_marker(&project_path)?;
+            let canonical = dunce::canonicalize(&project_path)?;
+            database.add_project(&project_hash, &canonical.to_string_lossy())?;
+            println!("Registered: {}", canonical.display());
+
+            snapshot::create_snapshot(&uhoh, &database, &project_hash, &canonical, "manual", Some("Initial snapshot"))?;
+            println!("Initial snapshot created.");
+        }
+
+        Commands::Remove { target } => {
+            let project = match target {
+                Some(ref t) => {
+                    let canonical = dunce::canonicalize(t)?;
+                    database.find_project_by_path(&canonical)?
+                }
+                None => {
+                    let cwd = dunce::canonicalize(std::env::current_dir()?)?;
+                    database.find_project_by_path(&cwd)?
+                }
+            }.context("Project not found")?;
+            database.remove_project(&project.hash)?;
+            println!("Removed: {}", project.current_path);
+        }
+
+        Commands::List => {
+            let projects = database.list_projects()?;
+            if projects.is_empty() {
+                println!("No registered projects. Use `uhoh add` to register one.");
+            } else {
+                for p in &projects {
+                    let exists = std::path::Path::new(&p.current_path).exists();
+                    let status = if exists { "✓" } else { "✗ MISSING" };
+                    let count = database.snapshot_count(&p.hash)?;
+                    println!("  {} {} ({} snapshots) [{}]", status, p.current_path, count, &p.hash[..12]);
+                }
+            }
+        }
+
+        Commands::Snapshots { target } => {
+            let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
+            let snapshots = database.list_snapshots(&project.hash)?;
+            if snapshots.is_empty() {
+                println!("No snapshots.");
+            } else {
+                for s in &snapshots {
+                    let id_str = cas::id_to_base58(s.snapshot_id);
+                    let pin = if s.pinned { " 📌" } else { "" };
+                    let msg = if s.message.is_empty() { String::new() } else { format!(" — {}", s.message) };
+                    println!("  {} [{}] {}{}{}", s.timestamp, id_str, s.trigger, pin, msg);
+                }
+            }
+        }
+
+        Commands::Commit { message, trigger } => {
+            maybe_start_daemon(&uhoh)?;
+            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
+            let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
+            let trigger_str = trigger.unwrap_or_else(|| "manual".to_string());
+            snapshot::create_snapshot(&uhoh, &database, &project.hash, &project_path, &trigger_str, message.as_deref())?;
+            println!("Snapshot created.");
+        }
+
+        Commands::Restore { id, target, dry_run, force } => {
+            let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
+            restore::cmd_restore(&uhoh, &database, &project, &id, dry_run, force)?;
+        }
+
+        Commands::Gitstash { id, target } => {
+            let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
+            git::cmd_gitstash(&uhoh, &database, &project, &id)?;
+        }
+
+        Commands::Diff { id1, id2 } => {
+            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
+            let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
+            diff_view::cmd_diff(&uhoh, &database, &project, id1.as_deref(), id2.as_deref())?;
+        }
+
+        Commands::Cat { path, id } => {
+            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
+            let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
+            diff_view::cmd_cat(&uhoh, &database, &project, &path, &id)?;
+        }
+
+        Commands::Log { path } => {
+            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
+            let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
+            diff_view::cmd_log(&database, &project, &path)?;
+        }
+
+        Commands::Start { service } => {
+            if service {
+                daemon::run_foreground(&uhoh, &database).await?;
+            } else {
+                daemon::spawn_detached_daemon()?;
+            }
+        }
+        Commands::Stop => { daemon::stop_daemon(&uhoh)?; }
+        Commands::Restart => {
+            daemon::stop_daemon(&uhoh).ok();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            daemon::spawn_detached_daemon()?;
+        }
+
+        Commands::Hook { action } => {
+            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
+            match action.as_str() {
+                "install" => git::install_hook(&project_path)?,
+                "remove" => git::remove_hook(&project_path)?,
+                other => anyhow::bail!("Unknown hook action: '{}'. Use 'install' or 'remove'.", other),
+            }
+        }
+
+        Commands::Config { subcommand } => {
+            let config_path = uhoh.join("config.toml");
+            match subcommand.as_deref() {
+                Some("edit") => {
+                    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+                    std::process::Command::new(&editor).arg(&config_path).status()?;
+                }
+                Some("set") => {
+                    println!("Usage: uhoh config set is not yet implemented. Edit config.toml directly.");
+                }
+                _ => {
+                    let cfg = config::Config::load(&config_path)?;
+                    println!("{}", toml::to_string_pretty(&cfg)?);
+                }
+            }
+        }
+
+        Commands::Gc => { gc::run_gc(&uhoh, &database)?; }
+        Commands::Update => { update::check_and_apply_update(&uhoh).await?; }
+
+        Commands::Status => {
+            let running = is_daemon_running(&uhoh);
+            println!("Daemon: {}", if running { "running" } else { "stopped" });
+            let projects = database.list_projects()?;
+            println!("Projects: {}", projects.len());
+            let total: u64 = projects.iter().filter_map(|p| database.snapshot_count(&p.hash).ok()).sum();
+            println!("Snapshots: {}", total);
+            let blobs = uhoh.join("blobs");
+            if blobs.exists() { println!("Blob storage: {:.1} MB", dir_size(&blobs) as f64 / 1_048_576.0); }
+            let cfg = config::Config::load(&uhoh.join("config.toml")).unwrap_or_default();
+            println!("AI: {}", if cfg.ai.enabled { "enabled" } else { "disabled" });
+        }
+
+        Commands::Mark { label } => {
+            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
+            let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
+            operations::cmd_mark(&database, &project, &label)?;
+        }
+        Commands::Undo { target } => {
+            let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
+            operations::cmd_undo(&uhoh, &database, &project)?;
+        }
+        Commands::Operations { target } => {
+            let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
+            operations::cmd_list_operations(&database, &project)?;
+        }
+
+        Commands::ServiceInstall => { platform::install_service()?; println!("Service installed."); }
+        Commands::ServiceRemove => { platform::remove_service()?; println!("Service removed."); }
+    }
+
+    Ok(())
+}

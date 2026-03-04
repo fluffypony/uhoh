@@ -1,0 +1,683 @@
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection, OptionalExtension};
+use std::path::Path;
+use std::sync::Mutex;
+
+/// Thread-safe SQLite database wrapper.
+/// SQLite with WAL mode handles concurrent readers and serialized writers.
+pub struct Database {
+    conn: Mutex<Connection>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectEntry {
+    pub hash: String,
+    pub current_path: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotRow {
+    pub rowid: i64,
+    pub snapshot_id: u64,
+    pub timestamp: String,
+    pub trigger: String,
+    pub message: String,
+    pub pinned: bool,
+    pub ai_summary: Option<String>,
+    pub file_count: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileEntryRow {
+    pub path: String,
+    pub hash: String,
+    pub size: u64,
+    pub stored: bool,
+    pub executable: bool,
+}
+
+impl Database {
+    pub fn open(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path)
+            .with_context(|| format!("Failed to open database: {}", path.display()))?;
+
+        // Enable WAL mode for concurrent read/write
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+
+        let db = Database {
+            conn: Mutex::new(conn),
+        };
+        db.migrate()?;
+        Ok(db)
+    }
+
+    fn migrate(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY
+            );",
+        )?;
+
+        let version: u32 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        if version < 1 {
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS projects (
+                    hash TEXT PRIMARY KEY,
+                    current_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    next_snapshot_id INTEGER NOT NULL DEFAULT 1
+                );
+
+                CREATE TABLE IF NOT EXISTS project_history (
+                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
+                    old_path TEXT NOT NULL,
+                    changed_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS snapshots (
+                    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
+                    snapshot_id INTEGER NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    trigger TEXT NOT NULL,
+                    message TEXT NOT NULL DEFAULT '',
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    ai_summary TEXT,
+                    UNIQUE(project_hash, snapshot_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS snapshot_files (
+                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                    path TEXT NOT NULL,
+                    hash TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    stored INTEGER NOT NULL DEFAULT 1,
+                    executable INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (snapshot_rowid, path)
+                );
+
+                CREATE TABLE IF NOT EXISTS snapshot_deleted (
+                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                    path TEXT NOT NULL,
+                    hash TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    stored INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (snapshot_rowid, path)
+                );
+
+                CREATE TABLE IF NOT EXISTS snapshot_tree (
+                    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                    dir_path TEXT NOT NULL,
+                    tree_hash TEXT NOT NULL,
+                    PRIMARY KEY (snapshot_rowid, dir_path)
+                );
+
+                CREATE TABLE IF NOT EXISTS operations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
+                    label TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    first_snapshot_id INTEGER,
+                    last_snapshot_id INTEGER
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_snapshot_project
+                    ON snapshots(project_hash, timestamp);
+                CREATE INDEX IF NOT EXISTS idx_snapshot_files_hash
+                    ON snapshot_files(hash);
+                CREATE INDEX IF NOT EXISTS idx_snapshot_deleted_hash
+                    ON snapshot_deleted(hash);
+                CREATE INDEX IF NOT EXISTS idx_file_path
+                    ON snapshot_files(path, snapshot_rowid);
+                CREATE INDEX IF NOT EXISTS idx_operations_project
+                    ON operations(project_hash);
+
+                INSERT OR REPLACE INTO schema_version (version) VALUES (1);
+                ",
+            )?;
+        }
+
+        Ok(())
+    }
+
+    // === Projects ===
+
+    pub fn add_project(&self, hash: &str, path: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO projects (hash, current_path, created_at) VALUES (?1, ?2, ?3)",
+            params![hash, path, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_project(&self, hash: &str) -> Result<Option<ProjectEntry>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT hash, current_path, created_at FROM projects WHERE hash = ?1",
+            params![hash],
+            |row| {
+                Ok(ProjectEntry {
+                    hash: row.get(0)?,
+                    current_path: row.get(1)?,
+                    created_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to query project")
+    }
+
+    pub fn find_project_by_path(&self, path: &Path) -> Result<Option<ProjectEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let path_str = path.to_string_lossy();
+        conn.query_row(
+            "SELECT hash, current_path, created_at FROM projects WHERE current_path = ?1",
+            params![path_str.as_ref()],
+            |row| {
+                Ok(ProjectEntry {
+                    hash: row.get(0)?,
+                    current_path: row.get(1)?,
+                    created_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to query project by path")
+    }
+
+    pub fn find_project_by_hash_prefix(&self, prefix: &str) -> Result<Option<ProjectEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("{}%", prefix);
+        conn.query_row(
+            "SELECT hash, current_path, created_at FROM projects WHERE hash LIKE ?1 LIMIT 1",
+            params![pattern],
+            |row| {
+                Ok(ProjectEntry {
+                    hash: row.get(0)?,
+                    current_path: row.get(1)?,
+                    created_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to query project by hash prefix")
+    }
+
+    pub fn update_project_path(&self, hash: &str, new_path: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        // Save old path to history
+        let old_path: Option<String> = conn
+            .query_row(
+                "SELECT current_path FROM projects WHERE hash = ?1",
+                params![hash],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(old) = old_path {
+            if old != new_path {
+                conn.execute(
+                    "INSERT INTO project_history (project_hash, old_path, changed_at) VALUES (?1, ?2, ?3)",
+                    params![hash, old, now],
+                )?;
+            }
+        }
+        conn.execute(
+            "UPDATE projects SET current_path = ?1 WHERE hash = ?2",
+            params![new_path, hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_project(&self, hash: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM projects WHERE hash = ?1", params![hash])?;
+        Ok(())
+    }
+
+    pub fn list_projects(&self) -> Result<Vec<ProjectEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT hash, current_path, created_at FROM projects ORDER BY created_at")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProjectEntry {
+                hash: row.get(0)?,
+                current_path: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+        let mut projects = Vec::new();
+        for row in rows {
+            projects.push(row?);
+        }
+        Ok(projects)
+    }
+
+    // === Snapshots ===
+
+    pub fn next_snapshot_id(&self, project_hash: &str) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let id: u64 = conn.query_row(
+            "SELECT next_snapshot_id FROM projects WHERE hash = ?1",
+            params![project_hash],
+            |row| row.get(0),
+        )?;
+        conn.execute(
+            "UPDATE projects SET next_snapshot_id = ?1 WHERE hash = ?2",
+            params![id + 1, project_hash],
+        )?;
+        Ok(id)
+    }
+
+    /// Create a snapshot in a single transaction (atomic).
+    pub fn create_snapshot(
+        &self,
+        project_hash: &str,
+        snapshot_id: u64,
+        timestamp: &str,
+        trigger: &str,
+        message: &str,
+        pinned: bool,
+        files: &[(String, String, u64, bool, bool)], // (path, hash, size, stored, executable)
+        deleted: &[(String, String, u64, bool)],       // (path, hash, size, stored)
+        tree_hashes: &[(String, String)],              // (dir_path, tree_hash)
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+
+        tx.execute(
+            "INSERT INTO snapshots (project_hash, snapshot_id, timestamp, trigger, message, pinned)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![project_hash, snapshot_id, timestamp, trigger, message, pinned as i32],
+        )?;
+        let rowid = tx.last_insert_rowid();
+
+        {
+            let mut file_stmt = tx.prepare(
+                "INSERT INTO snapshot_files (snapshot_rowid, path, hash, size, stored, executable)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for (path, hash, size, stored, executable) in files {
+                file_stmt.execute(params![
+                    rowid,
+                    path,
+                    hash,
+                    size,
+                    *stored as i32,
+                    *executable as i32
+                ])?;
+            }
+        }
+
+        {
+            let mut del_stmt = tx.prepare(
+                "INSERT INTO snapshot_deleted (snapshot_rowid, path, hash, size, stored)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for (path, hash, size, stored) in deleted {
+                del_stmt.execute(params![rowid, path, hash, size, *stored as i32])?;
+            }
+        }
+
+        {
+            let mut tree_stmt = tx.prepare(
+                "INSERT INTO snapshot_tree (snapshot_rowid, dir_path, tree_hash)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for (dir_path, tree_hash) in tree_hashes {
+                tree_stmt.execute(params![rowid, dir_path, tree_hash])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(rowid)
+    }
+
+    pub fn list_snapshots(&self, project_hash: &str) -> Result<Vec<SnapshotRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
+                    s.ai_summary,
+                    (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid) as file_count
+             FROM snapshots s
+             WHERE s.project_hash = ?1
+             ORDER BY s.timestamp DESC",
+        )?;
+        let rows = stmt.query_map(params![project_hash], |row| {
+            Ok(SnapshotRow {
+                rowid: row.get(0)?,
+                snapshot_id: row.get::<_, i64>(1)? as u64,
+                timestamp: row.get(2)?,
+                trigger: row.get(3)?,
+                message: row.get(4)?,
+                pinned: row.get::<_, i32>(5)? != 0,
+                ai_summary: row.get(6)?,
+                file_count: row.get::<_, i64>(7)? as u64,
+            })
+        })?;
+        let mut snapshots = Vec::new();
+        for row in rows {
+            snapshots.push(row?);
+        }
+        Ok(snapshots)
+    }
+
+    pub fn snapshot_count(&self, project_hash: &str) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM snapshots WHERE project_hash = ?1",
+            params![project_hash],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
+    }
+
+    pub fn find_snapshot_by_base58(
+        &self,
+        project_hash: &str,
+        base58_id: &str,
+    ) -> Result<Option<SnapshotRow>> {
+        let snapshot_id = crate::cas::base58_to_id(base58_id)
+            .context("Invalid snapshot ID")?;
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
+                    s.ai_summary,
+                    (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid) as fc
+             FROM snapshots s
+             WHERE s.project_hash = ?1 AND s.snapshot_id = ?2",
+            params![project_hash, snapshot_id],
+            |row| {
+                Ok(SnapshotRow {
+                    rowid: row.get(0)?,
+                    snapshot_id: row.get::<_, i64>(1)? as u64,
+                    timestamp: row.get(2)?,
+                    trigger: row.get(3)?,
+                    message: row.get(4)?,
+                    pinned: row.get::<_, i32>(5)? != 0,
+                    ai_summary: row.get(6)?,
+                    file_count: row.get::<_, i64>(7)? as u64,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to query snapshot")
+    }
+
+    pub fn get_snapshot_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path, hash, size, stored, executable
+             FROM snapshot_files WHERE snapshot_rowid = ?1",
+        )?;
+        let rows = stmt.query_map(params![snapshot_rowid], |row| {
+            Ok(FileEntryRow {
+                path: row.get(0)?,
+                hash: row.get(1)?,
+                size: row.get::<_, i64>(2)? as u64,
+                stored: row.get::<_, i32>(3)? != 0,
+                executable: row.get::<_, i32>(4)? != 0,
+            })
+        })?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
+    }
+
+    pub fn get_snapshot_deleted_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path, hash, size, stored FROM snapshot_deleted WHERE snapshot_rowid = ?1",
+        )?;
+        let rows = stmt.query_map(params![snapshot_rowid], |row| {
+            Ok(FileEntryRow {
+                path: row.get(0)?,
+                hash: row.get(1)?,
+                size: row.get::<_, i64>(2)? as u64,
+                stored: row.get::<_, i32>(3)? != 0,
+                executable: false,
+            })
+        })?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
+    }
+
+    /// Get the most recent snapshot rowid for a project
+    pub fn latest_snapshot_rowid(&self, project_hash: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT rowid FROM snapshots WHERE project_hash = ?1 ORDER BY snapshot_id DESC LIMIT 1",
+            params![project_hash],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("Failed to query latest snapshot")
+    }
+
+    /// Get file history: all snapshot entries for a given path, newest first
+    pub fn file_history(
+        &self,
+        project_hash: &str,
+        file_path: &str,
+    ) -> Result<Vec<(u64, String, String, String)>> {
+        // Returns (snapshot_id, timestamp, hash, trigger)
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.snapshot_id, s.timestamp, f.hash, s.trigger
+             FROM snapshot_files f
+             JOIN snapshots s ON s.rowid = f.snapshot_rowid
+             WHERE s.project_hash = ?1 AND f.path = ?2
+             ORDER BY s.snapshot_id DESC",
+        )?;
+        let rows = stmt.query_map(params![project_hash, file_path], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
+    }
+
+    /// All blob hashes referenced by any snapshot
+    pub fn all_referenced_blob_hashes(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut set = std::collections::HashSet::new();
+        let mut stmt = conn.prepare("SELECT DISTINCT hash FROM snapshot_files WHERE stored = 1")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            set.insert(row?);
+        }
+        let mut stmt2 = conn.prepare("SELECT DISTINCT hash FROM snapshot_deleted WHERE stored = 1")?;
+        let rows2 = stmt2.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows2 {
+            set.insert(row?);
+        }
+        Ok(set)
+    }
+
+    /// Delete old snapshots (used by compaction)
+    pub fn delete_snapshot(&self, rowid: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM snapshots WHERE rowid = ?1", params![rowid])?;
+        Ok(())
+    }
+
+    pub fn set_ai_summary(&self, snapshot_rowid: i64, summary: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE snapshots SET ai_summary = ?1 WHERE rowid = ?2",
+            params![summary, snapshot_rowid],
+        )?;
+        Ok(())
+    }
+
+    // === Operations ===
+
+    pub fn create_operation(&self, project_hash: &str, label: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO operations (project_hash, label, started_at) VALUES (?1, ?2, ?3)",
+            params![project_hash, label, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn finish_operation(
+        &self,
+        op_id: i64,
+        first_snapshot_id: u64,
+        last_snapshot_id: u64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE operations SET ended_at = ?1, first_snapshot_id = ?2, last_snapshot_id = ?3
+             WHERE id = ?4",
+            params![now, first_snapshot_id, last_snapshot_id, op_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set the first snapshot id of an operation (typically at operation start)
+    pub fn set_operation_first_snapshot(&self, op_id: i64, first_snapshot_id: u64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE operations SET first_snapshot_id = ?1 WHERE id = ?2",
+            params![first_snapshot_id, op_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set the last snapshot id and close an operation (preserves first_snapshot_id)
+    pub fn close_operation_with_last(&self, op_id: i64, last_snapshot_id: u64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE operations SET ended_at = ?1, last_snapshot_id = ?2 WHERE id = ?3",
+            params![now, last_snapshot_id, op_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_active_operation(&self, project_hash: &str) -> Result<Option<(i64, String)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, label FROM operations WHERE project_hash = ?1 AND ended_at IS NULL
+             ORDER BY id DESC LIMIT 1",
+            params![project_hash],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .context("Failed to query active operation")
+    }
+
+    pub fn list_operations(
+        &self,
+        project_hash: &str,
+    ) -> Result<Vec<(i64, String, String, Option<String>, Option<u64>, Option<u64>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, label, started_at, ended_at, first_snapshot_id, last_snapshot_id
+             FROM operations WHERE project_hash = ?1 ORDER BY id DESC LIMIT 50",
+        )?;
+        let rows = stmt.query_map(params![project_hash], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
+                row.get::<_, Option<i64>>(5)?.map(|v| v as u64),
+            ))
+        })?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
+    }
+
+    pub fn get_latest_completed_operation(
+        &self,
+        project_hash: &str,
+    ) -> Result<Option<(i64, String, u64, u64)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, label, first_snapshot_id, last_snapshot_id
+             FROM operations
+             WHERE project_hash = ?1 AND ended_at IS NOT NULL
+             ORDER BY id DESC LIMIT 1",
+            params![project_hash],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get::<_, i64>(3)? as u64,
+                ))
+            },
+        )
+        .optional()
+        .context("Failed to query latest operation")
+    }
+
+    /// Find the snapshot just before a given snapshot_id
+    pub fn snapshot_before(
+        &self,
+        project_hash: &str,
+        snapshot_id: u64,
+    ) -> Result<Option<SnapshotRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
+                    s.ai_summary,
+                    (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid) as fc
+             FROM snapshots s
+             WHERE s.project_hash = ?1 AND s.snapshot_id < ?2
+             ORDER BY s.snapshot_id DESC LIMIT 1",
+            params![project_hash, snapshot_id],
+            |row| {
+                Ok(SnapshotRow {
+                    rowid: row.get(0)?,
+                    snapshot_id: row.get::<_, i64>(1)? as u64,
+                    timestamp: row.get(2)?,
+                    trigger: row.get(3)?,
+                    message: row.get(4)?,
+                    pinned: row.get::<_, i32>(5)? != 0,
+                    ai_summary: row.get(6)?,
+                    file_count: row.get::<_, i64>(7)? as u64,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to query preceding snapshot")
+    }
+}

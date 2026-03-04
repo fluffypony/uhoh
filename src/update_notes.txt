@@ -1,0 +1,4 @@
+Update system notes:
+- The embedded Ed25519 public key in src/update.rs must be replaced with the real release key before publishing.
+- DNS TXT hash verification is a fallback, not a primary trust anchor.
+- Binaries should be signed and .sig uploaded alongside artifacts.
