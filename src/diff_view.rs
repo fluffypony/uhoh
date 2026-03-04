@@ -222,6 +222,7 @@ fn build_current_file_list_readonly(
             stored: false,
             executable: cas::is_executable(path),
             mtime: None,
+            storage_method: 0,
         });
     }
     Ok(entries)

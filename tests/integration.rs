@@ -54,9 +54,9 @@ fn test_snapshot_creation_and_query() {
     let snap_id = db.next_snapshot_id("proj1").unwrap();
     assert_eq!(snap_id, 1);
 
-    let files = vec![
-        ("src/main.rs".to_string(), "hash1".to_string(), 100u64, true, false, None),
-        ("README.md".to_string(), "hash2".to_string(), 50u64, true, false, None),
+    let files: Vec<(String, String, u64, bool, bool, Option<i64>, i64)> = vec![
+        ("src/main.rs".to_string(), "hash1".to_string(), 100u64, true, false, None, 1),
+        ("README.md".to_string(), "hash2".to_string(), 50u64, true, false, None, 1),
     ];
 
     let rowid = db

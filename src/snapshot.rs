@@ -117,6 +117,7 @@ pub fn create_snapshot(
                     cached.stored,
                     cached.executable,
                     Some(cached.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
+                    cached.storage_method,
                 ));
                 continue;
             }
@@ -243,7 +244,7 @@ pub fn create_snapshot(
         let cfg_cloned = config.clone();
         let files_added: Vec<String> = new_files.iter().filter(|p| !prev_files.contains_key(*p)).cloned().collect();
         let files_modified: Vec<String> = new_files.iter().filter(|p| prev_files.contains_key(*p)).cloned().collect();
-        let files_deleted: Vec<String> = deleted_for_manifest.iter().map(|(p, _, _, _)| p.clone()).collect();
+        let files_deleted: Vec<String> = deleted_for_manifest.iter().map(|(p, _, _, _, _)| p.clone()).collect();
         let db_rowid = rowid;
 
         // Build compact diff text for modified files

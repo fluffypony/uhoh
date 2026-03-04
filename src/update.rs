@@ -175,11 +175,12 @@ fn verify_ed25519_signature(data: &[u8], signature_bytes: &[u8]) -> Result<bool>
 }
 
 async fn dns_verify_hash(version: &str, asset: &str) -> Result<String> {
-    use hickory_resolver::TokioAsyncResolver;
     use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use hickory_resolver::{name_server::TokioConnectionProvider, Resolver};
 
     let query = format!("release-{}.{}.releases.uhoh.it.", asset, version);
-    let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+    let resolver: Resolver<_> = Resolver::builder_with_config(ResolverConfig::default(), TokioConnectionProvider::default())
+        .build();
     let response = resolver
         .txt_lookup(query.clone())
         .await
