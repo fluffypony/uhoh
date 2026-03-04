@@ -8,7 +8,7 @@ use crate::daemon::WatchEvent;
 /// Start watching the given paths. Returns the watcher handle (must be kept alive).
 pub fn start_watching(
     paths: &[PathBuf],
-    tx: mpsc::Sender<WatchEvent>,
+    tx: tokio::sync::mpsc::UnboundedSender<WatchEvent>,
 ) -> Result<RecommendedWatcher> {
     let (file_tx, file_rx) = std::sync::mpsc::channel();
 
@@ -39,13 +39,13 @@ pub fn start_watching(
                     Ok(event) => {
                         match event.kind {
                             EventKind::Remove(_) => {
-                                for p in event.paths { let _ = sender.blocking_send(WatchEvent::FileDeleted(p)); }
+                                for p in event.paths { let _ = sender.send(WatchEvent::FileDeleted(p)); }
                             }
                             EventKind::Create(_) | EventKind::Modify(_) => {
-                                for p in event.paths { let _ = sender.blocking_send(WatchEvent::FileChanged(p)); }
+                                for p in event.paths { let _ = sender.send(WatchEvent::FileChanged(p)); }
                             }
                             EventKind::Other => {
-                                let _ = sender.blocking_send(WatchEvent::Overflow);
+                                let _ = sender.send(WatchEvent::Overflow);
                             }
                             _ => {}
                         }
@@ -53,7 +53,7 @@ pub fn start_watching(
                     Err(e) => {
                         tracing::warn!("Watch error: {}", e);
                         // On error, treat as overflow (global rescan)
-                        let _ = sender.blocking_send(WatchEvent::Overflow);
+                        let _ = sender.send(WatchEvent::Overflow);
                     }
                 }
             }
@@ -62,7 +62,7 @@ pub fn start_watching(
             tracing::error!("Watcher bridge thread panicked; signaling WatcherDied");
         }
         // Notify daemon that watcher died
-        let _ = sender.blocking_send(WatchEvent::WatcherDied);
+        let _ = sender.send(WatchEvent::WatcherDied);
     });
 
     Ok(watcher)

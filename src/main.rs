@@ -176,7 +176,7 @@ async fn main() -> Result<()> {
             println!("Registered: {}", canonical.display());
 
             let cfg = config::Config::load(&uhoh.join("config.toml"))?;
-            snapshot::create_snapshot(&uhoh, &database, &project_hash, &canonical, "manual", Some("Initial snapshot"), &cfg)?;
+            snapshot::create_snapshot(&uhoh, &database, &project_hash, &canonical, "manual", Some("Initial snapshot"), &cfg, None)?;
             println!("Initial snapshot created.");
         }
 
@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
             let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
             let trigger_str = trigger.unwrap_or_else(|| "manual".to_string());
             let cfg = config::Config::load(&uhoh.join("config.toml"))?;
-            snapshot::create_snapshot(&uhoh, &database, &project.hash, &project_path, &trigger_str, message.as_deref(), &cfg)?;
+            snapshot::create_snapshot(&uhoh, &database, &project.hash, &project_path, &trigger_str, message.as_deref(), &cfg, None)?;
             println!("Snapshot created.");
         }
 
@@ -277,7 +277,7 @@ async fn main() -> Result<()> {
 
         Commands::Start { service } => {
             if service {
-                daemon::run_foreground(&uhoh, &database).await?;
+                daemon::run_foreground(&uhoh, std::sync::Arc::new(database)).await?;
             } else {
                 daemon::spawn_detached_daemon()?;
             }
@@ -447,7 +447,7 @@ async fn run_zero_verb() -> Result<()> {
     println!("Registered: {}", canonical.display());
 
     let cfg = config::Config::load(&uhoh.join("config.toml"))?;
-    snapshot::create_snapshot(&uhoh, &database, &project_hash, &canonical, "manual", Some("Initial snapshot"), &cfg)?;
+    snapshot::create_snapshot(&uhoh, &database, &project_hash, &canonical, "manual", Some("Initial snapshot"), &cfg, None)?;
     println!("Initial snapshot created.");
 
     Ok(())

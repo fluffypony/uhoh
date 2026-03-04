@@ -85,15 +85,13 @@ impl Database {
 
     /// Get a connection guard, recovering from mutex poisoning.
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn
-            .lock()
-            .unwrap_or_else(|poisoned| {
-                tracing::warn!("Database mutex was poisoned, recovering");
-                let inner = poisoned.into_inner();
-                // Attempt to rollback any in-progress transaction
-                let _ = inner.execute_batch("ROLLBACK");
-                inner
-            })
+        match self.conn.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!("Database mutex poisoned. Aborting to avoid inconsistent state.");
+                std::process::abort();
+            }
+        }
     }
 
     fn migrate(&self) -> Result<()> {

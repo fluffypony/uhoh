@@ -14,8 +14,8 @@ pub fn generate_summary_blocking(
     diff_text: &str,
     files: &FileChangeSummary,
 ) -> Result<String> {
-    // Cap to a safe upper bound to prevent runaway contexts
-    let capped_tokens = std::cmp::min(config.ai.max_context_tokens, 8192);
+    // Cap to model/server safe upper bound to prevent runaway contexts
+    let capped_tokens = config.ai.max_context_tokens;
     // Truncate diff to configured max context (rough 4 chars/token) with UTF-8 boundary safety
     let max_chars = capped_tokens.saturating_mul(4);
     let truncated = if diff_text.len() > max_chars {
@@ -40,7 +40,8 @@ pub fn generate_summary_blocking(
     };
 
     // Spawn or reuse sidecar
-    let port = crate::ai::sidecar::get_or_spawn_port(&model_path, uhoh_dir, config.ai.idle_shutdown_secs)?;
+    // Pass through context size cap so sidecar uses a consistent ctx-size
+    let port = crate::ai::sidecar::get_or_spawn_port_with_ctx(&model_path, uhoh_dir, config.ai.idle_shutdown_secs, capped_tokens as u64)?;
 
     // Build prompt
     let prompt = format!(

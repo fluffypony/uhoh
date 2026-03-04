@@ -31,63 +31,9 @@ pub fn create_snapshot(
     trigger: &str,
     message: Option<&str>,
     config: &Config,
+    changed_paths: Option<&[PathBuf]>,
 ) -> Result<Option<u64>> {
     let blob_root = uhoh_dir.join("blobs");
-
-    // Walk directory respecting ignore rules
-    let walker = ignore_rules::build_walker(project_path);
-    let mut current_files: HashMap<String, (PathBuf, std::fs::Metadata)> = HashMap::new();
-    let mut total_project_size: u64 = 0;
-
-    // Pre-count entries to optionally show a progress bar for large scans
-    let mut entries: Vec<ignore::DirEntry> = Vec::new();
-    for entry in walker { if let Ok(e) = entry { entries.push(e); } }
-    let show_pb = entries.len() > 1000;
-    let pb = if show_pb {
-        let pb = ProgressBar::new(entries.len() as u64);
-        pb.set_style(ProgressStyle::default_bar().template("[{elapsed_precise}] {bar:40} {pos}/{len} files").unwrap());
-        Some(pb)
-    } else { None };
-
-    for entry in entries {
-        let entry = match entry {
-            e => e,
-        };
-
-        let path = entry.path();
-        if !path.is_file() {
-            if let Some(pb) = &pb { pb.inc(1); }
-            continue;
-        }
-        // Skip the marker file itself
-        if path.file_name().map_or(false, |n| n == ".uhoh") {
-            if let Some(pb) = &pb { pb.inc(1); }
-            continue;
-        }
-
-        let rel_path = match path.strip_prefix(project_path) {
-            Ok(r) => cas::normalize_path(r),
-            Err(_) => continue,
-        };
-
-        // Skip non-UTF-8 paths (with warning) to prevent TOML/DB corruption
-        if path.to_str().is_none() {
-            tracing::warn!("Skipping non-UTF-8 path: {:?}", path);
-            continue;
-        }
-
-        match path.metadata() {
-            Ok(meta) => {
-                total_project_size = total_project_size.saturating_add(meta.len());
-                current_files.insert(rel_path, (path.to_path_buf(), meta));
-            }
-            Err(e) => {
-                tracing::warn!("Cannot stat {}: {}", path.display(), e);
-            }
-        }
-        if let Some(pb) = &pb { pb.inc(1); }
-    }
-    if let Some(pb) = pb { pb.finish_and_clear(); }
 
     // Load previous snapshot for comparison
     let prev_files = load_previous_snapshot_files(database, project_hash)?;
@@ -101,79 +47,183 @@ pub fn create_snapshot(
     // Track current path -> (hash, stored) for diff building
     let mut current_hashes: HashMap<String, (String, bool)> = HashMap::new();
 
-    for (rel_path, (abs_path, meta)) in &current_files {
-        let size = meta.len();
-        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        let executable = cas::is_executable(abs_path);
+    let incremental = changed_paths.is_some();
+    if let Some(paths) = changed_paths {
+        // If any changed path is a directory or equals project root, fall back to full scan
+        let mut requires_full = false;
+        for p in paths {
+            if p == project_path || p.is_dir() { requires_full = true; break; }
+        }
+        if requires_full {
+            return create_snapshot(uhoh_dir, database, project_hash, project_path, trigger, message, config, None);
+        }
 
-        // Check if we can skip hashing (mtime + size unchanged)
-        if let Some(cached) = prev_files.get(rel_path) {
-            let fs_mtime_secs = mtime
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            let cached_secs = cached
-                .mtime
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            if cached.size == size && cached_secs == fs_mtime_secs {
-                // Carry forward unchanged file
-                files_for_manifest.push(crate::db::SnapFileEntry {
-                    path: rel_path.clone(),
-                    hash: cached.hash.clone(),
-                    size: cached.size,
-                    stored: cached.stored,
-                    executable: cached.executable,
-                    mtime: Some(cached.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
-                    storage_method: cached.storage_method,
-                });
-                continue;
+        // Build set of relative changed file paths
+        let mut rel_changed: HashSet<String> = HashSet::new();
+        for p in paths {
+            if !p.starts_with(project_path) { continue; }
+            if let Ok(rel) = p.strip_prefix(project_path) {
+                let rel_s = cas::normalize_path(rel);
+                rel_changed.insert(rel_s);
             }
         }
 
-        // File is new or changed — hash and store
-        match cas::store_blob_from_file(
-            &blob_root,
-            abs_path,
-            config.storage.max_copy_blob_bytes,
-            config.storage.max_binary_blob_bytes,
-            config.storage.max_text_blob_bytes,
-        ) {
-            Ok((hash, size, method)) => {
-                let is_new_or_changed = prev_files
-                    .get(rel_path)
-                    .map_or(true, |prev| prev.hash != hash);
-                if is_new_or_changed {
-                    has_changes = true;
-                    new_files.push(rel_path.clone());
+        let mut inserted: HashSet<String> = HashSet::new();
+        // Process only changed files
+        for rel_path in rel_changed.iter() {
+            let abs_path = project_path.join(rel_path);
+            let exists = abs_path.is_file();
+            if exists {
+                // Skip marker file
+                if abs_path.file_name().map_or(false, |n| n == ".uhoh") { continue; }
+                // Skip non-UTF-8
+                if abs_path.to_str().is_none() { tracing::warn!("Skipping non-UTF-8 path: {:?}", abs_path); continue; }
+
+                match abs_path.metadata() {
+                    Ok(meta) => {
+                        let size = meta.len();
+                        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                        let executable = cas::is_executable(&abs_path);
+                        if let Some(cached) = prev_files.get(rel_path) {
+                            let fs_mtime_secs = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                            let cached_secs = cached.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                            if cached.size == size && cached_secs == fs_mtime_secs {
+                                files_for_manifest.push(crate::db::SnapFileEntry {
+                                    path: rel_path.clone(),
+                                    hash: cached.hash.clone(),
+                                    size: cached.size,
+                                    stored: cached.stored,
+                                    executable: cached.executable,
+                                    mtime: Some(cached.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
+                                    storage_method: cached.storage_method,
+                                });
+                                inserted.insert(rel_path.clone());
+                                continue;
+                            }
+                        }
+
+                        match cas::store_blob_from_file(
+                            &blob_root,
+                            &abs_path,
+                            config.storage.max_copy_blob_bytes,
+                            config.storage.max_binary_blob_bytes,
+                            config.storage.max_text_blob_bytes,
+                        ) {
+                            Ok((hash, size, method)) => {
+                                let is_new_or_changed = prev_files.get(rel_path).map_or(true, |prev| prev.hash != hash);
+                                if is_new_or_changed { has_changes = true; new_files.push(rel_path.clone()); }
+                                let mtime_i = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                                let stored = method.is_recoverable();
+                                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored, executable, mtime: Some(mtime_i), storage_method: method.to_db() });
+                                current_hashes.insert(rel_path.clone(), (hash, stored));
+                                inserted.insert(rel_path.clone());
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
+                                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: String::new(), size, stored: false, executable, mtime: Some(mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64), storage_method: cas::StorageMethod::None.to_db() });
+                                current_hashes.insert(rel_path.clone(), (String::new(), false));
+                                inserted.insert(rel_path.clone());
+                            }
+                        }
+                    }
+                    Err(e) => { tracing::warn!("Cannot stat {}: {}", abs_path.display(), e); }
                 }
-                let mtime_i = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-                let stored = method.is_recoverable();
-                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored, executable, mtime: Some(mtime_i), storage_method: method.to_db() });
-                current_hashes.insert(rel_path.clone(), (hash, stored));
-            }
-            Err(e) => {
-                tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
-                // Record as unstored
-                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: String::new(), size, stored: false, executable, mtime: Some(mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64), storage_method: cas::StorageMethod::None.to_db() });
-                current_hashes.insert(rel_path.clone(), (String::new(), false));
+            } else {
+                // Potential deletion
+                if let Some(cached) = prev_files.get(rel_path) {
+                    has_changes = true;
+                    deleted_for_manifest.push((
+                        rel_path.clone(),
+                        cached.hash.clone(),
+                        cached.size,
+                        cached.stored,
+                        cas::StorageMethod::from_db(cached.storage_method).to_db(),
+                    ));
+                }
             }
         }
-    }
 
-    // Detect deleted files
-    let current_paths: HashSet<&String> = current_files.keys().collect();
-    for (path, cached) in &prev_files {
-        if !current_paths.contains(path) {
-            has_changes = true;
-            deleted_for_manifest.push((
-                path.clone(),
-                cached.hash.clone(),
-                cached.size,
-                cached.stored,
-                cas::StorageMethod::from_db(cached.storage_method).to_db(),
-            ));
+        // Carry forward all other unchanged files from previous snapshot
+        for (path, cached) in &prev_files {
+            if inserted.contains(path) { continue; }
+            files_for_manifest.push(crate::db::SnapFileEntry {
+                path: path.clone(),
+                hash: cached.hash.clone(),
+                size: cached.size,
+                stored: cached.stored,
+                executable: cached.executable,
+                mtime: Some(cached.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
+                storage_method: cached.storage_method,
+            });
+        }
+    } else {
+        // Full walk
+        // Walk directory respecting ignore rules
+        let walker = ignore_rules::build_walker(project_path);
+        let mut current_files: HashMap<String, (PathBuf, std::fs::Metadata)> = HashMap::new();
+
+        // Pre-count entries to optionally show a progress bar for large scans
+        let mut entries: Vec<ignore::DirEntry> = Vec::new();
+        for entry in walker { if let Ok(e) = entry { entries.push(e); } }
+        let show_pb = entries.len() > 1000;
+        let pb = if show_pb {
+            let pb = ProgressBar::new(entries.len() as u64);
+            pb.set_style(ProgressStyle::default_bar().template("[{elapsed_precise}] {bar:40} {pos}/{len} files").unwrap());
+            Some(pb)
+        } else { None };
+
+        for entry in entries {
+            let path = entry.path();
+            if !path.is_file() { if let Some(pb) = &pb { pb.inc(1); } continue; }
+            if path.file_name().map_or(false, |n| n == ".uhoh") { if let Some(pb) = &pb { pb.inc(1); } continue; }
+            let rel_path = match path.strip_prefix(project_path) { Ok(r) => cas::normalize_path(r), Err(_) => continue };
+            if path.to_str().is_none() { tracing::warn!("Skipping non-UTF-8 path: {:?}", path); continue; }
+            match path.metadata() {
+                Ok(meta) => { current_files.insert(rel_path, (path.to_path_buf(), meta)); }
+                Err(e) => { tracing::warn!("Cannot stat {}: {}", path.display(), e); }
+            }
+            if let Some(pb) = &pb { pb.inc(1); }
+        }
+        if let Some(pb) = pb { pb.finish_and_clear(); }
+
+        for (rel_path, (abs_path, meta)) in &current_files {
+            let size = meta.len();
+            let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let executable = cas::is_executable(abs_path);
+            if let Some(cached) = prev_files.get(rel_path) {
+                let fs_mtime_secs = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                let cached_secs = cached.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                if cached.size == size && cached_secs == fs_mtime_secs {
+                    files_for_manifest.push(crate::db::SnapFileEntry {
+                        path: rel_path.clone(), hash: cached.hash.clone(), size: cached.size, stored: cached.stored,
+                        executable: cached.executable, mtime: Some(cached.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64), storage_method: cached.storage_method,
+                    });
+                    continue;
+                }
+            }
+            match cas::store_blob_from_file(&blob_root, abs_path, config.storage.max_copy_blob_bytes, config.storage.max_binary_blob_bytes, config.storage.max_text_blob_bytes) {
+                Ok((hash, size, method)) => {
+                    let is_new_or_changed = prev_files.get(rel_path).map_or(true, |prev| prev.hash != hash);
+                    if is_new_or_changed { has_changes = true; new_files.push(rel_path.clone()); }
+                    let mtime_i = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                    let stored = method.is_recoverable();
+                    files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored, executable, mtime: Some(mtime_i), storage_method: method.to_db() });
+                    current_hashes.insert(rel_path.clone(), (hash, stored));
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
+                    files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: String::new(), size, stored: false, executable, mtime: Some(mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64), storage_method: cas::StorageMethod::None.to_db() });
+                    current_hashes.insert(rel_path.clone(), (String::new(), false));
+                }
+            }
+        }
+        // Detect deleted files
+        let current_paths: HashSet<&String> = current_files.keys().collect();
+        for (path, cached) in &prev_files {
+            if !current_paths.contains(path) {
+                has_changes = true;
+                deleted_for_manifest.push((path.clone(), cached.hash.clone(), cached.size, cached.stored, cas::StorageMethod::from_db(cached.storage_method).to_db()));
+            }
         }
     }
 
@@ -261,7 +311,7 @@ pub fn create_snapshot(
             if let (Some(prev), Some((curr_hash, curr_stored))) = (prev_files.get(path), current_hashes.get(path)) {
                 if prev.stored && *curr_stored && !prev.hash.is_empty() && !curr_hash.is_empty() {
                     // Enforce size cap and skip binary
-                    if prev.size > MAX_AI_DIFF_FILE_SIZE || current_files.get(path.as_str()).map(|(_, m)| m.len()).unwrap_or(0) > MAX_AI_DIFF_FILE_SIZE {
+                    if prev.size > MAX_AI_DIFF_FILE_SIZE {
                         diff_chunks.push_str(&format!("--- {}\n[File too large for AI diff]\n", path));
                         continue;
                     }
@@ -320,6 +370,8 @@ pub fn create_snapshot(
     );
 
     // Enforce storage limits after snapshot
+    // Compute total project size from manifest entries
+    let total_project_size: u64 = files_for_manifest.iter().map(|f| f.size).sum();
     enforce_storage_limit(database, total_project_size, project_hash, &config)?;
 
     Ok(Some(snapshot_id))

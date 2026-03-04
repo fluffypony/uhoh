@@ -52,6 +52,11 @@ static SIDECAR_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Get or spawn a persistent sidecar and return its port.
 pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs: u64) -> Result<u16> {
+    get_or_spawn_port_with_ctx(model_path, uhoh_dir, idle_shutdown_secs, 8192)
+}
+
+/// Variant that allows passing a desired context size cap.
+pub fn get_or_spawn_port_with_ctx(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs: u64, ctx_tokens: u64) -> Result<u16> {
     // Fast path: if child alive, update last_used and return
     {
         let mut guard = GLOBAL_SIDECAR.lock().unwrap();
@@ -80,7 +85,7 @@ pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs:
         for _ in 0..3 {
             let (listener, port) = find_available_port_listener()?;
             drop(listener);
-            match spawn_backend(&backend, model_path, uhoh_dir, port) {
+            match spawn_backend(&backend, model_path, uhoh_dir, port, ctx_tokens) {
                 Ok(child) => {
                     // Wait for readiness before returning
                     if wait_for_ready_blocking(port, Duration::from_secs(30)).is_ok() {
@@ -180,22 +185,11 @@ fn detect_backend(uhoh_dir: &Path) -> Result<Backend> {
     Ok(Backend::LlamaServer { binary: find_sidecar_binary(uhoh_dir)? })
 }
 
-fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, port: u16) -> Result<Child> {
+fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, port: u16, ctx_tokens: u64) -> Result<Child> {
     let log_file = std::fs::File::create(uhoh_dir.join("sidecar.log"))?;
     match backend {
         Backend::LlamaServer { binary } => {
-            // Use configured ctx-size based on AI config if available
-            let ctx_size = {
-                // Try to load config to read max_context_tokens; fallback to 8192 if unavailable
-                if let Some(home) = dirs::home_dir() {
-                    let cfg_path = home.join(".uhoh").join("config.toml");
-                    if let Ok(cfg) = std::fs::read_to_string(&cfg_path) {
-                        if let Ok(conf) = toml::from_str::<crate::config::Config>(&cfg) {
-                            std::cmp::min(conf.ai.max_context_tokens, 8192).to_string()
-                        } else { "8192".to_string() }
-                    } else { "8192".to_string() }
-                } else { "8192".to_string() }
-            };
+            let ctx_size = ctx_tokens.to_string();
             let mut cmd = Command::new(binary);
             cmd.args([
                     "--model",
@@ -215,13 +209,14 @@ fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, port: u1
                 .context("Failed to spawn llama-server")
         }
         Backend::MlxLm { python } => {
-            // MLX expects a HuggingFace repo ID; map common tiers or fall back to filename stem
+            // MLX expects a HuggingFace repo ID; map Qwen3.5 tiers or fall back to filename stem
             let model_id = {
                 let stem = model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 match stem {
-                    s if s.contains("0.5b") => "mlx-community/Qwen2.5-0.5B-Instruct-4bit".to_string(),
-                    s if s.contains("3b") => "mlx-community/Qwen2.5-3B-Instruct-4bit".to_string(),
-                    s if s.contains("7b") || s.contains("9b") => "mlx-community/Qwen2.5-7B-Instruct-4bit".to_string(),
+                    s if s.contains("0.5b") => "mlx-community/Qwen3.5-0.5B-Instruct-4bit".to_string(),
+                    s if s.contains("3b") => "mlx-community/Qwen3.5-3B-Instruct-4bit".to_string(),
+                    s if s.contains("7b") || s.contains("9b") => "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string(),
+                    s if s.contains("35b-a3b") => "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string(),
                     _ => stem.to_string(),
                 }
             };

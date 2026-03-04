@@ -139,10 +139,29 @@ pub fn store_blob_from_file(
     let cfg_limit = if is_binary { max_binary_blob_bytes } else { max_text_blob_bytes } as u64;
     let effective_limit = std::cmp::min(cfg_limit, max_copy_blob_bytes);
 
-    // Try reflink
+    // Try reflink, then verify integrity by re-hashing destination bytes
     if reflink_copy::reflink(file_path, &blob_path).is_ok() {
+        // Verify content matches expected hash to avoid TOCTOU issues
+        let ok = match std::fs::File::open(&blob_path) {
+            Ok(mut f) => {
+                let mut hasher = blake3::Hasher::new();
+                let _ = std::io::copy(&mut f, &mut hasher);
+                hasher.finalize().to_hex().to_string() == hash
+            }
+            Err(_) => false,
+        };
+        if ok {
+            set_blob_readonly(&blob_path);
+            return Ok((hash, file_size, StorageMethod::Reflink));
+        } else {
+            let _ = std::fs::remove_file(&blob_path);
+        }
+    }
+
+    // Try hardlink before full copy
+    if std::fs::hard_link(file_path, &blob_path).is_ok() {
         set_blob_readonly(&blob_path);
-        return Ok((hash, file_size, StorageMethod::Reflink));
+        return Ok((hash, file_size, StorageMethod::Hardlink));
     }
 
     // Try full copy if within size limit
@@ -249,17 +268,8 @@ fn maybe_compress(data: &[u8]) -> Vec<u8> {
     {
         // Prefix with a robust magic header to avoid collisions with raw data
         const COMPRESSION_MAGIC: &[u8; 4] = b"UHZS"; // "UH" + "ZS" (zstd)
-        // Read config compress level if available; otherwise default to 3
-        let level = {
-            if let Some(home) = dirs::home_dir() {
-                let cfg_path = home.join(".uhoh").join("config.toml");
-                if let Ok(cfg_str) = std::fs::read_to_string(&cfg_path) {
-                    if let Ok(conf) = toml::from_str::<crate::config::Config>(&cfg_str) {
-                        conf.storage.compress_level
-                    } else { 3 }
-                } else { 3 }
-            } else { 3 }
-        };
+        // Compression level is static at runtime; default to 3 when feature enabled
+        let level = 3;
         let compressed = zstd::encode_all(std::io::Cursor::new(data), level)
             .unwrap_or_else(|_| data.to_vec());
         if compressed.len() < data.len() {

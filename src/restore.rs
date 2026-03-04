@@ -108,6 +108,7 @@ pub fn cmd_restore(
         "pre-restore",
         Some(&format!("Before restore to {}", id_str)),
         &cfg,
+        None,
     );
 
     // Pre-flight: verify that all required blobs exist

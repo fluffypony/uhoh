@@ -96,7 +96,7 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
 }
 
 /// Run the daemon in the foreground (called with --service flag).
-pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> {
+pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>) -> Result<()> {
     let uhoh_dir = uhoh_dir.to_path_buf();
     let config_path = uhoh_dir.join("config.toml");
     let mut config = Config::load(&config_path)?;
@@ -138,10 +138,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
     check_inotify_limit();
 
     // Channel for events from watcher (larger buffer to handle bursts)
-    let (event_tx, mut event_rx) = mpsc::channel::<WatchEvent>(10_000);
+    // Unbounded channel avoids blocking OS event thread under bursts
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<WatchEvent>();
 
     // Load registered projects (initial), dynamic discovery runs on ticks
-    let projects = database.list_projects()?;
+    let projects = (&*database).list_projects()?;
 
     // Start file watcher
     let watch_paths: Vec<PathBuf> = projects
@@ -279,7 +280,12 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 }
                 #[cfg(windows)]
                 {
-                    let args: Vec<String> = std::env::args().collect();
+                    let mut args: Vec<String> = std::env::args().collect();
+                    if let Some(pos) = args.iter().position(|a| a == "--takeover") {
+                        // Remove flag and its PID argument if present
+                        let _ = args.remove(pos);
+                        if pos < args.len() { let _ = args.remove(pos); }
+                    }
                     if let Some(ref exe) = exe_path {
                         let _child = std::process::Command::new(exe)
                             .args(&args[1..])
@@ -293,7 +299,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
             _ = debounce_interval.tick() => {
                 process_pending_snapshots(
                     &uhoh_dir,
-                    database,
+                    &*database,
                     &mut project_states,
                     &config,
                 ).await;
@@ -311,11 +317,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                     config = new_cfg;
                 }
                 // Periodic tasks: check for moved folders, expire emergency snapshots
-                check_moved_folders(database, &mut watcher_handle, &mut project_states);
+                check_moved_folders(&*database, &mut watcher_handle, &mut project_states);
                 // Discover newly added projects and watch them
-                check_for_new_projects(database, &mut watcher_handle, &mut project_states);
+                check_for_new_projects(&*database, &mut watcher_handle, &mut project_states);
                 // Remove watchers and state for projects removed from DB
-                if let Ok(db_projects) = database.list_projects() {
+                if let Ok(db_projects) = (&*database).list_projects() {
                     use std::collections::HashSet;
                     let db_paths: HashSet<String> = db_projects.into_iter().map(|p| p.current_path).collect();
                     let mut to_remove: Vec<String> = Vec::new();
@@ -359,31 +365,35 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                     break;
                 }
                 let mut total_freed = 0u64;
-                if let Ok(current_projects) = database.list_projects() {
-                    // Run compaction in a blocking task to avoid stalling the runtime
+                if let Ok(current_projects) = (&*database).list_projects() {
+                    // Run compaction as a detached task; don't await inside main select loop
                     let db_path = uhoh_dir.join("uhoh.db");
                     let cfg = config.compaction.clone();
-                    total_freed = tokio::task::spawn_blocking(move || {
-                        let db = crate::db::Database::open(&db_path).ok();
-                        let mut freed = 0u64;
-                        if let Some(d) = db {
-                            for project in &current_projects {
-                                if let Ok(f) = crate::compaction::compact_project(&d, &project.hash, &cfg) { freed = freed.saturating_add(f); }
+                    tokio::spawn({
+                        let db_path_for_gc = db_path.clone();
+                        async move {
+                        let freed = tokio::task::spawn_blocking(move || {
+                            let db = crate::db::Database::open(&db_path).ok();
+                            let mut freed = 0u64;
+                            if let Some(d) = db {
+                                for project in &current_projects {
+                                    if let Ok(f) = crate::compaction::compact_project(&d, &project.hash, &cfg) { freed = freed.saturating_add(f); }
+                                }
                             }
+                            freed
+                        }).await.unwrap_or(0);
+                        if freed > 100 * 1024 * 1024 {
+                            tracing::info!("Compaction estimated freed {:.1} MB; triggering GC", freed as f64 / 1_048_576.0);
+                            let uhoh_dir_cl = db_path_for_gc.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                if let Ok(db) = crate::db::Database::open(&db_path_for_gc) {
+                                    let _ = crate::gc::run_gc(&uhoh_dir_cl, &db);
+                                }
+                            });
                         }
-                        freed
-                    }).await.unwrap_or(0);
+                    }});
                 }
-                if total_freed > 100 * 1024 * 1024 {
-                    tracing::info!("Compaction estimated freed {:.1} MB; triggering GC", total_freed as f64 / 1_048_576.0);
-                    let uhoh_dir_cl = uhoh_dir.clone();
-                    let db_path = uhoh_dir_cl.join("uhoh.db");
-                    let _ = tokio::task::spawn_blocking(move || {
-                        if let Ok(db) = crate::db::Database::open(&db_path) {
-                            let _ = crate::gc::run_gc(&uhoh_dir_cl, &db);
-                        }
-                    });
-                }
+                // GC is handled within the detached task when needed
 
                 // Periodic database backup (hourly by default)
                 static LAST_BACKUP: Lazy<StdMutex<Option<std::time::Instant>>> = Lazy::new(|| StdMutex::new(None));
@@ -397,7 +407,10 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                     let _ = std::fs::create_dir_all(&backups_dir);
                     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
                     let backup_path = backups_dir.join(format!("uhoh-{}.db", ts));
-                    if let Err(e) = database_backup_to(database, &backup_path) {
+                    let db_for_backup = database.clone();
+                    let backup_path_cl = backup_path.clone();
+                    let backup_res = tokio::task::spawn_blocking(move || database_backup_to(&*db_for_backup, &backup_path_cl)).await;
+                    if let Err(e) = backup_res.unwrap_or_else(|e| Err(anyhow::anyhow!("{:?}", e))) {
                         tracing::warn!("Database backup failed: {}", e);
                     } else {
                         // Best-effort rotation: keep last 14 backups
@@ -415,7 +428,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
 
                 // Process deferred AI summaries when conditions allow
                 if crate::ai::should_run_ai(&config.ai) {
-                    process_ai_summary_queue(&uhoh_dir, database, &config).await;
+                    process_ai_summary_queue(&uhoh_dir, &*database, &config).await;
                 }
             }
             _ = update_check_interval.tick() => {
@@ -533,6 +546,7 @@ async fn process_pending_snapshots(
             let project_hash = state.hash.clone();
             let proj_path = Path::new(project_path).to_path_buf();
             let cfg = config.clone();
+            let changed: Vec<PathBuf> = state.pending_changes.iter().cloned().collect();
             let result = tokio::task::spawn_blocking(move || {
                 let database = crate::db::Database::open(&db_path)?;
                 snapshot::create_snapshot(
@@ -543,6 +557,7 @@ async fn process_pending_snapshots(
                     "auto",
                     None,
                     &cfg,
+                    Some(&changed),
                 )
             }).await;
 

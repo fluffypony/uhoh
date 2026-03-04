@@ -26,11 +26,11 @@ pub fn select_model(config: &AiConfig) -> Option<ModelTierConfig> {
     let sys = System::new_with_specifics(RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()));
     let total_ram_gb = sys.total_memory() / (1024 * 1024 * 1024);
     let available_ram_gb = sys.available_memory() / (1024 * 1024 * 1024);
-    let min_available_margin = 2; // consistent 2GB margin
+    let min_available_margin = 2; // require a small headroom
     tiers
         .into_iter()
         .rev()
-        .find(|t| total_ram_gb >= t.min_ram_gb && available_ram_gb >= t.min_ram_gb.saturating_sub(min_available_margin as u64))
+        .find(|t| available_ram_gb >= t.min_ram_gb.saturating_add(min_available_margin as u64) || (total_ram_gb >= t.min_ram_gb && available_ram_gb >= t.min_ram_gb))
 }
 
 /// Ensure the model file is present under ~/.uhoh/sidecar and return its path.
