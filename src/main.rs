@@ -126,6 +126,13 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Zero-verb convenience: running `uhoh` with no args performs:
+    // - If current folder is not registered: register and create an initial snapshot
+    // - If it is registered: create a quick snapshot and revert to the previous snapshot
+    if std::env::args().len() == 1 {
+        return run_zero_verb().await;
+    }
+
     let cli = Cli::parse();
     #[cfg(windows)]
     if let Some(old_pid) = cli.takeover {
@@ -378,6 +385,65 @@ fn parse_toml_value(s: &str) -> toml_edit::Value {
     if let Ok(i) = s.parse::<i64>() { return toml_edit::Value::from(i); }
     if let Ok(f) = s.parse::<f64>() { return toml_edit::Value::from(f); }
     toml_edit::Value::from(s.to_string())
+}
+
+async fn run_zero_verb() -> Result<()> {
+    let uhoh = ensure_uhoh_dir()?;
+    let database = db::Database::open(&uhoh.join("uhoh.db"))?;
+    let cwd = dunce::canonicalize(std::env::current_dir()?)?;
+
+    // Already registered?
+    if let Some(project) = database.find_project_by_path(&cwd)? {
+        // Take a quick manual snapshot and revert to the previous one
+        let cfg = config::Config::load(&uhoh.join("config.toml"))?;
+        let _ = snapshot::create_snapshot(&uhoh, &database, &project.hash, &cwd, "manual", Some("Quick snapshot"), &cfg)?;
+        // Find the snapshot before the newest
+        let snaps = database.list_snapshots(&project.hash)?; // newest-first
+        if let Some(current) = snaps.first() {
+            if let Some(prev) = database.snapshot_before(&project.hash, current.snapshot_id)? {
+                let id_str = cas::id_to_base58(prev.snapshot_id);
+                restore::cmd_restore(&uhoh, &database, &project, &id_str, false, true)?;
+                println!("Reverted to snapshot {}", id_str);
+            } else {
+                println!("No previous snapshot to revert to.");
+            }
+        }
+        return Ok(());
+    }
+
+    // Not registered: behave like `uhoh add` for this directory
+    maybe_start_daemon(&uhoh)?;
+    let project_path = cwd;
+
+    if let Some(existing_hash) = marker::read_marker(&project_path)? {
+        if let Some(existing) = database.get_project(&existing_hash)? {
+            let canonical = dunce::canonicalize(&project_path)?;
+            if existing.current_path != canonical.to_string_lossy().as_ref() {
+                database.update_project_path(&existing_hash, &canonical.to_string_lossy())?;
+                println!("Updated project path: {}", canonical.display());
+            } else {
+                println!("Already registered: {}", canonical.display());
+            }
+            return Ok(());
+        }
+    }
+
+    let git_dir = project_path.join(".git");
+    if !git_dir.exists() {
+        warn!("Not a git repo. Marker at {0}/.uhoh — add to your ignore file.", project_path.display());
+        eprintln!("⚠ Warning: Not a git repo. Add `.uhoh` to your ignore file.");
+    }
+
+    let project_hash = marker::create_marker(&project_path)?;
+    let canonical = dunce::canonicalize(&project_path)?;
+    database.add_project(&project_hash, &canonical.to_string_lossy())?;
+    println!("Registered: {}", canonical.display());
+
+    let cfg = config::Config::load(&uhoh.join("config.toml"))?;
+    snapshot::create_snapshot(&uhoh, &database, &project_hash, &canonical, "manual", Some("Initial snapshot"), &cfg)?;
+    println!("Initial snapshot created.");
+
+    Ok(())
 }
 
 fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bool, restore_latest: bool) -> Result<()> {
