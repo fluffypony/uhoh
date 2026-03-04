@@ -13,10 +13,13 @@ use crate::db::DbGuardEntry;
 use crate::event_ledger::new_event;
 use crate::subsystem::{Subsystem, SubsystemContext, SubsystemHealth};
 
-pub use credentials::scrub_dsn;
-pub use credentials::scrub_error_message;
 pub use credentials::ensure_guard_dir;
 pub use credentials::resolve_postgres_credentials;
+pub use credentials::scrub_dsn;
+pub use credentials::scrub_error_message;
+pub use credentials::store_encrypted_credential;
+pub use credentials::CredentialMaterial;
+pub use recovery::decrypt_recovery_payload;
 pub use recovery::write_postgres_schema_baseline;
 pub use recovery::write_sqlite_baseline;
 
@@ -54,7 +57,9 @@ impl Subsystem for DbGuardSubsystem {
             let mut event = new_event("db_guard", "guard_started", "info");
             event.guard_name = Some(guard.name.clone());
             event.detail = Some(format!("engine={}, mode={}", guard.engine, guard.mode));
-            let _ = ctx.event_ledger.append(event);
+            if let Err(err) = ctx.event_ledger.append(event) {
+                tracing::error!("failed to append guard_started event: {err}");
+            }
         }
 
         // Phase 1: lightweight loop for schema polling and sqlite guards.
@@ -93,10 +98,7 @@ impl DbGuardSubsystem {
                     postgres::tick_postgres_guard(ctx, guard)?;
                 }
                 "mysql" => {
-                    let state = self
-                        .mysql_states
-                        .entry(guard.name.clone())
-                        .or_default();
+                    let state = self.mysql_states.entry(guard.name.clone()).or_default();
                     mysql::tick_mysql_guard(ctx, guard, state)?;
                 }
                 _ => {}

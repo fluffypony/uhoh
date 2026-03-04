@@ -87,6 +87,7 @@ pub async fn start_server(
         .route("/api/v1/search", get(api::search))
         .route("/api/v1/projects/:hash/timeline", get(api::get_timeline))
         .route("/ws", get(ws::websocket_handler))
+        .route("/api/v1/health", get(health_check))
         .route("/health", get(health_check));
 
     if config.ui_enabled {
@@ -137,6 +138,7 @@ async fn health_check(State(state): State<AppState>) -> axum::Json<serde_json::V
     let manager = state.subsystem_manager.lock().await;
     let subsystems = manager
         .health_snapshot()
+        .await
         .into_iter()
         .map(|(name, health)| {
             let status = match health {

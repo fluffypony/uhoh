@@ -4,9 +4,10 @@ mod mcp_proxy;
 mod profiles;
 mod sandbox;
 mod undo;
+use std::path::Path;
 
 pub use profiles::load_agent_profile;
-pub use sandbox::sandbox_supported;
+pub use sandbox::{apply_landlock, sandbox_supported};
 pub use undo::resolve_event;
 
 use anyhow::Result;
@@ -21,6 +22,7 @@ pub struct AgentSubsystem {
     healthy: bool,
     intercept_started: bool,
     proxy_started: bool,
+    background_failures: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl AgentSubsystem {
@@ -29,8 +31,21 @@ impl AgentSubsystem {
             healthy: true,
             intercept_started: false,
             proxy_started: false,
+            background_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
+}
+
+pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
+    mcp_proxy::ensure_proxy_token(uhoh_dir)
+}
+
+pub fn build_approval_response(token: &str, approval_id: &str, challenge: &str) -> String {
+    mcp_proxy::build_approval_response(token, approval_id, challenge)
+}
+
+pub fn proxy_auth_handshake_line(token: &str) -> String {
+    mcp_proxy::auth_handshake_line(token)
 }
 
 #[async_trait]
@@ -51,13 +66,22 @@ impl Subsystem for AgentSubsystem {
             let mut event = new_event("agent", "agent_registered", "info");
             event.agent_name = Some(agent.name.clone());
             event.detail = Some(format!("profile={}", agent.profile_path));
-            let _ = ctx.event_ledger.append(event);
+            if let Err(err) = ctx.event_ledger.append(event) {
+                tracing::error!("failed to append agent_registered event: {err}");
+            }
         }
 
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                    if self
+                        .background_failures
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        > 0
+                    {
+                        self.healthy = false;
+                    }
                     self.tick_agents(&ctx, &agents)?;
                 }
             }
@@ -86,8 +110,12 @@ impl AgentSubsystem {
                 self.intercept_started = true;
                 let ctx_cl = ctx.clone();
                 let agents_cl = agents.to_vec();
+                let failures = self.background_failures.clone();
                 std::thread::spawn(move || {
-                    let _ = intercept::run_session_tailers(&ctx_cl, &agents_cl);
+                    if let Err(err) = intercept::run_session_tailers(&ctx_cl, &agents_cl) {
+                        failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::error!("session tailer thread failed: {err}");
+                    }
                 });
             }
         }
@@ -98,8 +126,12 @@ impl AgentSubsystem {
             if !self.proxy_started {
                 self.proxy_started = true;
                 let ctx_cl = ctx.clone();
+                let failures = self.background_failures.clone();
                 std::thread::spawn(move || {
-                    let _ = mcp_proxy::run_proxy(&ctx_cl);
+                    if let Err(err) = mcp_proxy::run_proxy(&ctx_cl) {
+                        failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::error!("mcp proxy thread failed: {err}");
+                    }
                 });
             }
         }

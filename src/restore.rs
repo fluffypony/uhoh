@@ -87,9 +87,7 @@ fn validate_restore_path(project_path: &Path, relative_path: &str) -> Result<()>
     }
     for component in rel.components() {
         if matches!(component, std::path::Component::ParentDir) {
-            anyhow::bail!(
-                "Path traversal detected in snapshot manifest: {relative_path}"
-            );
+            anyhow::bail!("Path traversal detected in snapshot manifest: {relative_path}");
         }
     }
 
@@ -97,9 +95,7 @@ fn validate_restore_path(project_path: &Path, relative_path: &str) -> Result<()>
     if let Ok(canonical) = dunce::canonicalize(&full) {
         if let Ok(project_canonical) = dunce::canonicalize(project_path) {
             if !canonical.starts_with(project_canonical) {
-                anyhow::bail!(
-                    "Path '{relative_path}' resolves outside project directory"
-                );
+                anyhow::bail!("Path '{relative_path}' resolves outside project directory");
             }
         }
     }
@@ -387,6 +383,14 @@ pub fn cmd_restore(
         for path in &to_delete {
             validate_restore_path(project_path, path)?;
             let dst = project_path.join(crate::cas::decode_relpath_to_os(path));
+            if let Ok(meta) = std::fs::symlink_metadata(&dst) {
+                if meta.file_type().is_symlink() {
+                    anyhow::bail!(
+                        "Refusing to delete symlink path during restore: {}",
+                        dst.display()
+                    );
+                }
+            }
             if dst.is_file() {
                 let _ = std::fs::remove_file(&dst);
             } else if dst.is_dir() {
@@ -434,9 +438,9 @@ pub fn cmd_restore(
                 && std::fs::read_dir(root)
                     .map(|mut it| it.next().is_none())
                     .unwrap_or(false)
-                {
-                    let _ = std::fs::remove_dir(root);
-                }
+            {
+                let _ = std::fs::remove_dir(root);
+            }
         }
         remove_empty_dirs(project_path, project_path);
 

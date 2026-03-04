@@ -216,6 +216,7 @@ async fn tool_pre_notify(state: AppState, id: Option<Value>, args: Value) -> Jso
         event.agent_name = Some(agent.clone());
         event.path = path.clone();
         event.detail = Some(format!("action={action}"));
+        event.prev_hash = None;
         let event_id = db.insert_event_ledger(&event)?;
         Ok(json!({
             "content": [{"type": "text", "text": "pre-notify accepted"}],

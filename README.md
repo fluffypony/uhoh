@@ -18,6 +18,10 @@ uhoh watches your project folders, takes small content‑addressable snapshots a
 - Optional AI summaries via a local sidecar (Qwen 3.5 tiers, MLX on Apple Silicon); skips on battery/low‑RAM
 - Built-in localhost server on `127.0.0.1:22822` with REST API, Time Machine UI, WebSocket events, and MCP HTTP endpoint
 - MCP over STDIO with `uhoh mcp` for zero-config agent integration
+- Unified event ledger across filesystem, database guard, and agent monitor events
+- Event forensics commands: `uhoh trace <event-id>`, `uhoh blame <path>`, and `uhoh timeline [--source ...] [--since ...]`
+- Database guardian for PostgreSQL and SQLite with baseline/recovery artifact generation, plus MySQL phase-1 schema polling
+- Agent monitoring with MCP proxy interception, session-tail fallback, dangerous-action pause/approve flow, and profile-based registration
 - Bearer token auth for mutating server operations (token stored in `~/.uhoh/server.token`)
 - Git integration: pre-commit hooks, snapshot-to-stash, worktree support
 - Safe auto‑updates: Ed25519 signatures, DNS TXT fallback, atomically applied
@@ -96,6 +100,25 @@ uhoh mark "implement search"
 uhoh operations
 uhoh undo                    # restores to just-before the marked operation
 
+# Unified event-ledger tooling
+uhoh timeline --since 1h
+uhoh timeline --source agent --since 30m
+uhoh trace <event-id>
+uhoh blame src/main.rs
+
+# Database guardian
+uhoh db add postgres://user@localhost/mydb --tables users,orders --name appdb
+uhoh db list
+uhoh db events appdb
+
+# Agent monitor (OpenClaw and other MCP/log-based agents)
+uhoh agent init
+uhoh agent add openclaw --profile ~/.uhoh/agents/openclaw.toml
+uhoh agent log openclaw
+uhoh agent undo --cascade <event-id>
+uhoh agent approve
+uhoh run -- openclaw start
+
 # Git integration
 uhoh hook install            # add pre-commit snapshot hook
 uhoh hook remove             # remove it
@@ -137,8 +160,27 @@ When enabled, the daemon also starts a unified localhost server (default `127.0.
 2. `GET/POST /api/v1/*` snapshot APIs
 3. `GET /ws` live events (`snapshot_created`, `snapshot_restored`, `ai_summary_completed`, `sidecar_updated`)
 4. `POST /mcp` MCP Streamable HTTP JSON-RPC endpoint
+5. `GET /health` and `GET /api/v1/health` health endpoints
 
 Mutating requests require a bearer token by default. The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery.
+
+## Database guardian and agent monitor
+
+uhoh now includes two subsystem-style safety layers that feed a shared `event_ledger` table.
+
+Database guardian focuses on high-risk events, not full auditing. PostgreSQL guard mode installs trigger-based monitoring and periodic baseline snapshots. SQLite guard mode tracks `PRAGMA data_version` changes and emits recovery references when state shifts. MySQL support is currently phase-1 schema polling.
+
+Agent monitor combines MCP proxy interception with fallback session-log tailing. If your agent talks MCP through uhoh, calls can be classified before they execute. When a call matches dangerous patterns and pause mode is enabled, uhoh records a pending approval and waits for `uhoh agent approve` or timeout.
+
+MCP proxy clients must authenticate on connection by sending a first-line JSON-RPC message:
+
+```json
+{"jsonrpc":"2.0","id":"uhoh-auth","method":"uhoh/auth","params":{"token":"<token-from-~/.uhoh/agents/runtime/agent_proxy.token>"}}
+```
+
+When you launch tools through `uhoh run`, `UHOH_MCP_PROXY_TOKEN` and `UHOH_MCP_PROXY_AUTH_LINE` are exported automatically for clients that can send a startup auth line.
+
+All of this is tied together in the unified ledger so you can inspect one timeline instead of three separate logs.
 
 ## Commands you'll use most
 
@@ -231,6 +273,13 @@ All compaction settings require daemon restart.
 - `db_guard.max_recovery_file_mb` (default 500): single recovery artifact cap.
 - `db_guard.encrypt_recovery` (default true): encrypt recovery artifacts at rest.
 
+Encrypted recovery artifacts now support decryption in `uhoh db recover --apply`. Key selection follows:
+1. `UHOH_MASTER_KEY` set to a 64-char hex key: BLAKE3 KDF mode (domain-separated).
+2. `UHOH_MASTER_KEY` set to passphrase: Argon2id key derivation.
+3. If `UHOH_MASTER_KEY` is unset: machine-local key fallback in `~/.uhoh/master.key` (0600) is used for recovery artifacts.
+
+Database guard is designed for emergency detection and recovery prep. It is not a full SQL audit stream.
+
 ### Agent Monitor Settings
 
 - `agent.enabled` (default false): enable agent monitoring subsystem.
@@ -243,6 +292,8 @@ All compaction settings require daemon restart.
 - `agent.on_dangerous_change` (default `none`): dangerous-action policy.
 - `agent.pause_timeout_seconds` (default 300): auto-resume timeout.
 - `agent.dangerous_patterns`: pattern set used for classification.
+
+`agent` settings are intentionally layered: MCP proxy first, session-log fallback second, and OS-level audit as opt-in only.
 
 ### Update settings
 
@@ -264,6 +315,59 @@ All compaction settings require daemon restart.
 - `sidecar_update.check_interval_hours` (default 24): sidecar update check cadence.
 - `sidecar_update.pin_version` (default unset): optional release tag pin (e.g. `b5200`).
 - `sidecar_update.llama_repo` (default `ggml-org/llama.cpp`): GitHub release source.
+
+## Deep dive: database guardian
+
+Database guardian is built for high-signal mistakes: dropped objects and large destructive changes. It is not trying to be a full SQL audit platform.
+
+### What it watches
+
+For PostgreSQL, `uhoh db add postgres://...` installs `_uhoh_ddl_events` and `_uhoh_delete_counts` objects plus trigger plumbing so the daemon can detect dangerous operations quickly. In trigger mode, this is the default path.
+
+For SQLite, the guard tracks `PRAGMA data_version`, records change events, and rotates baseline/recovery artifacts under `~/.uhoh/db_guard/<guard-name>/`.
+
+For MySQL, current support is phase-1 schema polling. It checks table metadata and row estimates for abrupt changes and logs those into the unified ledger.
+
+### Recovery model
+
+On high-risk events, uhoh writes recovery artifacts (and baseline snapshots on cadence), hashes them with BLAKE3, and stores references in the event ledger. `uhoh db recover <event-id>` prints the artifact context and supports apply-mode safety checks.
+
+### Practical workflow
+
+1. Register a guard with `uhoh db add ...`.
+2. Keep `db_guard.enabled = true` in config.
+3. Check recent events with `uhoh db events` or `uhoh timeline --source db --since 1h`.
+4. Use `uhoh db recover <event-id>` when you need to inspect or apply recovery SQL.
+
+## Deep dive: agent monitoring (OpenClaw and others)
+
+Agent monitoring is layered. MCP proxy interception is the primary path, session-log tailing is the fallback path, and OS-level audit is optional.
+
+### OpenClaw example
+
+OpenClaw is a good fit because it can be pointed at uhoh's MCP proxy and can also be profiled with a session log pattern in `~/.uhoh/agents/openclaw.toml`.
+
+Typical setup:
+
+1. `uhoh agent init`
+2. Create or tune `~/.uhoh/agents/openclaw.toml`
+3. `uhoh agent add openclaw --profile ~/.uhoh/agents/openclaw.toml`
+4. Run through uhoh: `uhoh run -- openclaw start`
+
+### Dangerous action flow
+
+When `agent.on_dangerous_change = "pause"`, uhoh writes a pending approval marker and blocks the dangerous tool call path until `uhoh agent approve` arrives or timeout expires. This is the guardrail that keeps high-risk actions from silently slipping through.
+
+### Event forensics and undo
+
+Everything lands in the same event ledger:
+
+- `uhoh agent log [name]`
+- `uhoh blame <path>`
+- `uhoh trace <event-id>`
+- `uhoh timeline --source agent --since 30m`
+
+For rollback workflows, `uhoh agent undo --cascade <event-id>` resolves the selected event and its causal descendants in one shot.
 
 ## Deep dive: storage methods
 
@@ -385,6 +489,7 @@ On macOS this creates a launchd agent (`~/Library/LaunchAgents/com.uhoh.daemon.p
 - `uhoh agent approve` / `uhoh agent resume` / `uhoh agent setup`
 - `uhoh agent test <name>` / `uhoh agent init` / `uhoh agent update-profiles`
 - `uhoh trace <event-id>` / `uhoh blame <path>`
+- `uhoh timeline [--source fs|db|agent] [--since 30m|1h|2d]`
 - `uhoh run -- <command ...>`
 
 ## Tips

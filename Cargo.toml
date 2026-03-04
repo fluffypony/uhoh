@@ -86,6 +86,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # SQLite (replaces flat TOML manifests for atomicity + concurrency)
 rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.24"
 
 # Ed25519 signature verification for updates
 ed25519-dalek = { version = "2", features = ["rand_core"] }
@@ -121,9 +123,15 @@ tar = "0.4"
 
 # Lazy statics
 once_cell = "1.0"
+crossbeam = "0.8"
 
 # Crypto for at-rest protection of recovery artifacts
 chacha20poly1305 = "0.10"
+argon2 = "0.5"
+zeroize = "1.8"
+subtle = "2.6"
+url = "2.5"
+tempfile = "3"
 
 # Optional zstd compression (off by default, per spec preference)
 zstd = { version = "0.13", optional = true }
@@ -133,6 +141,9 @@ reflink-copy = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi", "psapi"] }
@@ -147,7 +158,6 @@ strip = true
 codegen-units = 1
 
 [dev-dependencies]
-tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 num_cpus = "1.17"

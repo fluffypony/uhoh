@@ -53,7 +53,12 @@ fn temp_db() -> (TempDir, Arc<Database>) {
     (temp, db)
 }
 
-fn event(source: &str, event_type: &str, path: Option<&str>, causal_parent: Option<i64>) -> NewEventLedgerEntry {
+fn event(
+    source: &str,
+    event_type: &str,
+    path: Option<&str>,
+    causal_parent: Option<i64>,
+) -> NewEventLedgerEntry {
     let mut e = new_event(source, event_type, "info");
     e.path = path.map(str::to_string);
     e.causal_parent = causal_parent;
@@ -103,18 +108,30 @@ async fn subsystem_manager_starts_reports_health_and_shuts_down() {
 fn event_ledger_trace_and_resolve_roundtrip() {
     let (_tmp, db) = temp_db();
     let ledger = EventLedger::new(db.clone());
+    ledger.start_flusher();
 
-    let root = ledger
-        .append(event("agent", "tool_call", Some("src/lib.rs"), None))
+    let _ = ledger.append(event("agent", "tool_call", Some("src/lib.rs"), None));
+    let _ = ledger.flush();
+    let root = db
+        .event_ledger_recent(None, None, None, None, 10)
+        .unwrap()
+        .first()
+        .map(|e| e.id)
         .unwrap();
-    let child = ledger
-        .append(event("fs", "file_write", Some("src/lib.rs"), Some(root)))
+    let _ = ledger.append(event("fs", "file_write", Some("src/lib.rs"), Some(root)));
+    let _ = ledger.flush();
+    let child = db
+        .event_ledger_recent(None, None, None, None, 10)
+        .unwrap()
+        .first()
+        .map(|e| e.id)
         .unwrap();
 
     let trace = ledger.trace(child).unwrap();
-    assert_eq!(trace.len(), 2);
-    assert_eq!(trace[0].id, child);
-    assert_eq!(trace[1].id, root);
+    assert_eq!(trace.entries.len(), 2);
+    assert!(!trace.truncated);
+    assert_eq!(trace.entries[0].id, child);
+    assert_eq!(trace.entries[1].id, root);
 
     ledger.mark_resolved(child).unwrap();
     let updated = db.event_ledger_get(child).unwrap().unwrap();
@@ -127,9 +144,8 @@ fn make_cli_home_with_events() -> (TempDir, i64, i64) {
     std::fs::create_dir_all(&uhoh_dir).unwrap();
 
     let db = Database::open(&uhoh_dir.join("uhoh.db")).unwrap();
-    let root = db
-        .insert_event_ledger(&event("agent", "pre_notify", Some("src/lib.rs"), None))
-        .unwrap();
+    let root_event = event("agent", "pre_notify", Some("src/lib.rs"), None);
+    let root = db.insert_event_ledger(&root_event).unwrap();
     let child = db
         .insert_event_ledger(&event("fs", "file_write", Some("src/lib.rs"), Some(root)))
         .unwrap();
@@ -210,7 +226,10 @@ fn cli_blame_reports_when_path_not_found() {
 fn cli_timeline_source_filter_and_since_window() {
     let home = make_cli_home_with_timeline_events();
 
-    let (ok, stdout, _stderr) = run_cli(home.path(), &["timeline", "--source", "agent", "--since", "1h"]);
+    let (ok, stdout, _stderr) = run_cli(
+        home.path(),
+        &["timeline", "--source", "agent", "--since", "1h"],
+    );
     assert!(ok);
     assert!(stdout.contains("agent"));
     assert!(stdout.contains("tool_call"));

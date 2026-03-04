@@ -45,8 +45,18 @@ pub(crate) static GLOBAL_SIDECAR: Lazy<Mutex<Option<GlobalSidecar>>> =
     Lazy::new(|| Mutex::new(None));
 static SIDECAR_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 
+fn lock_global_sidecar() -> std::sync::MutexGuard<'static, Option<GlobalSidecar>> {
+    match GLOBAL_SIDECAR.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("GLOBAL_SIDECAR mutex poisoned, recovering state");
+            poisoned.into_inner()
+        }
+    }
+}
+
 pub fn sidecar_running() -> bool {
-    GLOBAL_SIDECAR.lock().map(|g| g.is_some()).unwrap_or(false)
+    lock_global_sidecar().is_some()
 }
 
 /// Get or spawn a persistent sidecar and return its port.
@@ -69,7 +79,7 @@ pub fn get_or_spawn_port_with_ctx(
 ) -> Result<u16> {
     // Fast path: if child alive, update last_used and return
     {
-        let mut guard = GLOBAL_SIDECAR.lock().unwrap();
+        let mut guard = lock_global_sidecar();
         if let Some(ref mut gs) = *guard {
             // Try a non-blocking check by waiting with zero timeout
             if let Ok(opt) = gs.child.try_wait() {
@@ -104,8 +114,7 @@ pub fn get_or_spawn_port_with_ctx(
                         out = Some((child, bound_port));
                         break;
                     } else {
-                        last_err =
-                            Some(anyhow::anyhow!("sidecar not ready on port {bound_port}"));
+                        last_err = Some(anyhow::anyhow!("sidecar not ready on port {bound_port}"));
                         let _ = child.kill();
                         let _ = child.wait();
                     }
@@ -126,7 +135,7 @@ pub fn get_or_spawn_port_with_ctx(
 
     // Store globally and start idle watcher thread
     {
-        let mut guard = GLOBAL_SIDECAR.lock().unwrap();
+        let mut guard = lock_global_sidecar();
         *guard = Some(GlobalSidecar {
             child,
             port,
@@ -146,7 +155,7 @@ pub fn get_or_spawn_port_with_ctx(
         }
         let mut kill = false;
         {
-            let guard = GLOBAL_SIDECAR.lock().unwrap();
+            let guard = lock_global_sidecar();
             if let Some(ref gs) = *guard {
                 if gs.last_used.elapsed().as_secs() >= idle {
                     kill = true;
@@ -156,7 +165,7 @@ pub fn get_or_spawn_port_with_ctx(
             }
         }
         if kill {
-            let mut guard = GLOBAL_SIDECAR.lock().unwrap();
+            let mut guard = lock_global_sidecar();
             if let Some(mut gs) = guard.take() {
                 let _ = gs.child.kill();
                 let _ = gs.child.wait();
@@ -170,11 +179,10 @@ pub fn get_or_spawn_port_with_ctx(
 
 /// Shutdown and clean up the global sidecar if running.
 pub fn shutdown_global_sidecar() {
-    if let Ok(mut guard) = GLOBAL_SIDECAR.lock() {
-        if let Some(mut gs) = guard.take() {
-            let _ = gs.child.kill();
-            let _ = gs.child.wait();
-        }
+    let mut guard = lock_global_sidecar();
+    if let Some(mut gs) = guard.take() {
+        let _ = gs.child.kill();
+        let _ = gs.child.wait();
     }
 }
 

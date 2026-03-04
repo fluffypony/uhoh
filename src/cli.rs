@@ -175,11 +175,22 @@ pub enum Commands {
         since: Option<String>,
     },
 
+    /// Verify tamper-evident event ledger hash chain
+    Ledger {
+        #[command(subcommand)]
+        action: LedgerAction,
+    },
+
     /// Launch a command under uhoh runtime controls
     Run {
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum LedgerAction {
+    Verify,
 }
 
 #[derive(Subcommand)]

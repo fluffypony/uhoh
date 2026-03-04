@@ -31,7 +31,11 @@ pub fn run_session_tailers(ctx: &SubsystemContext, agents: &[AgentEntry]) -> Res
             let entry = offsets.entry(agent.name.clone()).or_insert(0);
             *entry = tail_one_file(ctx, agent, &session_path, *entry)?;
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        tokio::runtime::Handle::try_current()
+            .map(|handle| {
+                handle.block_on(tokio::time::sleep(std::time::Duration::from_millis(500)));
+            })
+            .unwrap_or_else(|_| std::thread::sleep(std::time::Duration::from_millis(500)));
     }
 }
 
@@ -81,6 +85,11 @@ fn process_jsonl_event(
         .get("path")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let session_id = event
+        .get("session_id")
+        .or_else(|| event.get("session"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     let mut pre_state_ref = None;
     if let Some(path) = target_path.as_deref() {
@@ -99,11 +108,14 @@ fn process_jsonl_event(
     ledger_event.detail = Some(
         serde_json::json!({
             "tool": tool,
+            "session_id": session_id,
             "raw": event,
         })
         .to_string(),
     );
-    let _ = ctx.event_ledger.append(ledger_event);
+    if let Err(err) = ctx.event_ledger.append(ledger_event) {
+        tracing::error!("failed to append session_tool_call event: {err}");
+    }
     Ok(())
 }
 

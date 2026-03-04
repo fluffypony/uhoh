@@ -288,6 +288,15 @@ pub fn store_blob_from_file(
         return Ok((hash, file_size, StorageMethod::Copy, 0));
     }
 
+    if !do_compress {
+        if reflink_copy::reflink(file_path, &blob_path).is_ok() {
+            set_blob_readonly(&blob_path);
+            fsync_parent_dir(&blob_path);
+            let _ = std::fs::remove_file(&tmp_path);
+            return Ok((hash, file_size, StorageMethod::Reflink, 0));
+        }
+    }
+
     match std::fs::rename(&tmp_path, &blob_path) {
         Ok(()) => {
             set_blob_readonly(&blob_path);
@@ -620,10 +629,7 @@ mod tests {
     fn test_base58_short_ids() {
         // ID 1 should produce a short string, not an 8+ char padded string
         let encoded = id_to_base58(1);
-        assert!(
-            encoded.len() <= 2,
-            "ID 1 encoded as '{encoded}' (too long)"
-        );
+        assert!(encoded.len() <= 2, "ID 1 encoded as '{encoded}' (too long)");
     }
 
     #[test]

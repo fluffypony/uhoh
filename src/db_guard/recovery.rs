@@ -1,9 +1,28 @@
 use anyhow::{Context, Result};
+use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::RngCore;
+use zeroize::Zeroize;
 
 use super::credentials::CredentialMaterial;
+
+const ENC_MAGIC_V1: &[u8; 8] = b"UHOHENC1";
+const ENC_MAGIC_V2: &[u8; 8] = b"UHOHENC2";
+const ENC_KDF_BLAKE3: u8 = 0;
+const ENC_KDF_ARGON2ID: u8 = 1;
+const ENC_V2_HEADER_LEN: usize = 8 + 1 + 16 + 12;
+const MACHINE_KEY_FILE: &str = "master.key";
+const ARGON2_MEMORY_KIB: u32 = 19 * 1024;
+const ARGON2_TIME_COST: u32 = 2;
+const ARGON2_PARALLELISM: u32 = 1;
+const RECOVERY_BLAKE3_CONTEXT: &str = "uhoh::recovery-artifacts::enc-v2";
+
+struct EncryptionMaterial {
+    key: [u8; 32],
+    kdf_id: u8,
+    salt: [u8; 16],
+}
 
 #[derive(Debug, Clone)]
 pub struct ArtifactInfo {
@@ -32,7 +51,11 @@ pub fn write_sqlite_baseline(
     backup.run_to_completion(8, std::time::Duration::from_millis(25), None)?;
 
     let raw = std::fs::read(&target)?;
-    let payload = if encrypt { maybe_encrypt(&raw)? } else { raw };
+    let payload = if encrypt {
+        maybe_encrypt(&raw, uhoh_dir)?
+    } else {
+        raw
+    };
     if encrypt {
         std::fs::write(&target, &payload)?;
     }
@@ -60,7 +83,7 @@ pub fn write_sqlite_schema_recovery(
     let schema = sqlite_schema_dump(sqlite_path)?;
     let mut payload = schema.into_bytes();
     if encrypt {
-        payload = maybe_encrypt(&payload)?;
+        payload = maybe_encrypt(&payload, uhoh_dir)?;
     }
 
     let file = recovery_dir.join(format!("{}_{}_schema.sql", timestamp_tag(), label));
@@ -91,7 +114,7 @@ pub fn write_postgres_schema_recovery(
     let schema = postgres_schema_dump(connection_ref, creds)?;
     let mut payload = schema.into_bytes();
     if encrypt {
-        payload = maybe_encrypt(&payload)?;
+        payload = maybe_encrypt(&payload, uhoh_dir)?;
     }
 
     let file = recovery_dir.join(format!("{}_{}_schema.sql", timestamp_tag(), label));
@@ -173,8 +196,12 @@ fn postgres_schema_dump(connection_ref: &str, creds: &CredentialMaterial) -> Res
 
 fn wrap_in_transaction(sql: &str) -> String {
     let trimmed = sql.trim();
-    let has_begin = trimmed.lines().any(|line| line.trim().eq_ignore_ascii_case("BEGIN;"));
-    let has_commit = trimmed.lines().any(|line| line.trim().eq_ignore_ascii_case("COMMIT;"));
+    let has_begin = trimmed
+        .lines()
+        .any(|line| line.trim().eq_ignore_ascii_case("BEGIN;"));
+    let has_commit = trimmed
+        .lines()
+        .any(|line| line.trim().eq_ignore_ascii_case("COMMIT;"));
     if has_begin && has_commit {
         format!("{trimmed}\n")
     } else {
@@ -182,22 +209,203 @@ fn wrap_in_transaction(sql: &str) -> String {
     }
 }
 
-fn maybe_encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {
-    let key_material = derive_key_material();
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_material));
+pub fn decrypt_recovery_payload(payload: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {
+    if payload.starts_with(ENC_MAGIC_V2) {
+        return decrypt_v2(payload, uhoh_dir);
+    }
+    if payload.starts_with(ENC_MAGIC_V1) {
+        return decrypt_v1_legacy(payload);
+    }
+    Ok(payload.to_vec())
+}
+
+fn maybe_encrypt(plaintext: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {
+    let mut material = derive_encryption_material(uhoh_dir)?;
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&material.key));
     let mut nonce_buf = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_buf);
     let nonce = Nonce::from_slice(&nonce_buf);
-    let mut out = b"UHOHENC1".to_vec();
+    let mut out = ENC_MAGIC_V2.to_vec();
+    out.push(material.kdf_id);
+    out.extend_from_slice(&material.salt);
     out.extend_from_slice(&nonce_buf);
     let encrypted = cipher
         .encrypt(nonce, plaintext)
         .map_err(|_| anyhow::anyhow!("Failed to encrypt artifact"))?;
     out.extend_from_slice(&encrypted);
+    material.key.zeroize();
+    material.salt.zeroize();
     Ok(out)
 }
 
-fn derive_key_material() -> [u8; 32] {
+fn derive_encryption_material(uhoh_dir: &std::path::Path) -> Result<EncryptionMaterial> {
+    if let Some(mut master) = read_master_key_from_env() {
+        let mut salt = [0u8; 16];
+        if let Some(mut raw_key) = decode_hex_key(&master) {
+            let key = blake3::derive_key(RECOVERY_BLAKE3_CONTEXT, &raw_key);
+            raw_key.zeroize();
+            master.zeroize();
+            return Ok(EncryptionMaterial {
+                key,
+                kdf_id: ENC_KDF_BLAKE3,
+                salt,
+            });
+        }
+
+        rand::thread_rng().fill_bytes(&mut salt);
+        let key = derive_argon2_key(&master, &salt)?;
+        master.zeroize();
+        return Ok(EncryptionMaterial {
+            key,
+            kdf_id: ENC_KDF_ARGON2ID,
+            salt,
+        });
+    }
+
+    tracing::warn!(
+        "UHOH_MASTER_KEY is not set; using machine-local fallback key at ~/.uhoh/{}",
+        MACHINE_KEY_FILE
+    );
+    let mut machine_key = load_or_create_machine_key(uhoh_dir)?;
+    let key = blake3::derive_key(RECOVERY_BLAKE3_CONTEXT, &machine_key);
+    machine_key.zeroize();
+    Ok(EncryptionMaterial {
+        key,
+        kdf_id: ENC_KDF_BLAKE3,
+        salt: [0u8; 16],
+    })
+}
+
+fn decrypt_v2(payload: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {
+    if payload.len() <= ENC_V2_HEADER_LEN {
+        anyhow::bail!("Encrypted recovery artifact is malformed");
+    }
+
+    let kdf_id = payload[8];
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&payload[9..25]);
+    let mut nonce_buf = [0u8; 12];
+    nonce_buf.copy_from_slice(&payload[25..37]);
+    let ciphertext = &payload[37..];
+
+    let mut key = match kdf_id {
+        ENC_KDF_ARGON2ID => {
+            let mut master = read_master_key_from_env().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Encrypted artifact requires UHOH_MASTER_KEY for Argon2id decryption"
+                )
+            })?;
+            let derived = derive_argon2_key(&master, &salt)?;
+            master.zeroize();
+            derived
+        }
+        ENC_KDF_BLAKE3 => {
+            if let Some(mut master) = read_master_key_from_env() {
+                if let Some(mut raw_key) = decode_hex_key(&master) {
+                    let key = blake3::derive_key(RECOVERY_BLAKE3_CONTEXT, &raw_key);
+                    raw_key.zeroize();
+                    master.zeroize();
+                    key
+                } else {
+                    master.zeroize();
+                    anyhow::bail!(
+                        "UHOH_MASTER_KEY must be 64-char hex for this encrypted recovery artifact"
+                    );
+                }
+            } else {
+                let mut machine_key = load_or_create_machine_key(uhoh_dir)?;
+                let key = blake3::derive_key(RECOVERY_BLAKE3_CONTEXT, &machine_key);
+                machine_key.zeroize();
+                key
+            }
+        }
+        _ => anyhow::bail!("Unsupported encrypted recovery artifact KDF id"),
+    };
+
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let nonce = Nonce::from_slice(&nonce_buf);
+    let result = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| anyhow::anyhow!("Failed to decrypt recovery artifact"));
+    key.zeroize();
+    salt.zeroize();
+    result
+}
+
+fn decrypt_v1_legacy(payload: &[u8]) -> Result<Vec<u8>> {
+    if payload.len() <= 20 {
+        anyhow::bail!("Encrypted legacy recovery artifact is malformed");
+    }
+    let mut key = derive_key_material_legacy();
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let nonce = Nonce::from_slice(&payload[8..20]);
+    let ciphertext = &payload[20..];
+    let result = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| anyhow::anyhow!("Failed to decrypt legacy recovery artifact"));
+    key.zeroize();
+    result
+}
+
+fn read_master_key_from_env() -> Option<String> {
+    std::env::var("UHOH_MASTER_KEY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn decode_hex_key(input: &str) -> Option<[u8; 32]> {
+    if input.len() != 64 {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    hex::decode_to_slice(input, &mut key).ok()?;
+    Some(key)
+}
+
+fn derive_argon2_key(master: &str, salt: &[u8; 16]) -> Result<[u8; 32]> {
+    let params = Params::new(
+        ARGON2_MEMORY_KIB,
+        ARGON2_TIME_COST,
+        ARGON2_PARALLELISM,
+        Some(32),
+    )
+    .map_err(|e| anyhow::anyhow!("Invalid Argon2 parameters: {e}"))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut out = [0u8; 32];
+    argon2
+        .hash_password_into(master.as_bytes(), salt, &mut out)
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to derive encryption key from UHOH_MASTER_KEY: {e}")
+        })?;
+    Ok(out)
+}
+
+fn load_or_create_machine_key(uhoh_dir: &std::path::Path) -> Result<[u8; 32]> {
+    let key_path = uhoh_dir.join(MACHINE_KEY_FILE);
+    if key_path.exists() {
+        let raw = std::fs::read_to_string(&key_path)
+            .with_context(|| format!("Failed reading {}", key_path.display()))?;
+        let trimmed = raw.trim();
+        if let Some(key) = decode_hex_key(trimmed) {
+            set_secure_permissions(&key_path)?;
+            return Ok(key);
+        }
+        anyhow::bail!(
+            "Invalid machine recovery key at {}. Delete it to regenerate.",
+            key_path.display()
+        );
+    }
+
+    let mut key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut key);
+    std::fs::write(&key_path, format!("{}\n", hex::encode(key)))
+        .with_context(|| format!("Failed writing {}", key_path.display()))?;
+    set_secure_permissions(&key_path)?;
+    Ok(key)
+}
+
+fn derive_key_material_legacy() -> [u8; 32] {
     if let Ok(master) = std::env::var("UHOH_MASTER_KEY") {
         if !master.trim().is_empty() {
             let hash = blake3::hash(master.as_bytes());

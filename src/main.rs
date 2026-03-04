@@ -1,12 +1,15 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+#[cfg(all(unix, target_os = "linux"))]
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command;
 use tracing::warn;
+use url::Url;
 
 use uhoh::cas;
-use uhoh::cli::{AgentAction, Cli, Commands, DbAction};
+use uhoh::cli::{AgentAction, Cli, Commands, DbAction, LedgerAction};
 use uhoh::config;
 use uhoh::daemon;
 use uhoh::db;
@@ -529,31 +532,37 @@ async fn main() -> Result<()> {
 
         Commands::Trace { event_id } => {
             let chain = database.event_ledger_trace(event_id)?;
-            if chain.is_empty() {
+            if chain.entries.is_empty() {
                 println!("No events found for trace id {event_id}");
             } else {
-                for entry in chain {
+                for entry in chain.entries {
                     println!(
                         "#{} {} {} [{}] {}",
                         entry.id, entry.ts, entry.source, entry.severity, entry.event_type
                     );
                 }
+                if chain.truncated {
+                    println!("Trace truncated after 1024 links; graph depth exceeded safe traversal limit.");
+                }
             }
         }
 
         Commands::Blame { path } => {
-            let events = database.event_ledger_recent(None, None, None, 500)?;
+            let events = database.event_ledger_recent(None, None, None, None, 500)?;
             if let Some(seed) = events
                 .into_iter()
                 .find(|e| e.path.as_deref() == Some(path.as_str()))
             {
                 let chain = database.event_ledger_trace(seed.id)?;
                 println!("Blame chain for {}", path);
-                for entry in chain {
+                for entry in chain.entries {
                     println!(
                         "#{} {} {} [{}] {}",
                         entry.id, entry.ts, entry.source, entry.severity, entry.event_type
                     );
+                }
+                if chain.truncated {
+                    println!("Trace truncated after 1024 links; graph depth exceeded safe traversal limit.");
                 }
             } else {
                 println!("No events found for path {}", path);
@@ -565,12 +574,9 @@ async fn main() -> Result<()> {
                 .as_deref()
                 .map(normalize_timeline_source)
                 .transpose()?;
-            let since_cutoff = since
-                .as_deref()
-                .map(parse_since_cutoff)
-                .transpose()?;
+            let since_cutoff = since.as_deref().map(parse_since_cutoff).transpose()?;
 
-            let events = database.event_ledger_recent(None, None, None, 1000)?;
+            let events = database.event_ledger_recent(None, None, None, None, 1000)?;
             let mut filtered = Vec::new();
             for entry in events {
                 if let Some(ref src) = normalized_source {
@@ -613,6 +619,26 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Ledger { action } => match action {
+            LedgerAction::Verify => {
+                let (count, broken) = database.verify_event_ledger_chain()?;
+                if broken.is_empty() {
+                    println!("Ledger verified: {} event(s), chain intact", count);
+                } else {
+                    println!(
+                        "Ledger verification failed: {} broken event(s): {}",
+                        broken.len(),
+                        broken
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    std::process::exit(2);
+                }
+            }
+        },
+
         Commands::Run { command } => {
             if command.is_empty() {
                 anyhow::bail!("No command provided");
@@ -622,10 +648,14 @@ async fn main() -> Result<()> {
             cmd.args(&command[1..]);
 
             if cfg.agent.mcp_proxy_enabled {
+                let proxy_token = uhoh::agent::ensure_proxy_token(&uhoh)?;
+                let auth_line = uhoh::agent::proxy_auth_handshake_line(&proxy_token);
                 cmd.env(
                     "UHOH_MCP_PROXY_ADDR",
                     format!("127.0.0.1:{}", cfg.agent.mcp_proxy_port),
                 );
+                cmd.env("UHOH_MCP_PROXY_TOKEN", &proxy_token);
+                cmd.env("UHOH_MCP_PROXY_AUTH_LINE", auth_line);
                 cmd.env(
                     "UHOH_AGENT_MCP_UPSTREAM",
                     std::env::var("UHOH_AGENT_MCP_UPSTREAM")
@@ -640,6 +670,28 @@ async fn main() -> Result<()> {
                     );
                 }
                 cmd.env("UHOH_SANDBOX_ENABLED", "1");
+
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    cmd.pre_exec(|| {
+                        let profile_path =
+                            std::env::var("UHOH_AGENT_PROFILE").unwrap_or_else(|_| {
+                                format!(
+                                    "{}/.uhoh/agents/default.toml",
+                                    dirs::home_dir().unwrap_or_default().display()
+                                )
+                            });
+                        let profile =
+                            uhoh::agent::load_agent_profile(std::path::Path::new(&profile_path))
+                                .map_err(|e| {
+                                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                                })?;
+                        uhoh::agent::apply_landlock(&profile).map_err(|e| {
+                            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                        })?;
+                        Ok(())
+                    });
+                }
             }
 
             cmd.env("UHOH_AGENT_RUNTIME_DIR", uhoh.join("agents/runtime"));
@@ -656,7 +708,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn handle_db_commands(database: &db::Database, uhoh_dir: &std::path::Path, action: &DbAction) -> Result<()> {
+fn handle_db_commands(
+    database: &db::Database,
+    uhoh_dir: &std::path::Path,
+    action: &DbAction,
+) -> Result<()> {
     match action {
         DbAction::Add {
             dsn,
@@ -679,6 +735,17 @@ fn handle_db_commands(database: &db::Database, uhoh_dir: &std::path::Path, actio
 
             let connection_ref = uhoh::db_guard::scrub_dsn(dsn);
             database.add_db_guard(&guard_name, engine, &connection_ref, &tables_csv, mode)?;
+            if let Some(creds) = extract_dsn_credentials(dsn) {
+                if let Err(err) =
+                    uhoh::db_guard::store_encrypted_credential(&connection_ref, &creds)
+                {
+                    tracing::warn!(
+                        "Failed to persist encrypted credential for guard {}: {}",
+                        guard_name,
+                        err
+                    );
+                }
+            }
             println!("Added db guard '{guard_name}' ({engine})");
         }
         DbAction::Remove { name } => {
@@ -688,7 +755,10 @@ fn handle_db_commands(database: &db::Database, uhoh_dir: &std::path::Path, actio
                 .find(|g| g.name == *name)
             {
                 if guard.engine == "postgres" {
-                    drop_postgres_monitoring_infrastructure(&guard.connection_ref, &guard.tables_csv)?;
+                    drop_postgres_monitoring_infrastructure(
+                        &guard.connection_ref,
+                        &guard.tables_csv,
+                    )?;
                 }
             }
             database.remove_db_guard(name)?;
@@ -709,7 +779,7 @@ fn handle_db_commands(database: &db::Database, uhoh_dir: &std::path::Path, actio
         }
         DbAction::Events { name, table } => {
             let events =
-                database.event_ledger_recent(Some("db_guard"), name.as_deref(), None, 100)?;
+                database.event_ledger_recent(Some("db_guard"), name.as_deref(), None, None, 100)?;
             for e in events {
                 if let Some(t) = table {
                     if e.path.as_deref() != Some(t.as_str()) {
@@ -766,7 +836,8 @@ fn handle_db_commands(database: &db::Database, uhoh_dir: &std::path::Path, actio
                     )?;
                 }
                 "postgres" => {
-                    let creds = uhoh::db_guard::resolve_postgres_credentials(&guard.connection_ref)?;
+                    let creds =
+                        uhoh::db_guard::resolve_postgres_credentials(&guard.connection_ref)?;
                     let _ = uhoh::db_guard::write_postgres_schema_baseline(
                         &uhoh::uhoh_dir(),
                         &guard.name,
@@ -834,6 +905,7 @@ fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Re
                     ts TIMESTAMPTZ NOT NULL DEFAULT now(),
                     PRIMARY KEY (table_name, txid)
                 );
+                CREATE INDEX IF NOT EXISTS idx_uhoh_delete_counts_ts ON _uhoh_delete_counts(ts);
 
                 CREATE OR REPLACE FUNCTION _uhoh_ddl_handler() RETURNS event_trigger AS $$
                 DECLARE rec RECORD;
@@ -988,23 +1060,27 @@ fn test_postgres_monitoring_infrastructure(dsn: &str) -> Result<()> {
             let _ = connection.await;
         });
 
-        match client.query_one("SELECT 1 FROM _uhoh_ddl_events LIMIT 1", &[]).await {
+        match client
+            .query_one("SELECT 1 FROM _uhoh_ddl_events LIMIT 1", &[])
+            .await
+        {
             Ok(_) => {}
             Err(_) => {
-                let _ = client
-                    .query_one("SELECT 1", &[])
-                    .await
-                    .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+                let _ = client.query_one("SELECT 1", &[]).await.map_err(|e| {
+                    anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string()))
+                })?;
             }
         }
 
-        match client.query_one("SELECT 1 FROM _uhoh_delete_counts LIMIT 1", &[]).await {
+        match client
+            .query_one("SELECT 1 FROM _uhoh_delete_counts LIMIT 1", &[])
+            .await
+        {
             Ok(_) => {}
             Err(_) => {
-                let _ = client
-                    .query_one("SELECT 1", &[])
-                    .await
-                    .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+                let _ = client.query_one("SELECT 1", &[]).await.map_err(|e| {
+                    anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string()))
+                })?;
             }
         }
 
@@ -1037,6 +1113,20 @@ fn sanitize_ident(input: &str) -> String {
         .collect()
 }
 
+fn extract_dsn_credentials(dsn: &str) -> Option<uhoh::db_guard::CredentialMaterial> {
+    let parsed = Url::parse(dsn).ok()?;
+    let username = if parsed.username().is_empty() {
+        None
+    } else {
+        Some(parsed.username().to_string())
+    };
+    let password = parsed.password().map(str::to_string);
+    if username.is_none() && password.is_none() {
+        return None;
+    }
+    Some(uhoh::db_guard::CredentialMaterial { username, password })
+}
+
 fn extract_artifact_path(detail: &Option<String>) -> Option<String> {
     let raw = detail.as_ref()?;
     let json = serde_json::from_str::<serde_json::Value>(raw).ok()?;
@@ -1045,20 +1135,18 @@ fn extract_artifact_path(detail: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
-fn apply_recovery_artifact(path: &str, _uhoh_dir: &std::path::Path) -> Result<()> {
+fn apply_recovery_artifact(path: &str, uhoh_dir: &std::path::Path) -> Result<()> {
     let artifact_path = std::path::Path::new(path);
     if !artifact_path.exists() {
-        anyhow::bail!("Recovery artifact does not exist: {}", artifact_path.display());
+        anyhow::bail!(
+            "Recovery artifact does not exist: {}",
+            artifact_path.display()
+        );
     }
 
     let payload = std::fs::read(artifact_path)?;
-    let sql = if payload.starts_with(b"UHOHENC1") {
-        anyhow::bail!(
-            "Encrypted recovery artifact detected. Decryption support is required before apply"
-        );
-    } else {
-        String::from_utf8(payload).context("Recovery artifact is not valid UTF-8 SQL")?
-    };
+    let decrypted = uhoh::db_guard::decrypt_recovery_payload(&payload, uhoh_dir)?;
+    let sql = String::from_utf8(decrypted).context("Recovery artifact is not valid UTF-8 SQL")?;
 
     #[cfg(unix)]
     {
@@ -1085,6 +1173,15 @@ fn apply_recovery_artifact(path: &str, _uhoh_dir: &std::path::Path) -> Result<()
     }
     println!("-- SQL preview end");
     Ok(())
+}
+
+fn session_matches_event(entry: &db::EventLedgerEntry, session_id: &str) -> bool {
+    entry
+        .detail
+        .as_deref()
+        .and_then(extract_session_id)
+        .map(|value| value == session_id)
+        .unwrap_or(false)
 }
 
 fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Result<()> {
@@ -1115,28 +1212,57 @@ fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Resul
                 }
             }
         }
-        AgentAction::Log { name, session: _ } => {
-            let events = database.event_ledger_recent(Some("agent"), None, name.as_deref(), 100)?;
+        AgentAction::Log { name, session } => {
+            let events = database.event_ledger_recent(
+                Some("agent"),
+                None,
+                name.as_deref(),
+                session.as_deref(),
+                100,
+            )?;
             for e in events {
                 println!("#{} {} [{}] {}", e.id, e.ts, e.severity, e.event_type);
             }
         }
         AgentAction::Undo {
             event_id,
-            session: _,
+            session,
             cascade,
         } => {
             if let Some(root_id) = *cascade {
-                let ids = database.event_ledger_descendant_ids(root_id)?;
-                for id in &ids {
-                    database.event_ledger_mark_resolved(*id)?;
+                if let Some(session_id) = session.as_deref() {
+                    let root_event = database
+                        .event_ledger_get(root_id)?
+                        .context("Root event not found")?;
+                    if !session_matches_event(&root_event, session_id) {
+                        anyhow::bail!(
+                            "Root event #{} does not belong to session {}",
+                            root_id,
+                            session_id
+                        );
+                    }
+                    let changed = database
+                        .event_ledger_mark_resolved_cascade_with_session(root_id, session_id)?;
+                    println!(
+                        "Marked {} session-matching event(s) as resolved for cascade root #{}",
+                        changed, root_id
+                    );
+                    return Ok(());
                 }
+                let changed = database.event_ledger_mark_resolved_cascade(root_id)?;
                 println!(
-                    "Marked event #{} and {} downstream event(s) as resolved",
+                    "Marked event #{} and {} downstream event(s) as resolved (acknowledged only; this does not revert filesystem or DB state)",
                     root_id,
-                    ids.len().saturating_sub(1)
+                    changed.saturating_sub(1)
                 );
             } else if let Some(id) = event_id {
+                if let Some(session_id) = session.as_deref() {
+                    let event = database.event_ledger_get(*id)?.context("Event not found")?;
+                    let matches = session_matches_event(&event, session_id);
+                    if !matches {
+                        anyhow::bail!("Event #{} does not belong to session {}", id, session_id);
+                    }
+                }
                 database.event_ledger_mark_resolved(*id)?;
                 println!("Marked event #{} as resolved", id);
             } else {
@@ -1146,6 +1272,7 @@ fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Resul
         AgentAction::Approve => {
             let runtime = uhoh::uhoh_dir().join("agents/runtime");
             std::fs::create_dir_all(&runtime)?;
+            let token = uhoh::agent::ensure_proxy_token(&uhoh::uhoh_dir())?;
             let mut approved_any = false;
             for entry in std::fs::read_dir(&runtime)? {
                 let entry = entry?;
@@ -1165,7 +1292,29 @@ fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Resul
                 else {
                     continue;
                 };
-                std::fs::write(runtime.join(format!("{stem}.approved")), b"approved")?;
+                let pending_raw = std::fs::read_to_string(&path)
+                    .with_context(|| format!("Failed reading {}", path.display()))?;
+                let pending_json: serde_json::Value = serde_json::from_str(&pending_raw)
+                    .with_context(|| {
+                        format!("Invalid pending approval JSON: {}", path.display())
+                    })?;
+                let approval_id = pending_json
+                    .get("approval_id")
+                    .and_then(|v| v.as_str())
+                    .context("Pending approval missing approval_id")?;
+                let challenge = pending_json
+                    .get("challenge")
+                    .and_then(|v| v.as_str())
+                    .context("Pending approval missing challenge")?;
+                let response = uhoh::agent::build_approval_response(&token, approval_id, challenge);
+                let body = serde_json::json!({
+                    "approval_id": approval_id,
+                    "response": response,
+                });
+                std::fs::write(
+                    runtime.join(format!("{stem}.approved.json")),
+                    serde_json::to_vec_pretty(&body)?,
+                )?;
                 approved_any = true;
             }
             if approved_any {
@@ -1219,7 +1368,10 @@ tool_call_format = "jsonl"
                 )?;
                 println!("Initialized default profile: {}", default_profile.display());
             } else {
-                println!("Default profile already exists: {}", default_profile.display());
+                println!(
+                    "Default profile already exists: {}",
+                    default_profile.display()
+                );
             }
         }
         AgentAction::UpdateProfiles => {
@@ -1236,6 +1388,16 @@ tool_call_format = "jsonl"
         }
     }
     Ok(())
+}
+
+fn extract_session_id(detail: &str) -> Option<String> {
+    if !detail.trim_start().starts_with('{') {
+        return None;
+    }
+    let json = serde_json::from_str::<serde_json::Value>(detail).ok()?;
+    json.get("session_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 fn expand_home_path(path: &str) -> String {
@@ -1278,7 +1440,10 @@ fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
         anyhow::bail!("--since cannot be empty");
     }
     if s.len() < 2 {
-        anyhow::bail!("Invalid --since format '{}'; use forms like 30m, 1h, 2d", raw);
+        anyhow::bail!(
+            "Invalid --since format '{}'; use forms like 30m, 1h, 2d",
+            raw
+        );
     }
 
     let (num_part, unit_part) = s.split_at(s.len() - 1);
@@ -1294,7 +1459,10 @@ fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
         "m" => chrono::Duration::minutes(qty),
         "h" => chrono::Duration::hours(qty),
         "d" => chrono::Duration::days(qty),
-        _ => anyhow::bail!("Invalid --since unit '{}'. Use one of s, m, h, d", unit_part),
+        _ => anyhow::bail!(
+            "Invalid --since unit '{}'. Use one of s, m, h, d",
+            unit_part
+        ),
     };
 
     Ok(chrono::Utc::now() - delta)

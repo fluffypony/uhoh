@@ -374,7 +374,14 @@ fn handle_stdio_tool_call(
             event.agent_name = Some(agent.to_string());
             event.path = path.map(|p| p.to_string());
             event.detail = Some(format!("action={action}"));
-            let event_id = database.insert_event_ledger(&event).ok();
+            event.prev_hash = None;
+            let event_id = match database.insert_event_ledger(&event) {
+                Ok(id) => Some(id),
+                Err(err) => {
+                    tracing::error!("failed to append pre_notify event: {err}");
+                    None
+                }
+            };
             JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 result: Some(json!({

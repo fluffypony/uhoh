@@ -1,14 +1,34 @@
 use anyhow::{Context, Result};
+use r2d2::{CustomizeConnection, Pool, PooledConnection};
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::Path;
-use std::sync::Mutex;
 
 /// Thread-safe SQLite database wrapper.
 /// SQLite with WAL mode handles concurrent readers and serialized writers.
 pub struct Database {
-    conn: Mutex<Connection>,
+    pool: Pool<SqliteConnectionManager>,
 }
+
+#[derive(Debug)]
+struct SqliteCustomizer;
+
+impl CustomizeConnection<Connection, rusqlite::Error> for SqliteCustomizer {
+    fn on_acquire(&self, conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+        Ok(())
+    }
+}
+
+type DbConn = PooledConnection<SqliteConnectionManager>;
+
+mod ledger;
+mod migrations;
+mod schema;
+mod snapshots;
 
 #[derive(Debug, Clone)]
 pub struct ProjectEntry {
@@ -70,6 +90,12 @@ pub struct EventLedgerEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct EventLedgerTraceResult {
+    pub entries: Vec<EventLedgerEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewEventLedgerEntry {
     pub source: String,
     pub event_type: String,
@@ -82,6 +108,7 @@ pub struct NewEventLedgerEntry {
     pub pre_state_ref: Option<String>,
     pub post_state_ref: Option<String>,
     pub causal_parent: Option<i64>,
+    pub prev_hash: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,17 +158,14 @@ type OperationListRow = (
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
-            .with_context(|| format!("Failed to open database: {}", path.display()))?;
+        let manager = SqliteConnectionManager::file(path);
+        let pool = Pool::builder()
+            .max_size(8)
+            .connection_customizer(Box::new(SqliteCustomizer))
+            .build(manager)
+            .with_context(|| format!("Failed to open database pool: {}", path.display()))?;
 
-        // Enable WAL mode for concurrent read/write
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
-
-        let db = Database {
-            conn: Mutex::new(conn),
-        };
+        let db = Database { pool };
         db.migrate()?;
         // Set database file permissions to 0o600 on Unix
         #[cfg(unix)]
@@ -173,17 +197,10 @@ impl Database {
         Ok(())
     }
 
-    /// Get a connection guard, recovering from mutex poisoning.
-    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        match self.conn.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::error!(
-                    "Database mutex was poisoned (a thread panicked while holding the lock). Recovering guard."
-                );
-                poisoned.into_inner()
-            }
-        }
+    fn conn(&self) -> DbConn {
+        self.pool
+            .get()
+            .expect("Database connection pool is unavailable")
     }
 
     fn migrate(&self) -> Result<()> {
@@ -349,6 +366,7 @@ impl Database {
                     detail TEXT,
                     pre_state_ref TEXT,
                     post_state_ref TEXT,
+                    prev_hash TEXT,
                     causal_parent INTEGER REFERENCES event_ledger(id),
                     resolved INTEGER NOT NULL DEFAULT 0
                 );
@@ -360,6 +378,7 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_event_ledger_path ON event_ledger(path);
                 CREATE INDEX IF NOT EXISTS idx_event_ledger_causal ON event_ledger(causal_parent);
                 CREATE INDEX IF NOT EXISTS idx_event_ledger_severity ON event_ledger(severity);
+                CREATE INDEX IF NOT EXISTS idx_event_ledger_prev_hash ON event_ledger(prev_hash);
 
                 CREATE TABLE IF NOT EXISTS db_guards (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -386,6 +405,34 @@ impl Database {
                 PRAGMA user_version = 7;
 
                 COMMIT;
+                ",
+            )?;
+        }
+
+        if version < 8 {
+            let mut columns = std::collections::HashSet::new();
+            {
+                let mut stmt = conn.prepare("PRAGMA table_info(event_ledger)")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+                for r in rows {
+                    columns.insert(r?);
+                }
+            }
+            if !columns.contains("prev_hash") {
+                conn.execute_batch("ALTER TABLE event_ledger ADD COLUMN prev_hash TEXT;")?;
+            }
+            if !columns.contains("session_id") {
+                conn.execute_batch(
+                    "ALTER TABLE event_ledger ADD COLUMN session_id TEXT GENERATED ALWAYS AS (
+                        CASE WHEN json_valid(detail) THEN json_extract(detail, '$.session_id') ELSE NULL END
+                    ) VIRTUAL;",
+                )?;
+            }
+            conn.execute_batch(
+                "
+                CREATE INDEX IF NOT EXISTS idx_event_ledger_prev_hash ON event_ledger(prev_hash);
+                CREATE INDEX IF NOT EXISTS idx_event_ledger_session ON event_ledger(session_id);
+                PRAGMA user_version = 8;
                 ",
             )?;
         }
@@ -1480,11 +1527,18 @@ impl Database {
     pub fn insert_event_ledger(&self, event: &NewEventLedgerEntry) -> Result<i64> {
         let conn = self.conn();
         let ts = chrono::Utc::now().to_rfc3339();
+        let prev_hash = match event.prev_hash.clone() {
+            Some(v) => v,
+            None => self
+                .latest_ledger_hash_with_conn(&conn)?
+                .unwrap_or_default(),
+        };
+        let chain_hash = ledger::compute_event_chain_hash(&prev_hash, event, &ts);
         conn.execute(
             "INSERT INTO event_ledger (
                 ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0)",
+                path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)",
             params![
                 ts,
                 event.source,
@@ -1497,10 +1551,103 @@ impl Database {
                 event.detail,
                 event.pre_state_ref,
                 event.post_state_ref,
+                chain_hash,
                 event.causal_parent,
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn insert_event_ledger_batch(&self, events: &[NewEventLedgerEntry]) -> Result<usize> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let mut prev_hash = self.latest_ledger_hash_with_conn(&tx)?.unwrap_or_default();
+        for event in events {
+            let ts = chrono::Utc::now().to_rfc3339();
+            let chain_hash = event
+                .prev_hash
+                .clone()
+                .unwrap_or_else(|| ledger::compute_event_chain_hash(&prev_hash, event, &ts));
+            tx.execute(
+                "INSERT INTO event_ledger (
+                    ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                    path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)",
+                params![
+                    ts,
+                    event.source,
+                    event.event_type,
+                    event.severity,
+                    event.project_hash,
+                    event.agent_name,
+                    event.guard_name,
+                    event.path,
+                    event.detail,
+                    event.pre_state_ref,
+                    event.post_state_ref,
+                    chain_hash,
+                    event.causal_parent,
+                ],
+            )?;
+            prev_hash = chain_hash;
+        }
+        tx.commit()?;
+        Ok(events.len())
+    }
+
+    pub fn verify_event_ledger_chain(&self) -> Result<(usize, Vec<i64>)> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                    path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
+             FROM event_ledger ORDER BY id ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut prev_hash = String::new();
+        let mut count = 0usize;
+        let mut broken = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let ts: String = row.get(1)?;
+            let event = NewEventLedgerEntry {
+                source: row.get(2)?,
+                event_type: row.get(3)?,
+                severity: row.get(4)?,
+                project_hash: row.get(5)?,
+                agent_name: row.get(6)?,
+                guard_name: row.get(7)?,
+                path: row.get(8)?,
+                detail: row.get(9)?,
+                pre_state_ref: row.get(10)?,
+                post_state_ref: row.get(11)?,
+                prev_hash: None,
+                causal_parent: row.get(13)?,
+            };
+            let stored_hash: Option<String> = row.get(12)?;
+            let expected = ledger::compute_event_chain_hash(&prev_hash, &event, &ts);
+            if stored_hash.as_deref() != Some(expected.as_str()) {
+                broken.push(id);
+            }
+            prev_hash = stored_hash.unwrap_or_default();
+            count += 1;
+        }
+        Ok((count, broken))
+    }
+
+    fn latest_ledger_hash_with_conn<C>(&self, conn: &C) -> Result<Option<String>>
+    where
+        C: std::ops::Deref<Target = Connection>,
+    {
+        conn.query_row(
+            "SELECT prev_hash FROM event_ledger ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("Failed to fetch latest event ledger hash")
     }
 
     pub fn event_ledger_recent(
@@ -1508,251 +1655,34 @@ impl Database {
         source: Option<&str>,
         guard_name: Option<&str>,
         agent_name: Option<&str>,
+        session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<EventLedgerEntry>> {
         let conn = self.conn();
-        let mut out = Vec::new();
         let cap = limit.max(1) as i64;
-        match (source, guard_name, agent_name) {
-            (Some(src), Some(guard), Some(agent)) => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
-                     FROM event_ledger
-                     WHERE source = ?1 AND guard_name = ?2 AND agent_name = ?3
-                     ORDER BY id DESC LIMIT ?4",
-                )?;
-                let rows = stmt.query_map(params![src, guard, agent, cap], |row| {
-                    Ok(EventLedgerEntry {
-                        id: row.get(0)?,
-                        ts: row.get(1)?,
-                        source: row.get(2)?,
-                        event_type: row.get(3)?,
-                        severity: row.get(4)?,
-                        project_hash: row.get(5)?,
-                        agent_name: row.get(6)?,
-                        guard_name: row.get(7)?,
-                        path: row.get(8)?,
-                        detail: row.get(9)?,
-                        pre_state_ref: row.get(10)?,
-                        post_state_ref: row.get(11)?,
-                        causal_parent: row.get(12)?,
-                        resolved: row.get::<_, i32>(13)? != 0,
-                    })
-                })?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
-            (Some(src), Some(guard), None) => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
-                     FROM event_ledger
-                     WHERE source = ?1 AND guard_name = ?2
-                     ORDER BY id DESC LIMIT ?3",
-                )?;
-                let rows = stmt.query_map(params![src, guard, cap], |row| {
-                    Ok(EventLedgerEntry {
-                        id: row.get(0)?,
-                        ts: row.get(1)?,
-                        source: row.get(2)?,
-                        event_type: row.get(3)?,
-                        severity: row.get(4)?,
-                        project_hash: row.get(5)?,
-                        agent_name: row.get(6)?,
-                        guard_name: row.get(7)?,
-                        path: row.get(8)?,
-                        detail: row.get(9)?,
-                        pre_state_ref: row.get(10)?,
-                        post_state_ref: row.get(11)?,
-                        causal_parent: row.get(12)?,
-                        resolved: row.get::<_, i32>(13)? != 0,
-                    })
-                })?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
-            (Some(src), None, Some(agent)) => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
-                     FROM event_ledger
-                     WHERE source = ?1 AND agent_name = ?2
-                     ORDER BY id DESC LIMIT ?3",
-                )?;
-                let rows = stmt.query_map(params![src, agent, cap], |row| {
-                    Ok(EventLedgerEntry {
-                        id: row.get(0)?,
-                        ts: row.get(1)?,
-                        source: row.get(2)?,
-                        event_type: row.get(3)?,
-                        severity: row.get(4)?,
-                        project_hash: row.get(5)?,
-                        agent_name: row.get(6)?,
-                        guard_name: row.get(7)?,
-                        path: row.get(8)?,
-                        detail: row.get(9)?,
-                        pre_state_ref: row.get(10)?,
-                        post_state_ref: row.get(11)?,
-                        causal_parent: row.get(12)?,
-                        resolved: row.get::<_, i32>(13)? != 0,
-                    })
-                })?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
-            (None, Some(guard), Some(agent)) => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
-                     FROM event_ledger
-                     WHERE guard_name = ?1 AND agent_name = ?2
-                     ORDER BY id DESC LIMIT ?3",
-                )?;
-                let rows = stmt.query_map(params![guard, agent, cap], |row| {
-                    Ok(EventLedgerEntry {
-                        id: row.get(0)?,
-                        ts: row.get(1)?,
-                        source: row.get(2)?,
-                        event_type: row.get(3)?,
-                        severity: row.get(4)?,
-                        project_hash: row.get(5)?,
-                        agent_name: row.get(6)?,
-                        guard_name: row.get(7)?,
-                        path: row.get(8)?,
-                        detail: row.get(9)?,
-                        pre_state_ref: row.get(10)?,
-                        post_state_ref: row.get(11)?,
-                        causal_parent: row.get(12)?,
-                        resolved: row.get::<_, i32>(13)? != 0,
-                    })
-                })?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
-            (Some(src), None, None) => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
-                     FROM event_ledger
-                     WHERE source = ?1
-                     ORDER BY id DESC LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(params![src, cap], |row| {
-                    Ok(EventLedgerEntry {
-                        id: row.get(0)?,
-                        ts: row.get(1)?,
-                        source: row.get(2)?,
-                        event_type: row.get(3)?,
-                        severity: row.get(4)?,
-                        project_hash: row.get(5)?,
-                        agent_name: row.get(6)?,
-                        guard_name: row.get(7)?,
-                        path: row.get(8)?,
-                        detail: row.get(9)?,
-                        pre_state_ref: row.get(10)?,
-                        post_state_ref: row.get(11)?,
-                        causal_parent: row.get(12)?,
-                        resolved: row.get::<_, i32>(13)? != 0,
-                    })
-                })?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
-            (None, Some(guard), None) => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
-                     FROM event_ledger
-                     WHERE guard_name = ?1
-                     ORDER BY id DESC LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(params![guard, cap], |row| {
-                    Ok(EventLedgerEntry {
-                        id: row.get(0)?,
-                        ts: row.get(1)?,
-                        source: row.get(2)?,
-                        event_type: row.get(3)?,
-                        severity: row.get(4)?,
-                        project_hash: row.get(5)?,
-                        agent_name: row.get(6)?,
-                        guard_name: row.get(7)?,
-                        path: row.get(8)?,
-                        detail: row.get(9)?,
-                        pre_state_ref: row.get(10)?,
-                        post_state_ref: row.get(11)?,
-                        causal_parent: row.get(12)?,
-                        resolved: row.get::<_, i32>(13)? != 0,
-                    })
-                })?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
-            (None, None, Some(agent)) => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
-                     FROM event_ledger
-                     WHERE agent_name = ?1
-                     ORDER BY id DESC LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(params![agent, cap], |row| {
-                    Ok(EventLedgerEntry {
-                        id: row.get(0)?,
-                        ts: row.get(1)?,
-                        source: row.get(2)?,
-                        event_type: row.get(3)?,
-                        severity: row.get(4)?,
-                        project_hash: row.get(5)?,
-                        agent_name: row.get(6)?,
-                        guard_name: row.get(7)?,
-                        path: row.get(8)?,
-                        detail: row.get(9)?,
-                        pre_state_ref: row.get(10)?,
-                        post_state_ref: row.get(11)?,
-                        causal_parent: row.get(12)?,
-                        resolved: row.get::<_, i32>(13)? != 0,
-                    })
-                })?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
-            (None, None, None) => {
-                let mut stmt = conn.prepare(
-                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
-                     FROM event_ledger
-                     ORDER BY id DESC LIMIT ?1",
-                )?;
-                let rows = stmt.query_map(params![cap], |row| {
-                    Ok(EventLedgerEntry {
-                        id: row.get(0)?,
-                        ts: row.get(1)?,
-                        source: row.get(2)?,
-                        event_type: row.get(3)?,
-                        severity: row.get(4)?,
-                        project_hash: row.get(5)?,
-                        agent_name: row.get(6)?,
-                        guard_name: row.get(7)?,
-                        path: row.get(8)?,
-                        detail: row.get(9)?,
-                        pre_state_ref: row.get(10)?,
-                        post_state_ref: row.get(11)?,
-                        causal_parent: row.get(12)?,
-                        resolved: row.get::<_, i32>(13)? != 0,
-                    })
-                })?;
-                for row in rows {
-                    out.push(row?);
-                }
-            }
+        let sql =
+            "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                    path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
+             FROM event_ledger
+             WHERE (?1 IS NULL OR source = ?1)
+               AND (?2 IS NULL OR guard_name = ?2)
+               AND (?3 IS NULL OR agent_name = ?3)
+               AND (
+                    ?4 IS NULL
+                    OR (
+                        session_id = ?4
+                    )
+               )
+             ORDER BY id DESC
+             LIMIT ?5";
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(
+            params![source, guard_name, agent_name, session, cap],
+            ledger::map_event_ledger_entry,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
         }
         Ok(out)
     }
@@ -1761,38 +1691,23 @@ impl Database {
         let conn = self.conn();
         conn.query_row(
             "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                    path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
+                    path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
              FROM event_ledger WHERE id = ?1",
             params![id],
-            |row| {
-                Ok(EventLedgerEntry {
-                    id: row.get(0)?,
-                    ts: row.get(1)?,
-                    source: row.get(2)?,
-                    event_type: row.get(3)?,
-                    severity: row.get(4)?,
-                    project_hash: row.get(5)?,
-                    agent_name: row.get(6)?,
-                    guard_name: row.get(7)?,
-                    path: row.get(8)?,
-                    detail: row.get(9)?,
-                    pre_state_ref: row.get(10)?,
-                    post_state_ref: row.get(11)?,
-                    causal_parent: row.get(12)?,
-                    resolved: row.get::<_, i32>(13)? != 0,
-                })
-            },
+            ledger::map_event_ledger_entry,
         )
         .optional()
         .context("Failed to fetch ledger event")
     }
 
-    pub fn event_ledger_trace(&self, id: i64) -> Result<Vec<EventLedgerEntry>> {
+    pub fn event_ledger_trace(&self, id: i64) -> Result<EventLedgerTraceResult> {
         let mut chain = Vec::new();
         let mut current = Some(id);
         let mut guard = 0usize;
+        let mut truncated = false;
         while let Some(cid) = current {
             if guard > 1024 {
+                truncated = true;
                 break;
             }
             if let Some(entry) = self.event_ledger_get(cid)? {
@@ -1803,7 +1718,10 @@ impl Database {
             }
             guard += 1;
         }
-        Ok(chain)
+        Ok(EventLedgerTraceResult {
+            entries: chain,
+            truncated,
+        })
     }
 
     pub fn event_ledger_mark_resolved(&self, id: i64) -> Result<()> {
@@ -1816,6 +1734,7 @@ impl Database {
     }
 
     pub fn event_ledger_descendant_ids(&self, root_id: i64) -> Result<Vec<i64>> {
+        let limit = 10_000i64;
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "WITH RECURSIVE descendants(id) AS (
@@ -1825,15 +1744,110 @@ impl Database {
                  FROM event_ledger e
                  JOIN descendants d ON e.causal_parent = d.id
              )
-             SELECT id FROM descendants",
+             SELECT id FROM descendants LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(params![root_id], |row| row.get::<_, i64>(0))?;
+        let rows = stmt.query_map(params![root_id, limit], |row| row.get::<_, i64>(0))?;
         let mut out = Vec::new();
         for id in rows {
             out.push(id?);
         }
+        if out.len() as i64 >= limit {
+            anyhow::bail!(
+                "Cascade descendant expansion reached limit of {} entries for root event #{}",
+                limit,
+                root_id
+            );
+        }
         Ok(out)
+    }
+
+    pub fn event_ledger_mark_resolved_cascade(&self, root_id: i64) -> Result<usize> {
+        let limit = 10_000i64;
+        let conn = self.conn();
+        let count: i64 = conn.query_row(
+            "WITH RECURSIVE descendants(id) AS (
+                 SELECT ?1
+                 UNION ALL
+                 SELECT e.id
+                 FROM event_ledger e
+                 JOIN descendants d ON e.causal_parent = d.id
+             )
+             SELECT COUNT(*) FROM descendants",
+            params![root_id],
+            |row| row.get(0),
+        )?;
+        if count >= limit {
+            anyhow::bail!(
+                "Cascade descendant expansion reached limit of {} entries for root event #{}",
+                limit,
+                root_id
+            );
+        }
+        let changed = conn.execute(
+            "WITH RECURSIVE descendants(id) AS (
+                 SELECT ?1
+                 UNION ALL
+                 SELECT e.id
+                 FROM event_ledger e
+                 JOIN descendants d ON e.causal_parent = d.id
+             )
+             UPDATE event_ledger
+             SET resolved = 1
+             WHERE id IN (SELECT id FROM descendants)",
+            params![root_id],
+        )?;
+        Ok(changed)
+    }
+
+    pub fn event_ledger_mark_resolved_cascade_with_session(
+        &self,
+        root_id: i64,
+        session_id: &str,
+    ) -> Result<usize> {
+        let limit = 10_000i64;
+        let conn = self.conn();
+        let count: i64 = conn.query_row(
+            "WITH RECURSIVE descendants(id) AS (
+                 SELECT ?1
+                 UNION ALL
+                 SELECT e.id
+                 FROM event_ledger e
+                 JOIN descendants d ON e.causal_parent = d.id
+             )
+             SELECT COUNT(*)
+             FROM event_ledger
+             WHERE id IN (SELECT id FROM descendants)
+               AND session_id = ?2",
+            params![root_id, session_id],
+            |row| row.get(0),
+        )?;
+        if count >= limit {
+            anyhow::bail!(
+                "Cascade descendant expansion reached limit of {} entries for root event #{}",
+                limit,
+                root_id
+            );
+        }
+        let changed = conn.execute(
+            "WITH RECURSIVE descendants(id) AS (
+                 SELECT ?1
+                 UNION ALL
+                 SELECT e.id
+                 FROM event_ledger e
+                 JOIN descendants d ON e.causal_parent = d.id
+             )
+             UPDATE event_ledger
+             SET resolved = 1
+             WHERE id IN (
+                 SELECT id
+                 FROM event_ledger
+                 WHERE id IN (SELECT id FROM descendants)
+                   AND session_id = ?2
+             )",
+            params![root_id, session_id],
+        )?;
+        Ok(changed)
     }
 
     pub fn add_db_guard(
@@ -1942,6 +1956,7 @@ impl Database {
         Ok(())
     }
 }
+
 // Type aliases to simplify complex tuple signatures used around snapshot creation
 #[derive(Debug, Clone)]
 pub struct SnapFileEntry {

@@ -3,11 +3,18 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rand::RngCore;
+use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
 
+const PROXY_TOKEN_FILE: &str = "agent_proxy.token";
+const APPROVAL_RESPONSE_FILE_SUFFIX: &str = ".approved.json";
+
 pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
+    let proxy_token = ensure_proxy_token(&ctx.uhoh_dir)?;
     let addr = format!("127.0.0.1:{}", ctx.config.agent.mcp_proxy_port);
     let listener = TcpListener::bind(&addr)
         .with_context(|| format!("Failed to bind MCP proxy listener on {addr}"))?;
@@ -17,7 +24,9 @@ pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
 
     let mut event = new_event("agent", "mcp_proxy_started", "info");
     event.detail = Some(format!("addr={addr}"));
-    let _ = ctx.event_ledger.append(event);
+    if let Err(err) = ctx.event_ledger.append(event) {
+        tracing::error!("failed to append mcp_proxy_started event: {err}");
+    }
 
     loop {
         match listener.accept() {
@@ -29,20 +38,25 @@ pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
                     .unwrap_or_else(|| "unknown".to_string());
                 let mut event = new_event("agent", "mcp_proxy_client_connected", "info");
                 event.detail = Some(format!("peer={peer}"));
-                let _ = ctx.event_ledger.append(event);
+                if let Err(err) = ctx.event_ledger.append(event) {
+                    tracing::error!("failed to append mcp_proxy_client_connected event: {err}");
+                }
                 let upstream = resolve_upstream_addr();
-                if let Err(e) =
-                    handle_connection(
-                        stream,
-                        &upstream,
-                        &ctx.uhoh_dir,
-                        &ctx.event_ledger,
-                        &ctx.config,
-                    )
-                {
+                if let Err(e) = handle_connection(
+                    stream,
+                    &upstream,
+                    &ctx.uhoh_dir,
+                    &ctx.event_ledger,
+                    &ctx.config,
+                    &proxy_token,
+                ) {
                     let mut event = new_event("agent", "mcp_proxy_connection_failed", "warn");
                     event.detail = Some(format!("peer={}, error={}", addr, e));
-                    let _ = ctx.event_ledger.append(event);
+                    if let Err(err) = ctx.event_ledger.append(event) {
+                        tracing::error!(
+                            "failed to append mcp_proxy_connection_failed event: {err}"
+                        );
+                    }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -51,7 +65,9 @@ pub fn run_proxy(ctx: &SubsystemContext) -> Result<()> {
             Err(e) => {
                 let mut event = new_event("agent", "mcp_proxy_accept_failed", "warn");
                 event.detail = Some(e.to_string());
-                let _ = ctx.event_ledger.append(event);
+                if let Err(err) = ctx.event_ledger.append(event) {
+                    tracing::error!("failed to append mcp_proxy_accept_failed event: {err}");
+                }
                 break;
             }
         }
@@ -65,6 +81,7 @@ fn handle_connection(
     uhoh_dir: &Path,
     ledger: &crate::event_ledger::EventLedger,
     config: &crate::config::Config,
+    proxy_token: &str,
 ) -> Result<()> {
     let mut upstream = TcpStream::connect(upstream_addr)
         .with_context(|| format!("Failed connecting MCP upstream: {upstream_addr}"))?;
@@ -72,11 +89,20 @@ fn handle_connection(
     let mut upstream_reader = BufReader::new(upstream.try_clone()?);
 
     let mut line = String::new();
+    let mut authed = false;
     loop {
         line.clear();
         let n = client_reader.read_line(&mut line)?;
         if n == 0 {
             break;
+        }
+
+        if !authed {
+            authed = validate_auth_line(&line, proxy_token)?;
+            if !authed {
+                return Err(anyhow::anyhow!("MCP proxy authentication failed"));
+            }
+            continue;
         }
 
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
@@ -114,6 +140,11 @@ fn intercept_tool_call(
     ledger: &crate::event_ledger::EventLedger,
     config: &crate::config::Config,
 ) -> Result<bool> {
+    let session_id = call
+        .pointer("/params/arguments/session_id")
+        .or_else(|| call.pointer("/params/arguments/session"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let tool = call
         .pointer("/params/name")
         .and_then(|v| v.as_str())
@@ -146,30 +177,40 @@ fn intercept_tool_call(
         }
     }
 
-    let is_dangerous = is_dangerous_tool_call(tool, path.as_deref(), &config.agent.dangerous_patterns);
+    let is_dangerous =
+        is_dangerous_tool_call(tool, path.as_deref(), &config.agent.dangerous_patterns);
     if is_dangerous {
-        let approval_id = format!(
-            "approval-{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        );
+        let approval_id = format!("approval-{}", uuid_like_id());
+        let challenge = random_hex(16);
+        let approval_hmac =
+            build_approval_response(&ensure_proxy_token(uhoh_dir)?, &approval_id, &challenge);
         let mut danger = new_event("agent", "dangerous_agent_action", "critical");
         danger.path = path.clone();
         danger.pre_state_ref = pre_state_ref.clone();
         danger.detail = Some(
             serde_json::json!({
                 "approval_id": approval_id,
+                "challenge": challenge,
+                "session_id": session_id.clone(),
                 "tool": tool,
                 "args": args,
                 "on_dangerous_change": config.agent.on_dangerous_change,
             })
             .to_string(),
         );
-        let _ = ledger.append(danger);
+        if let Err(err) = ledger.append(danger) {
+            tracing::error!("failed to append dangerous_agent_action event: {err}");
+        }
 
-        if config.agent.on_dangerous_change.eq_ignore_ascii_case("pause") {
+        if config
+            .agent
+            .on_dangerous_change
+            .eq_ignore_ascii_case("pause")
+        {
             write_pending_approval(
                 uhoh_dir,
                 &approval_id,
+                &challenge,
                 tool,
                 path.as_deref(),
                 &args,
@@ -179,6 +220,7 @@ fn intercept_tool_call(
             let approved = wait_for_approval(
                 uhoh_dir,
                 &approval_id,
+                &approval_hmac,
                 config.agent.pause_timeout_seconds,
                 ledger,
             )?;
@@ -194,7 +236,9 @@ fn intercept_tool_call(
                     })
                     .to_string(),
                 );
-                let _ = ledger.append(timeout_event);
+                if let Err(err) = ledger.append(timeout_event) {
+                    tracing::error!("failed to append dangerous_action_timeout event: {err}");
+                }
             }
         }
     }
@@ -204,12 +248,15 @@ fn intercept_tool_call(
     event.pre_state_ref = pre_state_ref;
     event.detail = Some(
         serde_json::json!({
+            "session_id": session_id,
             "tool": tool,
             "args": args,
         })
         .to_string(),
     );
-    let _ = ledger.append(event);
+    if let Err(err) = ledger.append(event) {
+        tracing::error!("failed to append tool_call event: {err}");
+    }
     Ok(false)
 }
 
@@ -217,13 +264,34 @@ fn is_dangerous_tool_call(tool: &str, path: Option<&str>, patterns: &[String]) -
     let tool_l = tool.to_ascii_lowercase();
     let path_l = path.unwrap_or_default().to_ascii_lowercase();
     patterns.iter().any(|pattern| {
-        let p = pattern.to_ascii_lowercase();
-        tool_l.contains(&p) || path_l.contains(&p)
+        let p = pattern.trim().to_ascii_lowercase();
+        if p.is_empty() {
+            return false;
+        }
+        if let Some(raw) = p.strip_prefix("tool:") {
+            return tool_l == raw.trim();
+        }
+        if let Some(raw) = p.strip_prefix("path:") {
+            return path_l.contains(raw.trim());
+        }
+        tool_l == p || path_l.contains(&p)
     })
 }
 
 fn resolve_upstream_addr() -> String {
     std::env::var("UHOH_AGENT_MCP_UPSTREAM").unwrap_or_else(|_| "127.0.0.1:22824".to_string())
+}
+
+pub fn auth_handshake_line(token: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "uhoh-auth",
+        "method": "uhoh/auth",
+        "params": {
+            "token": token,
+        }
+    })
+    .to_string()
 }
 
 #[derive(serde::Serialize)]
@@ -233,7 +301,14 @@ struct PendingApproval {
     tool: String,
     path: Option<String>,
     timeout_seconds: u64,
+    challenge: String,
     args: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+struct ApprovalResponse {
+    approval_id: String,
+    response: String,
 }
 
 fn runtime_dir(uhoh_dir: &Path) -> PathBuf {
@@ -245,12 +320,13 @@ fn pending_approval_path(uhoh_dir: &Path, approval_id: &str) -> PathBuf {
 }
 
 fn approved_path(uhoh_dir: &Path, approval_id: &str) -> PathBuf {
-    runtime_dir(uhoh_dir).join(format!("{approval_id}.approved"))
+    runtime_dir(uhoh_dir).join(format!("{approval_id}{APPROVAL_RESPONSE_FILE_SUFFIX}"))
 }
 
 fn write_pending_approval(
     uhoh_dir: &Path,
     approval_id: &str,
+    challenge: &str,
     tool: &str,
     path: Option<&str>,
     args: &serde_json::Value,
@@ -266,6 +342,7 @@ fn write_pending_approval(
         tool: tool.to_string(),
         path: path.map(str::to_string),
         timeout_seconds,
+        challenge: challenge.to_string(),
         args: args.clone(),
     };
     let serialized = serde_json::to_vec_pretty(&pending)?;
@@ -276,6 +353,7 @@ fn write_pending_approval(
 fn wait_for_approval(
     uhoh_dir: &Path,
     approval_id: &str,
+    expected_response: &str,
     timeout_seconds: u64,
     ledger: &crate::event_ledger::EventLedger,
 ) -> Result<bool> {
@@ -285,7 +363,13 @@ fn wait_for_approval(
     let timeout = std::time::Duration::from_secs(timeout_seconds.max(1));
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if approved.exists() {
+        if let Some(response) = read_approval_response(&approved)? {
+            if !secure_eq(response.approval_id.as_bytes(), approval_id.as_bytes())
+                || !secure_eq(response.response.as_bytes(), expected_response.as_bytes())
+            {
+                let _ = std::fs::remove_file(&approved);
+                continue;
+            }
             let mut event = new_event("agent", "dangerous_action_approved", "info");
             event.detail = Some(
                 serde_json::json!({
@@ -293,7 +377,9 @@ fn wait_for_approval(
                 })
                 .to_string(),
             );
-            let _ = ledger.append(event);
+            if let Err(err) = ledger.append(event) {
+                tracing::error!("failed to append dangerous_action_approved event: {err}");
+            }
             let _ = std::fs::remove_file(&approved);
             let _ = std::fs::remove_file(&pending);
             return Ok(true);
@@ -306,4 +392,102 @@ fn wait_for_approval(
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
+}
+
+fn validate_auth_line(line: &str, expected_token: &str) -> Result<bool> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Ok(false);
+    };
+    if json
+        .get("method")
+        .and_then(|v| v.as_str())
+        .map(|m| m != "uhoh/auth")
+        .unwrap_or(true)
+    {
+        return Ok(false);
+    }
+    let provided = json
+        .pointer("/params/token")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    Ok(secure_eq(provided.as_bytes(), expected_token.as_bytes()))
+}
+
+fn read_approval_response(path: &Path) -> Result<Option<ApprovalResponse>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read(path)
+        .with_context(|| format!("Failed reading approval response: {}", path.display()))?;
+    let parsed: ApprovalResponse = match serde_json::from_slice(&raw) {
+        Ok(value) => value,
+        Err(e) => {
+            let _ = std::fs::remove_file(path);
+            tracing::warn!(
+                "Ignoring invalid approval response payload at {}: {}",
+                path.display(),
+                e
+            );
+            return Ok(None);
+        }
+    };
+    Ok(Some(parsed))
+}
+
+fn secure_eq(left: &[u8], right: &[u8]) -> bool {
+    left.ct_eq(right).into()
+}
+
+fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
+fn uuid_like_id() -> String {
+    let mut buf = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
+pub fn build_approval_response(token: &str, approval_id: &str, challenge: &str) -> String {
+    let mut token_buf = token.as_bytes().to_vec();
+    let mut payload = Vec::with_capacity(token_buf.len() + approval_id.len() + challenge.len() + 2);
+    payload.extend_from_slice(&token_buf);
+    payload.push(b':');
+    payload.extend_from_slice(approval_id.as_bytes());
+    payload.push(b':');
+    payload.extend_from_slice(challenge.as_bytes());
+    let digest = blake3::hash(&payload);
+    let digest_hex = digest.to_hex().to_string();
+    token_buf.zeroize();
+    payload.zeroize();
+    digest_hex
+}
+
+pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
+    let runtime = runtime_dir(uhoh_dir);
+    std::fs::create_dir_all(&runtime)
+        .with_context(|| format!("Failed to create runtime dir: {}", runtime.display()))?;
+    let token_path = runtime.join(PROXY_TOKEN_FILE);
+    if token_path.exists() {
+        let token = std::fs::read_to_string(&token_path)
+            .with_context(|| format!("Failed reading {}", token_path.display()))?;
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            anyhow::bail!("Agent proxy token file is empty: {}", token_path.display());
+        }
+        return Ok(token);
+    }
+
+    let token = random_hex(32);
+    std::fs::write(&token_path, format!("{token}\n"))
+        .with_context(|| format!("Failed writing {}", token_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {}", token_path.display()))?;
+    }
+    Ok(token)
 }

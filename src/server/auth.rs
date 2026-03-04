@@ -8,6 +8,7 @@ use axum::{
 use rand::Rng;
 use std::fs;
 use std::path::{Path, PathBuf};
+use subtle::ConstantTimeEq;
 
 #[derive(Clone)]
 pub struct AuthToken(pub String);
@@ -42,7 +43,7 @@ pub async fn auth_middleware(headers: HeaderMap, request: Request, next: Next) -
     let method = request.method().clone();
     let path = request.uri().path().to_string();
 
-    if method == axum::http::Method::GET || path == "/health" {
+    if method == axum::http::Method::GET || path == "/health" || path == "/api/v1/health" {
         return next.run(request).await;
     }
 
@@ -52,7 +53,7 @@ pub async fn auth_middleware(headers: HeaderMap, request: Request, next: Next) -
         if let Some(auth_header) = headers.get("authorization") {
             if let Ok(auth_str) = auth_header.to_str() {
                 if let Some(provided) = auth_str.strip_prefix("Bearer ") {
-                    if provided == expected {
+                    if token_matches(provided, &expected) {
                         return next.run(request).await;
                     }
                 }
@@ -68,6 +69,10 @@ pub async fn auth_middleware(headers: HeaderMap, request: Request, next: Next) -
     }
 
     next.run(request).await
+}
+
+fn token_matches(provided: &str, expected: &str) -> bool {
+    provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 pub async fn host_validation_middleware(

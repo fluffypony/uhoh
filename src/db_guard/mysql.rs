@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use std::process::Command;
+use tempfile::NamedTempFile;
+use url::Url;
 
 use crate::db::DbGuardEntry;
 use crate::event_ledger::new_event;
@@ -24,11 +26,15 @@ pub fn tick_mysql_guard(
             let mut event = new_event("db_guard", "mysql_poll_failed", "warn");
             event.guard_name = Some(guard.name.clone());
             event.detail = Some(format!("poll_error={e}"));
-            let _ = ctx.event_ledger.append(event);
+            if let Err(err) = ctx.event_ledger.append(event) {
+                tracing::error!("failed to append mysql_poll_failed event: {err}");
+            }
             return Ok(());
         }
     };
-    let schema_hash = blake3::hash(snapshot.schema_sql.as_bytes()).to_hex().to_string();
+    let schema_hash = blake3::hash(snapshot.schema_sql.as_bytes())
+        .to_hex()
+        .to_string();
 
     if let Some(prev_hash) = &state.last_schema_hash {
         if prev_hash != &schema_hash {
@@ -43,7 +49,9 @@ pub fn tick_mysql_guard(
                 })
                 .to_string(),
             );
-            let _ = ctx.event_ledger.append(event);
+            if let Err(err) = ctx.event_ledger.append(event) {
+                tracing::error!("failed to append mysql schema change event: {err}");
+            }
         }
     }
 
@@ -61,7 +69,9 @@ pub fn tick_mysql_guard(
                 })
                 .to_string(),
             );
-            let _ = ctx.event_ledger.append(event);
+            if let Err(err) = ctx.event_ledger.append(event) {
+                tracing::error!("failed to append mysql mass_delete event: {err}");
+            }
         }
     }
 
@@ -78,7 +88,9 @@ pub fn tick_mysql_guard(
         })
         .to_string(),
     );
-    let _ = ctx.event_ledger.append(heartbeat);
+    if let Err(err) = ctx.event_ledger.append(heartbeat) {
+        tracing::error!("failed to append mysql_tick event: {err}");
+    }
     Ok(())
 }
 
@@ -90,7 +102,25 @@ struct MysqlSnapshot {
 
 fn poll_schema_snapshot(connection_ref: &str) -> Result<MysqlSnapshot> {
     let parsed = parse_mysql_ref(connection_ref)?;
+    let mut defaults_guard: Option<NamedTempFile> = None;
+    let mut defaults_path = None;
     let mut cmd = Command::new("mysql");
+
+    if let Some(password) = &parsed.password {
+        let mut tmp = NamedTempFile::new().context("Failed creating MySQL defaults file")?;
+        use std::io::Write as _;
+        writeln!(tmp, "[client]")?;
+        writeln!(tmp, "password={password}")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o600)).ok();
+        }
+        cmd.arg(format!("--defaults-extra-file={}", tmp.path().display()));
+        defaults_path = Some(tmp.path().to_path_buf());
+        defaults_guard = Some(tmp);
+    }
+
     cmd.arg("--batch")
         .arg("--skip-column-names")
         .arg("-e")
@@ -106,20 +136,23 @@ fn poll_schema_snapshot(connection_ref: &str) -> Result<MysqlSnapshot> {
         .arg(parsed.port.to_string())
         .arg("-u")
         .arg(&parsed.user);
-
     if let Some(db) = &parsed.database {
         cmd.arg("-D").arg(db);
-    }
-    if let Some(password) = &parsed.password {
-        cmd.env("MYSQL_PWD", password);
     }
 
     let output = cmd
         .output()
         .context("Failed to execute mysql client for schema polling")?;
+    if let Some(path) = defaults_path.as_ref() {
+        let _ = std::fs::remove_file(path);
+    }
+    drop(defaults_guard);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("mysql schema polling failed: {}", stderr.trim());
+        anyhow::bail!(
+            "mysql schema polling failed: {}",
+            crate::db_guard::scrub_error_message(stderr.trim())
+        );
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -158,25 +191,30 @@ struct ParsedMysqlRef {
 }
 
 fn parse_mysql_ref(connection_ref: &str) -> Result<ParsedMysqlRef> {
-    let uri = connection_ref
-        .strip_prefix("mysql://")
-        .ok_or_else(|| anyhow::anyhow!("Expected mysql:// connection reference"))?;
-    let (userinfo_host, database) = uri
-        .split_once('/')
-        .map(|(lhs, rhs)| (lhs, Some(rhs.split('?').next().unwrap_or_default().to_string())))
-        .unwrap_or((uri, None));
+    let url = Url::parse(connection_ref).context("Invalid MySQL connection reference")?;
+    if url.scheme() != "mysql" {
+        anyhow::bail!("Expected mysql:// connection reference");
+    }
 
-    let (userinfo, hostport) = userinfo_host
-        .split_once('@')
-        .ok_or_else(|| anyhow::anyhow!("MySQL connection ref must include user@host"))?;
-    let (user, password) = userinfo
-        .split_once(':')
-        .map(|(u, p)| (u.to_string(), Some(p.to_string())))
-        .unwrap_or((userinfo.to_string(), None));
-    let (host, port) = hostport
-        .split_once(':')
-        .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(3306)))
-        .unwrap_or((hostport.to_string(), 3306));
+    let user = if url.username().is_empty() {
+        anyhow::bail!("MySQL connection ref must include user@host");
+    } else {
+        url.username().to_string()
+    };
+    let password = url.password().map(str::to_string);
+    let host = url
+        .host_str()
+        .map(str::to_string)
+        .context("MySQL connection ref must include host")?;
+    let port = url.port().unwrap_or(3306);
+    let database = {
+        let db = url.path().trim_start_matches('/').trim();
+        if db.is_empty() {
+            None
+        } else {
+            Some(db.to_string())
+        }
+    };
 
     Ok(ParsedMysqlRef {
         host,

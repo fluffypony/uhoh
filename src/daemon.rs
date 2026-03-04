@@ -117,6 +117,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let restore_in_progress = Arc::new(AtomicBool::new(false));
 
     let event_ledger = EventLedger::new(database.clone());
+    event_ledger.start_flusher();
     let mut subsystem_manager_inner = SubsystemManager::new(5, Duration::from_secs(600));
     subsystem_manager_inner.register(Box::new(crate::db_guard::DbGuardSubsystem::new()));
     subsystem_manager_inner.register(Box::new(crate::agent::AgentSubsystem::new()));
