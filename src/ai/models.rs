@@ -88,7 +88,7 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
     loop {
         let mut req = client.get(&model.url);
         if pos > 0 {
-            req = req.header(reqwest::header::RANGE, format!("bytes={}-", pos));
+            req = req.header(reqwest::header::RANGE, format!("bytes={pos}-"));
         }
         let resp = req.send()?;
         if pos > 0 && resp.status() == reqwest::StatusCode::OK {

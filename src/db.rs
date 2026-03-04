@@ -63,6 +63,15 @@ pub struct FileEntryRow {
     pub is_symlink: bool,
 }
 
+type OperationListRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<u64>,
+    Option<u64>,
+);
+
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
@@ -97,7 +106,7 @@ impl Database {
     pub fn backup_to(&self, path: &std::path::Path) -> Result<()> {
         let src = self.conn();
         let mut dest = rusqlite::Connection::open(path)?;
-        let backup = rusqlite::backup::Backup::new(&*src, &mut dest)?;
+        let backup = rusqlite::backup::Backup::new(&src, &mut dest)?;
         backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
         #[cfg(unix)]
         {
@@ -329,7 +338,7 @@ impl Database {
                 _ => esc.push(ch),
             }
         }
-        let pattern = format!("{}%", esc);
+        let pattern = format!("{esc}%");
 
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM projects WHERE hash LIKE ?1",
@@ -339,9 +348,7 @@ impl Database {
 
         if count > 1 {
             anyhow::bail!(
-                "Ambiguous hash prefix '{}' matches {} projects. Use a longer prefix.",
-                prefix,
-                count
+                "Ambiguous hash prefix '{prefix}' matches {count} projects. Use a longer prefix."
             );
         }
 
@@ -435,6 +442,7 @@ impl Database {
     }
 
     /// Create a snapshot in a single transaction (atomic).
+    #[allow(clippy::too_many_arguments)]
     pub fn create_snapshot(
         &self,
         project_hash: &str,
@@ -976,16 +984,14 @@ impl Database {
 
         // conservative query normalization for FTS parser safety
         let safe = query
-            .replace('"', " ")
-            .replace('*', " ")
-            .replace(':', " ")
+            .replace(['"', '*', ':'], " ")
             .trim()
             .to_string();
         if safe.is_empty() {
             return Ok(Vec::new());
         }
 
-        let fts_query = format!("\"{}\"*", safe);
+        let fts_query = format!("\"{safe}\"*");
         let mut out = Vec::new();
 
         if let Some(ph) = project_hash {
@@ -1187,19 +1193,7 @@ impl Database {
         .context("Failed to query active operation")
     }
 
-    pub fn list_operations(
-        &self,
-        project_hash: &str,
-    ) -> Result<
-        Vec<(
-            i64,
-            String,
-            String,
-            Option<String>,
-            Option<u64>,
-            Option<u64>,
-        )>,
-    > {
+    pub fn list_operations(&self, project_hash: &str) -> Result<Vec<OperationListRow>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, label, started_at, ended_at, first_snapshot_id, last_snapshot_id

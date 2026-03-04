@@ -21,7 +21,7 @@ pub fn resolve_project(
         let target_path = Path::new(target);
         if target_path.exists() || target_path.is_absolute() {
             let canonical = dunce::canonicalize(target_path)
-                .with_context(|| format!("Cannot resolve path: {}", target))?;
+                .with_context(|| format!("Cannot resolve path: {target}"))?;
             let canonical_s = canonical.to_string_lossy();
             if let Some(project) = projects
                 .iter()
@@ -35,7 +35,7 @@ pub fn resolve_project(
                     return Ok(project.clone());
                 }
             }
-            bail!("Path '{}' is not within a tracked project", canonical_s);
+            bail!("Path '{canonical_s}' is not within a tracked project");
         }
 
         let matching: Vec<_> = projects
@@ -43,7 +43,7 @@ pub fn resolve_project(
             .filter(|p| p.hash.starts_with(target))
             .collect();
         match matching.len() {
-            0 => bail!("No project found matching '{}'", target),
+            0 => bail!("No project found matching '{target}'"),
             1 => return Ok(matching[0].clone()),
             _ => bail!(
                 "Ambiguous hash prefix '{}': matches {} projects",
@@ -85,11 +85,11 @@ pub fn resolve_project(
 pub fn validate_path_within_project(project_path: &Path, relative_path: &str) -> Result<()> {
     let rel = Path::new(relative_path);
     if rel.is_absolute() {
-        bail!("Absolute paths are not allowed: {}", relative_path);
+        bail!("Absolute paths are not allowed: {relative_path}");
     }
     for component in rel.components() {
         if matches!(component, std::path::Component::ParentDir) {
-            bail!("Path traversal is not allowed: {}", relative_path);
+            bail!("Path traversal is not allowed: {relative_path}");
         }
     }
 
@@ -98,7 +98,7 @@ pub fn validate_path_within_project(project_path: &Path, relative_path: &str) ->
         let canonical = dunce::canonicalize(&full_path)?;
         let project_canonical = dunce::canonicalize(project_path)?;
         if !canonical.starts_with(project_canonical) {
-            bail!("Path '{}' resolves outside the project", relative_path);
+            bail!("Path '{relative_path}' resolves outside the project");
         }
     }
 

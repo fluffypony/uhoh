@@ -47,11 +47,9 @@ fn on_ac_power() -> bool {
         Ok(b) => b,
         Err(_) => return true,
     };
-    for bat in batteries {
-        if let Ok(b) = bat {
-            if b.state() == battery::State::Discharging {
-                return false;
-            }
+    for b in batteries.flatten() {
+        if b.state() == battery::State::Discharging {
+            return false;
         }
     }
     true

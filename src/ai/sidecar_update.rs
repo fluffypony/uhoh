@@ -48,7 +48,7 @@ fn detect_platform_asset_substring() -> Result<&'static str> {
             }
         }
         ("windows", "aarch64") => Ok("win-arm64"),
-        _ => bail!("Unsupported platform: {}-{}", os, arch),
+        _ => bail!("Unsupported platform: {os}-{arch}"),
     }
 }
 
@@ -92,11 +92,10 @@ pub fn check_for_update(
 
     let url = if let Some(version) = pin_version {
         format!(
-            "https://api.github.com/repos/{}/releases/tags/{}",
-            repo, version
+            "https://api.github.com/repos/{repo}/releases/tags/{version}"
         )
     } else {
-        format!("https://api.github.com/repos/{}/releases/latest", repo)
+        format!("https://api.github.com/repos/{repo}/releases/latest")
     };
 
     let client = reqwest::blocking::Client::builder()
@@ -217,7 +216,7 @@ pub fn download_and_install(
         }
         if !found {
             let _ = fs::remove_file(&tmp_archive);
-            bail!("Could not find {} in downloaded archive", binary_name);
+            bail!("Could not find {binary_name} in downloaded archive");
         }
     } else {
         let gz = flate2::read::GzDecoder::new(archive_file);
@@ -235,7 +234,7 @@ pub fn download_and_install(
         }
         if !found {
             let _ = fs::remove_file(&tmp_archive);
-            bail!("Could not find {} in downloaded archive", binary_name);
+            bail!("Could not find {binary_name} in downloaded archive");
         }
     }
 
@@ -271,7 +270,7 @@ pub fn download_and_install(
         }
         Err(e) => {
             let _ = fs::remove_file(&tmp_binary);
-            bail!("Downloaded sidecar binary failed to execute: {}", e);
+            bail!("Downloaded sidecar binary failed to execute: {e}");
         }
     }
 

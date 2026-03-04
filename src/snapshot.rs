@@ -24,6 +24,7 @@ pub struct CachedFileState {
 }
 
 /// Create a snapshot for a project. Returns the snapshot ID if one was created.
+#[allow(clippy::too_many_arguments)]
 pub fn create_snapshot(
     uhoh_dir: &Path,
     database: &Database,
@@ -87,7 +88,7 @@ pub fn create_snapshot(
         for rel_path in rel_changed.iter() {
             let abs_path = project_path.join(cas::decode_relpath_to_os(rel_path));
             // Skip marker file
-            if abs_path.file_name().map_or(false, |n| n == ".uhoh") {
+            if abs_path.file_name().is_some_and(|n| n == ".uhoh") {
                 continue;
             }
 
@@ -267,10 +268,8 @@ pub fn create_snapshot(
 
         // Pre-count entries to optionally show a progress bar for large scans
         let mut entries: Vec<ignore::DirEntry> = Vec::new();
-        for entry in walker {
-            if let Ok(e) = entry {
-                entries.push(e);
-            }
+        for e in walker.flatten() {
+            entries.push(e);
         }
         let show_pb = entries.len() > 1000;
         let pb = if show_pb {
@@ -287,7 +286,7 @@ pub fn create_snapshot(
 
         for entry in entries {
             let path = entry.path();
-            if path.file_name().map_or(false, |n| n == ".uhoh") {
+            if path.file_name().is_some_and(|n| n == ".uhoh") {
                 if let Some(pb) = &pb {
                     pb.inc(1);
                 }
@@ -546,7 +545,7 @@ pub fn create_snapshot(
                     // Enforce size cap and skip binary
                     if prev.size > MAX_AI_DIFF_FILE_SIZE {
                         diff_chunks
-                            .push_str(&format!("--- {}\n[File too large for AI diff]\n", path));
+                            .push_str(&format!("--- {path}\n[File too large for AI diff]\n"));
                         continue;
                     }
                     let old = crate::cas::read_blob(&blob_root, &prev.hash).ok().flatten();
@@ -557,14 +556,14 @@ pub fn create_snapshot(
                         if content_inspector::inspect(head_old).is_binary()
                             || content_inspector::inspect(head_new).is_binary()
                         {
-                            diff_chunks.push_str(&format!("--- {}\n[Binary file]\n", path));
+                            diff_chunks.push_str(&format!("--- {path}\n[Binary file]\n"));
                             continue;
                         }
                         if let (Ok(old_s), Ok(new_s)) =
                             (String::from_utf8(old), String::from_utf8(new))
                         {
                             let d = similar::TextDiff::from_lines(&old_s, &new_s);
-                            diff_chunks.push_str(&format!("--- a/{}\n+++ b/{}\n", path, path));
+                            diff_chunks.push_str(&format!("--- a/{path}\n+++ b/{path}\n"));
                             for hunk in d.unified_diff().context_radius(2).iter_hunks() {
                                 diff_chunks.push_str(&format!("{}\n", hunk.header()));
                                 for change in hunk.iter_changes() {
@@ -623,7 +622,7 @@ pub fn create_snapshot(
     // Enforce storage limits after snapshot
     // Compute total project size from manifest entries
     let total_project_size: u64 = files_for_manifest.iter().map(|f| f.size).sum();
-    enforce_storage_limit(database, total_project_size, project_hash, &config)?;
+    enforce_storage_limit(database, total_project_size, project_hash, config)?;
 
     Ok(Some(snapshot_id))
 }

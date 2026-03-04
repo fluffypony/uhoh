@@ -64,7 +64,7 @@ pub fn generate_summary_blocking(
                 .timeout(std::time::Duration::from_secs(60))
                 .build()?;
             let r = client
-                .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+                .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
                 .json(&serde_json::json!({
                     "model": model.name,
                     "messages": [{"role": "user", "content": prompt}],

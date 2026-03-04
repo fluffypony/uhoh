@@ -138,14 +138,13 @@ pub fn cmd_gitstash(
                 "100644"
             };
             // Write NUL-terminated entries: "<mode> <hash>\t<path>\0"
-            write!(sin, "{} {}\t{}\0", mode, blob_hash, path)?;
+            write!(sin, "{mode} {blob_hash}\t{path}\0")?;
         }
     }
     let status = upd.wait()?;
     if !status.success() {
         bail!(
-            "git update-index --index-info failed with status {}",
-            status
+            "git update-index --index-info failed with status {status}"
         );
     }
     //  - write-tree
@@ -168,7 +167,7 @@ pub fn cmd_gitstash(
             "-p",
             &head_commit,
             "-m",
-            &format!("index on {}", id_str),
+            &format!("index on {id_str}"),
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -218,8 +217,7 @@ pub fn cmd_gitstash(
     let _ = std::fs::remove_file(&tmp_index);
 
     println!(
-        "Snapshot {} stashed as git stash entry. Use `git stash pop` to apply.",
-        id_str
+        "Snapshot {id_str} stashed as git stash entry. Use `git stash pop` to apply."
     );
     Ok(())
 }
@@ -249,10 +247,9 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
     let uhoh_hook_content = format!(
         r#"
 # BEGIN uhoh pre-commit hook
-"{}" commit --trigger pre-commit "Pre-commit snapshot" 2>/dev/null || true
+"{exe_str}" commit --trigger pre-commit "Pre-commit snapshot" 2>/dev/null || true
 # END uhoh pre-commit hook
-"#,
-        exe_str
+"#
     );
 
     if hook_path.exists() {
@@ -268,7 +265,7 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
         std::fs::write(&hook_path, content)?;
         println!("Appended uhoh hook to existing pre-commit hook.");
     } else {
-        let content = format!("#!/bin/sh\n{}", uhoh_hook_content);
+        let content = format!("#!/bin/sh\n{uhoh_hook_content}");
         std::fs::write(&hook_path, content)?;
         println!("Pre-commit hook installed.");
     }

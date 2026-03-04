@@ -176,7 +176,7 @@ async fn handle_tools_call(
         "create_snapshot" => tool_create_snapshot(state, id, args).await,
         "list_snapshots" => tool_list_snapshots(state, id, args).await,
         "restore_snapshot" => tool_restore_snapshot(state, id, args).await,
-        _ => JsonRpcResponse::error(id, -32602, format!("Unknown tool: {}", tool_name)),
+        _ => JsonRpcResponse::error(id, -32602, format!("Unknown tool: {tool_name}")),
     }
 }
 
@@ -240,7 +240,7 @@ async fn tool_create_snapshot(state: AppState, id: Option<Value>, args: Value) -
     match result {
         Ok(Ok(value)) => JsonRpcResponse::success(id, value),
         Ok(Err(e)) => JsonRpcResponse::error(id, -32000, e.to_string()),
-        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {}", e)),
+        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {e}")),
     }
 }
 
@@ -286,7 +286,7 @@ async fn tool_list_snapshots(state: AppState, id: Option<Value>, args: Value) ->
     match result {
         Ok(Ok(value)) => JsonRpcResponse::success(id, value),
         Ok(Err(e)) => JsonRpcResponse::error(id, -32000, e.to_string()),
-        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {}", e)),
+        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {e}")),
     }
 }
 
@@ -398,11 +398,11 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
 
         Ok(json!({
             "content": [{"type":"text", "text": if dry_run {
-                format!("Dry run complete for snapshot {}", snapshot_id)
+                format!("Dry run complete for snapshot {snapshot_id}")
             } else if outcome.applied {
-                format!("Snapshot {} restored", snapshot_id)
+                format!("Snapshot {snapshot_id} restored")
             } else {
-                format!("Restore for snapshot {} was not applied", snapshot_id)
+                format!("Restore for snapshot {snapshot_id} was not applied")
             }}],
             "restored": outcome.applied,
             "dry_run": outcome.dry_run,
@@ -426,6 +426,6 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
     match result {
         Ok(Ok(value)) => JsonRpcResponse::success(id, value),
         Ok(Err(e)) => JsonRpcResponse::error(id, -32000, e.to_string()),
-        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {}", e)),
+        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {e}")),
     }
 }

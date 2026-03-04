@@ -83,13 +83,12 @@ fn check_no_symlink_parents(restore_base: &Path, target: &Path) -> Result<()> {
 fn validate_restore_path(project_path: &Path, relative_path: &str) -> Result<()> {
     let rel = Path::new(relative_path);
     if rel.is_absolute() {
-        anyhow::bail!("Absolute path in snapshot manifest: {}", relative_path);
+        anyhow::bail!("Absolute path in snapshot manifest: {relative_path}");
     }
     for component in rel.components() {
         if matches!(component, std::path::Component::ParentDir) {
             anyhow::bail!(
-                "Path traversal detected in snapshot manifest: {}",
-                relative_path
+                "Path traversal detected in snapshot manifest: {relative_path}"
             );
         }
     }
@@ -99,8 +98,7 @@ fn validate_restore_path(project_path: &Path, relative_path: &str) -> Result<()>
         if let Ok(project_canonical) = dunce::canonicalize(project_path) {
             if !canonical.starts_with(project_canonical) {
                 anyhow::bail!(
-                    "Path '{}' resolves outside project directory",
-                    relative_path
+                    "Path '{relative_path}' resolves outside project directory"
                 );
             }
         }
@@ -164,15 +162,13 @@ pub fn cmd_restore(
             // No previous snapshot: treat existing files as potentially tracked
             {
                 let mut set = HashSet::new();
-                for e in crate::ignore_rules::build_walker(project_path) {
-                    if let Ok(ent) = e {
-                        if ent
-                            .file_type()
-                            .map_or(false, |ft| ft.is_file() || ft.is_symlink())
-                        {
-                            if let Ok(rel) = ent.path().strip_prefix(project_path) {
-                                set.insert(crate::cas::encode_relpath(rel));
-                            }
+                for ent in crate::ignore_rules::build_walker(project_path).flatten() {
+                    if ent
+                        .file_type()
+                        .is_some_and(|ft| ft.is_file() || ft.is_symlink())
+                    {
+                        if let Ok(rel) = ent.path().strip_prefix(project_path) {
+                            set.insert(crate::cas::encode_relpath(rel));
                         }
                     }
                 }
@@ -218,7 +214,9 @@ pub fn cmd_restore(
         if dry_run {
             println!("Dry run — changes that would be applied:");
             for path in &to_delete {
-                println!("  DELETE {}", cas::decode_relpath_to_os(path).display());
+                let decoded = cas::decode_relpath_to_os(path);
+                let display = std::path::Path::new(&decoded).display();
+                println!("  DELETE {display}");
             }
             for (path, _, _, _) in &to_restore {
                 println!("  RESTORE {}", path.display());
@@ -280,7 +278,7 @@ pub fn cmd_restore(
             &project.hash,
             project_path,
             "pre-restore",
-            Some(&format!("Before restore to {}", id_str)),
+            Some(&format!("Before restore to {id_str}")),
             &cfg,
             None,
         );
@@ -299,7 +297,7 @@ pub fn cmd_restore(
         if !unstored.is_empty() {
             eprintln!("⚠ {} file(s) in target snapshot were not stored (likely too large) and will be skipped.", unstored.len());
             for p in unstored.iter().take(10) {
-                eprintln!("  - {}", p);
+                eprintln!("  - {p}");
             }
             if unstored.len() > 10 {
                 eprintln!("  ... and {} more", unstored.len() - 10);
@@ -312,7 +310,7 @@ pub fn cmd_restore(
             );
             for (p, h) in missing_blobs.iter().take(10) {
                 let short = &h[..h.len().min(12)];
-                eprintln!("  - {} ({}...)", p, short);
+                eprintln!("  - {p} ({short}...)");
             }
             anyhow::bail!("Cannot restore: required blobs missing");
         }
@@ -324,7 +322,7 @@ pub fn cmd_restore(
                 .unwrap_or(0)
         });
         let unique_suffix = format!("{}-{}", std::process::id(), nanos_i64);
-        let restore_tmp = project_path.join(format!(".uhoh-restore-tmp-{}", unique_suffix));
+        let restore_tmp = project_path.join(format!(".uhoh-restore-tmp-{unique_suffix}"));
         std::fs::create_dir_all(&restore_tmp)?;
         cleanup_staging = Some(restore_tmp.clone());
 
@@ -432,14 +430,13 @@ pub fn cmd_restore(
                     }
                 }
             }
-            if root != base {
-                if std::fs::read_dir(root)
+            if root != base
+                && std::fs::read_dir(root)
                     .map(|mut it| it.next().is_none())
                     .unwrap_or(false)
                 {
                     let _ = std::fs::remove_dir(root);
                 }
-            }
         }
         remove_empty_dirs(project_path, project_path);
 

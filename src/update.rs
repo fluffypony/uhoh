@@ -41,7 +41,7 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
         return Ok(());
     }
     let current_version = env!("CARGO_PKG_VERSION");
-    println!("Current version: {}", current_version);
+    println!("Current version: {current_version}");
 
     let current_semver =
         semver::Version::parse(current_version).context("Cannot parse current version")?;
@@ -132,8 +132,7 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
             }
             Err(e) => {
                 bail!(
-                    "Cannot verify update (no signature, DNS failed: {}). Aborting.",
-                    e
+                    "Cannot verify update (no signature, DNS failed: {e}). Aborting."
                 );
             }
         }

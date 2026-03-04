@@ -235,7 +235,7 @@ pub fn store_blob_from_file(
             writer.flush()?;
             let file = writer
                 .into_inner()
-                .map_err(|e| anyhow::anyhow!("Failed to get temp file handle: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to get temp file handle: {e}"))?;
             file.sync_all()?;
             bytes_on_disk = file.metadata()?.len();
 
@@ -369,7 +369,7 @@ fn set_blob_readonly(path: &Path) {
 pub fn maybe_compress(data: &[u8]) -> Vec<u8> {
     #[cfg(feature = "compression")]
     {
-        return maybe_compress_with_level(data, 3);
+        maybe_compress_with_level(data, 3)
     }
     #[cfg(not(feature = "compression"))]
     {
@@ -594,6 +594,14 @@ pub fn cleanup_stale_temp_files(blob_root: &Path, max_age: std::time::Duration) 
         }
     }
 }
+fn fsync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .open(parent)
+            .and_then(|f| f.sync_all());
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -604,7 +612,7 @@ mod tests {
         for id in [1, 42, 255, 1000, u64::MAX] {
             let encoded = id_to_base58(id);
             let decoded = base58_to_id(&encoded);
-            assert_eq!(decoded, Some(id), "Failed roundtrip for id={}", id);
+            assert_eq!(decoded, Some(id), "Failed roundtrip for id={id}");
         }
     }
 
@@ -614,8 +622,7 @@ mod tests {
         let encoded = id_to_base58(1);
         assert!(
             encoded.len() <= 2,
-            "ID 1 encoded as '{}' (too long)",
-            encoded
+            "ID 1 encoded as '{encoded}' (too long)"
         );
     }
 
@@ -655,13 +662,5 @@ mod tests {
     fn test_normalize_path() {
         let p = Path::new("src/main.rs");
         assert_eq!(normalize_path(p), "src/main.rs");
-    }
-}
-fn fsync_parent_dir(path: &Path) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::OpenOptions::new()
-            .read(true)
-            .open(parent)
-            .and_then(|f| f.sync_all());
     }
 }

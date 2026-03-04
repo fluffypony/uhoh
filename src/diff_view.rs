@@ -15,9 +15,9 @@ use syntect::util::as_24_bit_terminal_escaped;
 
 // Lazy-load syntect assets (avoid ~100ms hit per invocation)
 static SYNTAX_SET: Lazy<syntect::parsing::SyntaxSet> =
-    Lazy::new(|| syntect::parsing::SyntaxSet::load_defaults_newlines());
+    Lazy::new(syntect::parsing::SyntaxSet::load_defaults_newlines);
 static THEME_SET: Lazy<syntect::highlighting::ThemeSet> =
-    Lazy::new(|| syntect::highlighting::ThemeSet::load_defaults());
+    Lazy::new(syntect::highlighting::ThemeSet::load_defaults);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiffLine {
@@ -153,7 +153,8 @@ pub fn compute_structured_diff(
 
     let (old_start, new_start) = lines
         .iter()
-        .find_map(|line| Some((line.old_line.unwrap_or(1), line.new_line.unwrap_or(1))))
+        .map(|line| (line.old_line.unwrap_or(1), line.new_line.unwrap_or(1)))
+        .next()
         .unwrap_or((1, 1));
 
     let hunk = DiffHunk {
@@ -251,12 +252,11 @@ pub fn cmd_diff(
             .unwrap_or_default();
 
         if old_content.len() > MAX_DIFF_BYTES || new_content.len() > MAX_DIFF_BYTES {
-            writeln!(stdout, "\n--- {}/{}", label1, path)?;
-            writeln!(stdout, "+++ {}/{}", label2, path)?;
+            writeln!(stdout, "\n--- {label1}/{path}")?;
+            writeln!(stdout, "+++ {label2}/{path}")?;
             writeln!(
                 stdout,
-                "[Diff skipped due to large file size > {} bytes]",
-                MAX_DIFF_BYTES
+                "[Diff skipped due to large file size > {MAX_DIFF_BYTES} bytes]"
             )?;
             continue;
         }
@@ -267,8 +267,8 @@ pub fn cmd_diff(
         } else {
             path.to_string()
         };
-        writeln!(stdout, "\n--- {}/{}", label1, display_path)?;
-        writeln!(stdout, "+++ {}/{}", label2, display_path)?;
+        writeln!(stdout, "\n--- {label1}/{display_path}")?;
+        writeln!(stdout, "+++ {label2}/{display_path}")?;
 
         let diff = TextDiff::from_lines(&old_content, &new_content);
         // Try to detect syntax
@@ -292,9 +292,9 @@ pub fn cmd_diff(
                     highlighter.highlight_line(change.to_string().as_str(), &SYNTAX_SET)
                 {
                     let escaped = as_24_bit_terminal_escaped(&ranges, false);
-                    write!(stdout, "{}{}", sign, escaped)?;
+                    write!(stdout, "{sign}{escaped}")?;
                 } else {
-                    write!(stdout, "{}{}", sign, change)?;
+                    write!(stdout, "{sign}{change}")?;
                 }
             }
         }
@@ -331,7 +331,7 @@ pub fn cmd_cat(
                     .map(|d| d.with_timezone(&chrono::Utc) <= target)
                     .unwrap_or(false)
             })
-    } else if let Some(_) = crate::cas::base58_to_id(id_str) {
+    } else if crate::cas::base58_to_id(id_str).is_some() {
         database.find_snapshot_by_base58(&project.hash, id_str)?
     } else {
         None
@@ -345,14 +345,14 @@ pub fn cmd_cat(
             if f.path == file_path {
                 return true;
             }
-            if let Some(_) = file_path.strip_prefix("b64:") {
+            if file_path.strip_prefix("b64:").is_some() {
                 return f.path == file_path;
             }
             // Try decoding stored path for non-UTF8 encoding
             let stored_os = crate::cas::decode_relpath_to_os(&f.path);
             stored_os.to_string_lossy() == file_path
         })
-        .ok_or_else(|| anyhow::anyhow!("File '{}' not in snapshot {}", file_path, id_str))?;
+        .ok_or_else(|| anyhow::anyhow!("File '{file_path}' not in snapshot {id_str}"))?;
 
     if !entry.stored {
         anyhow::bail!("File content was not stored (binary file too large)");
@@ -360,7 +360,7 @@ pub fn cmd_cat(
 
     let blob_root = uhoh_dir.join("blobs");
     let content = cas::read_blob(&blob_root, &entry.hash)?
-        .ok_or_else(|| anyhow::anyhow!("Blob missing for {}", file_path))?;
+        .ok_or_else(|| anyhow::anyhow!("Blob missing for {file_path}"))?;
 
     std::io::stdout().write_all(&content)?;
     Ok(())
@@ -369,11 +369,11 @@ pub fn cmd_cat(
 pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> Result<()> {
     let history = database.file_history(&project.hash, file_path)?;
     if history.is_empty() {
-        println!("No history found for '{}'", file_path);
+        println!("No history found for '{file_path}'");
         return Ok(());
     }
 
-    println!("History of '{}':", file_path);
+    println!("History of '{file_path}':");
     let mut prev_hash = String::new();
     for (snapshot_id, timestamp, hash, trigger) in &history {
         let id_str = cas::id_to_base58(*snapshot_id);
@@ -382,7 +382,7 @@ pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> 
         } else {
             "same"
         };
-        println!("  {} [{}] {} ({})", timestamp, id_str, changed, trigger);
+        println!("  {timestamp} [{id_str}] {changed} ({trigger})");
         prev_hash = hash.clone();
     }
     Ok(())
@@ -398,7 +398,7 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
             Err(_) => continue,
         };
         let path = entry.path();
-        if path.file_name().map_or(false, |n| n == ".uhoh") {
+        if path.file_name().is_some_and(|n| n == ".uhoh") {
             continue;
         }
         let meta = match std::fs::symlink_metadata(path) {

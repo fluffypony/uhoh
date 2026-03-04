@@ -61,7 +61,7 @@ fn install_launchagent() -> Result<()> {
     <string>com.uhoh.daemon</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{exe}</string>
+        <string>{exe_escaped}</string>
         <string>start</string>
         <string>--service</string>
     </array>
@@ -73,13 +73,11 @@ fn install_launchagent() -> Result<()> {
         <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>{log}</string>
+    <string>{log_escaped}</string>
     <key>StandardErrorPath</key>
-    <string>{log}</string>
+    <string>{log_escaped}</string>
 </dict>
 </plist>"#,
-        exe = exe_escaped,
-        log = log_escaped,
     );
 
     let plist_path = dirs::home_dir()
@@ -91,7 +89,7 @@ fn install_launchagent() -> Result<()> {
     // Use modern launchctl API
     let uid = unsafe { libc::getuid() };
     std::process::Command::new("launchctl")
-        .args(["bootstrap", &format!("gui/{}", uid)])
+        .args(["bootstrap", &format!("gui/{uid}")])
         .arg(&plist_path)
         .status()
         .or_else(|_| {
@@ -115,7 +113,7 @@ fn remove_launchagent() -> Result<()> {
     std::process::Command::new("launchctl")
         .args([
             "bootout",
-            &format!("gui/{}", uid),
+            &format!("gui/{uid}"),
             &plist_path.to_string_lossy(),
         ])
         .status()

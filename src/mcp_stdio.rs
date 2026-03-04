@@ -26,7 +26,7 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
                     "error": { "code": -32700, "message": format!("Parse error: {}", e) },
                     "id": null
                 });
-                writeln!(stdout, "{}", parse_error)?;
+                writeln!(stdout, "{parse_error}")?;
                 stdout.flush()?;
                 continue;
             }
@@ -322,9 +322,9 @@ fn handle_stdio_tool_call(
                             "content": [{
                                 "type": "text",
                                 "text": if dry_run {
-                                    format!("Dry run complete for snapshot {}", snapshot_id)
+                                    format!("Dry run complete for snapshot {snapshot_id}")
                                 } else {
-                                    format!("Snapshot {} restored successfully", snapshot_id)
+                                    format!("Snapshot {snapshot_id} restored successfully")
                                 }
                             }],
                             "restored": outcome.applied,
@@ -365,7 +365,7 @@ fn handle_stdio_tool_call(
             result: None,
             error: Some(JsonRpcError {
                 code: -32602,
-                message: format!("Unknown tool: {}", tool_name),
+                message: format!("Unknown tool: {tool_name}"),
                 data: None,
             }),
             id,

@@ -192,13 +192,13 @@ async fn test_http_range_resume() {
     let dir = TempDir::new().unwrap();
     let out_path = dir.path().join("test_download");
 
-    let url = format!("http://{}/model.bin", addr);
+    let url = format!("http://{addr}/model.bin");
     let client = reqwest::Client::new();
 
     let mut pos: u64 = 0;
     let mut out = std::fs::OpenOptions::new()
         .create(true)
-        .write(true)
+        
         .append(true)
         .open(&out_path)
         .unwrap();
@@ -206,7 +206,7 @@ async fn test_http_range_resume() {
     for _ in 0..3 {
         let mut req = client.get(&url);
         if pos > 0 {
-            req = req.header("Range", format!("bytes={}-", pos));
+            req = req.header("Range", format!("bytes={pos}-"));
         }
 
         let resp = req.send().await.unwrap();

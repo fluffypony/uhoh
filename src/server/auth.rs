@@ -93,8 +93,8 @@ pub fn validate_host(headers: &HeaderMap, expected_port: u16) -> bool {
     if let Some(host) = headers.get("host") {
         if let Ok(host_s) = host.to_str() {
             let allowed = [
-                format!("127.0.0.1:{}", expected_port),
-                format!("localhost:{}", expected_port),
+                format!("127.0.0.1:{expected_port}"),
+                format!("localhost:{expected_port}"),
                 "127.0.0.1".to_string(),
                 "localhost".to_string(),
             ];

@@ -161,6 +161,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let pid_file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&pid_path)?;
     #[cfg(unix)]
     {
@@ -204,7 +205,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<WatchEvent>();
 
     // Load registered projects (initial), dynamic discovery runs on ticks
-    let projects = (&*database).list_projects()?;
+    let projects = &database.list_projects()?;
 
     // Start file watcher
     let watch_paths: Vec<PathBuf> = projects
@@ -238,16 +239,14 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
         std::thread::Builder::new()
             .name("bin-watcher-bridge".into())
             .spawn(move || {
-                for result in bin_notify_rx {
-                    if let Ok(evt) = result {
-                        let involves_binary = evt.paths.iter().any(|p| p == &exe_clone)
-                            || evt
-                                .paths
-                                .iter()
-                                .any(|p| p.file_name().map_or(false, |n| n == ".update-ready"));
-                        if involves_binary {
-                            let _ = tx.send(());
-                        }
+                for evt in bin_notify_rx.into_iter().flatten() {
+                    let involves_binary = evt.paths.iter().any(|p| p == &exe_clone)
+                        || evt
+                            .paths
+                            .iter()
+                            .any(|p| p.file_name().is_some_and(|n| n == ".update-ready"));
+                    if involves_binary {
+                        let _ = tx.send(());
                     }
                 }
             })
@@ -259,7 +258,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
 
     // Per-project state
     let mut project_states: HashMap<String, ProjectDaemonState> = HashMap::new();
-    for project in &projects {
+    for project in projects {
         project_states.insert(
             project.current_path.clone(),
             ProjectDaemonState {
@@ -330,7 +329,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                         tracing::error!("File watcher died — attempting recovery (attempt #{})...", recover_attempts + 1);
                         let paths: Vec<PathBuf> = project_states
                             .keys()
-                            .map(|k| PathBuf::from(k))
+                            .map(PathBuf::from)
                             .collect();
                         match watcher::start_watching(&paths, event_tx.clone()) {
                             Ok(new_watcher) => {
@@ -361,7 +360,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
                     if let Some(ref exe) = exe_path {
                         let err = std::process::Command::new(exe).args(rest).exec();
-                        anyhow::bail!("exec failed: {}", err);
+                        anyhow::bail!("exec failed: {err}");
                     }
                 }
                 #[cfg(windows)]
@@ -422,7 +421,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 };
 
                 // Periodic tasks: check for moved folders and watcher registration.
-                check_moved_folders(&db_projects, &*database, &mut watcher_handle, &mut project_states);
+                check_moved_folders(&db_projects, &database, &mut watcher_handle, &mut project_states);
                 check_for_new_projects(&db_projects, &mut watcher_handle, &mut project_states, &server_event_tx);
 
                 // Remove watchers and state for projects removed from DB
@@ -507,21 +506,21 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                             let uhoh_dir_cl = db_path_for_gc.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
                         let db_path_for_gc2 = db_path_for_gc.clone();
                         let uhoh_dir_cl2 = uhoh_dir_cl.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
+                        std::mem::drop(tokio::task::spawn_blocking(move || {
                             if let Ok(db) = crate::db::Database::open(&db_path_for_gc2) {
                                 let _ = crate::gc::run_gc(&uhoh_dir_cl2, &db);
                                 // After GC, VACUUM to reclaim free pages
                                 let _ = db.vacuum();
                             }
-                        });
+                        }));
                             // Run VACUUM after large deletions to reclaim space
                             let db_path_for_gc3 = db_path_for_gc.clone();
                             let uhoh_dir_cl3 = uhoh_dir_cl.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
+                            std::mem::drop(tokio::task::spawn_blocking(move || {
                                 if let Ok(db) = crate::db::Database::open(&db_path_for_gc3) {
                                     let _ = db.backup_to(&uhoh_dir_cl3.join("vacuum.tmp")).ok();
                                 }
-                            });
+                            }));
                         }
                     }});
                     compaction_index = compaction_index.wrapping_add(1);
@@ -539,11 +538,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     let backups_dir = uhoh_dir.join("backups");
                     let _ = std::fs::create_dir_all(&backups_dir);
                     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-                    let backup_path = backups_dir.join(format!("uhoh-{}.db", ts));
+                    let backup_path = backups_dir.join(format!("uhoh-{ts}.db"));
                     let db_for_backup = database.clone();
                     let backup_path_cl = backup_path.clone();
-                    let backup_res = tokio::task::spawn_blocking(move || database_backup_to(&*db_for_backup, &backup_path_cl)).await;
-                    if let Err(e) = backup_res.unwrap_or_else(|e| Err(anyhow::anyhow!("{:?}", e))) {
+                    let backup_res = tokio::task::spawn_blocking(move || database_backup_to(&db_for_backup, &backup_path_cl)).await;
+                    if let Err(e) = backup_res.unwrap_or_else(|e| Err(anyhow::anyhow!("{e:?}"))) {
                         tracing::warn!("Database backup failed: {}", e);
                     } else {
                         // Best-effort rotation: keep last 14 backups
@@ -565,7 +564,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 let mut tick_sys = sysinfo::System::new();
                 tick_sys.refresh_memory();
                 if crate::ai::should_run_ai_with(&config.ai, &tick_sys) {
-                    process_ai_summary_queue(&uhoh_dir, &*database, &config, &server_event_tx).await;
+                    process_ai_summary_queue(&uhoh_dir, &database, &config, &server_event_tx).await;
                 }
 
                 if config.sidecar_update.auto_update {
@@ -793,7 +792,7 @@ async fn process_pending_snapshots(
                     }
                     Err(e) => {
                         tracing::error!("Snapshot task join error: {:?}", e);
-                        Err(anyhow::anyhow!("Snapshot task join error: {}", e))
+                        Err(anyhow::anyhow!("Snapshot task join error: {e}"))
                     }
                 };
                 drop(permit);
@@ -876,10 +875,7 @@ async fn process_ai_summary_queue(
                     continue;
                 }
             };
-            let prev = match database.snapshot_before(&project_hash, this.snapshot_id) {
-                Ok(v) => v,
-                Err(_) => None,
-            };
+            let prev = database.snapshot_before(&project_hash, this.snapshot_id).unwrap_or_default();
             let this_files = match database.get_snapshot_files(this.rowid) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1034,7 +1030,7 @@ fn check_moved_folders(
                 // Only scan immediate parent to limit scope
                 let _ = std::fs::read_dir(parent).map(|iter| {
                     for e in iter.flatten() {
-                        if e.file_type().map_or(false, |ft| ft.is_dir()) {
+                        if e.file_type().is_ok_and(|ft| ft.is_dir()) {
                             candidates.push(e.path());
                         }
                     }
@@ -1110,7 +1106,7 @@ fn check_for_new_projects(
 ) {
     for p in projects {
         let key = p.current_path.clone();
-        if !states.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(e) = states.entry(key) {
             let path = PathBuf::from(&p.current_path);
             if path.exists() {
                 if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
@@ -1120,16 +1116,13 @@ fn check_for_new_projects(
                     );
                     continue;
                 } else {
-                    states.insert(
-                        key,
-                        ProjectDaemonState {
+                    e.insert(ProjectDaemonState {
                             hash: p.hash.clone(),
                             last_snapshot: Instant::now() - Duration::from_secs(60),
                             pending_changes: std::collections::HashSet::new(),
                             first_change_at: None,
                             last_change_at: None,
-                        },
-                    );
+                        });
                     let _ = event_tx.send(crate::server::events::ServerEvent::ProjectAdded {
                         project_hash: p.hash.clone(),
                         path: p.current_path.clone(),

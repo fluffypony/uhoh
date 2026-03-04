@@ -28,7 +28,7 @@ pub fn compact_project(
         // Pinned snapshots: always keep
         if snapshot.pinned {
             register_in_buckets(
-                &snapshot,
+                snapshot,
                 &now,
                 config,
                 &mut buckets_5min,
@@ -48,7 +48,7 @@ pub fn compact_project(
         // Keep everything within keep_all_minutes
         if age < Duration::minutes(config.keep_all_minutes as i64) {
             register_in_buckets(
-                &snapshot,
+                snapshot,
                 &now,
                 config,
                 &mut buckets_5min,

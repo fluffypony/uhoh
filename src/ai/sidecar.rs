@@ -29,8 +29,7 @@ fn find_sidecar_binary(uhoh_dir: &Path) -> Result<PathBuf> {
     }
 
     anyhow::bail!(
-        "llama-server not found. Place it in {:?}. PATH is intentionally ignored for security.",
-        sidecar_dir
+        "llama-server not found. Place it in {sidecar_dir:?}. PATH is intentionally ignored for security."
     )
 }
 
@@ -102,7 +101,7 @@ pub fn get_or_spawn_port_with_ctx(
                         break;
                     } else {
                         last_err =
-                            Some(anyhow::anyhow!("sidecar not ready on port {}", bound_port));
+                            Some(anyhow::anyhow!("sidecar not ready on port {bound_port}"));
                         let _ = child.kill();
                         let _ = child.wait();
                     }
@@ -180,9 +179,9 @@ fn wait_for_ready_blocking(port: u16, max_wait: Duration) -> Result<()> {
     let start = std::time::Instant::now();
     loop {
         if start.elapsed() > max_wait {
-            anyhow::bail!("Sidecar did not become ready within {:?}", max_wait);
+            anyhow::bail!("Sidecar did not become ready within {max_wait:?}");
         }
-        let url = format!("http://127.0.0.1:{}/health", port);
+        let url = format!("http://127.0.0.1:{port}/health");
         if let Ok(resp) = reqwest::blocking::get(&url) {
             if resp.status().is_success() {
                 return Ok(());

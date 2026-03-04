@@ -9,7 +9,7 @@ const MARKER_VERSION: u8 = 1;
 pub fn create_marker(project_path: &Path) -> Result<String> {
     let mut id_bytes = [0u8; 32];
     getrandom::getrandom(&mut id_bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to generate random ID: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to generate random ID: {e}"))?;
     let id_hex = hex::encode(id_bytes);
 
     let marker_path = marker_path_for(project_path);

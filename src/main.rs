@@ -70,7 +70,7 @@ fn maybe_start_daemon(uhoh: &std::path::Path) -> Result<()> {
 fn resolve_project_path(path: Option<String>) -> Result<PathBuf> {
     let p = match path {
         Some(s) => {
-            dunce::canonicalize(&s).with_context(|| format!("Cannot resolve path: {}", s))?
+            dunce::canonicalize(&s).with_context(|| format!("Cannot resolve path: {s}"))?
         }
         None => dunce::canonicalize(std::env::current_dir()?)
             .context("Cannot resolve current directory")?,
@@ -350,8 +350,7 @@ async fn main() -> Result<()> {
                 "install" => git::install_hook(&project_path)?,
                 "remove" => git::remove_hook(&project_path)?,
                 other => anyhow::bail!(
-                    "Unknown hook action: '{}'. Use 'install' or 'remove'.",
-                    other
+                    "Unknown hook action: '{other}'. Use 'install' or 'remove'."
                 ),
             }
         }
@@ -388,7 +387,7 @@ async fn main() -> Result<()> {
                         _ => anyhow::bail!("Key nesting deeper than 2 levels is not supported"),
                     }
                     std::fs::write(&config_path, doc.to_string())?;
-                    println!("Set {} = {}", key, value);
+                    println!("Set {key} = {value}");
                 }
                 Some(uhoh::cli::ConfigAction::Get { key }) => {
                     let content = if config_path.exists() {
@@ -401,15 +400,15 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|_| toml_edit::DocumentMut::new());
                     let parts: Vec<&str> = key.split('.').collect();
                     let out = match parts.as_slice() {
-                        [k] => doc.get(*k).map(|v| v.to_string()).unwrap_or_default(),
+                        [k] => doc.get(k).map(|v| v.to_string()).unwrap_or_default(),
                         [a, b] => doc
-                            .get(*a)
+                            .get(a)
                             .and_then(|t| t.get(*b))
                             .map(|v| v.to_string())
                             .unwrap_or_default(),
                         _ => String::new(),
                     };
-                    println!("{}", out);
+                    println!("{out}");
                 }
                 None => {
                     let cfg = config::Config::load(&config_path)?;
@@ -444,8 +443,8 @@ async fn main() -> Result<()> {
                 .iter()
                 .filter_map(|p| database.snapshot_count(&p.hash).ok())
                 .sum();
-            println!("Snapshots: {}", total);
-            let size = database.get_blob_bytes().unwrap_or_else(|_| 0);
+            println!("Snapshots: {total}");
+            let size = database.get_blob_bytes().unwrap_or(0);
             println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0);
             let cfg = config::Config::load(&uhoh.join("config.toml")).unwrap_or_default();
             println!(
@@ -600,7 +599,7 @@ async fn run_doctor(
             .query_row([], |row| row.get(0))?;
         if ok != "ok" {
             integrity_ok = false;
-            eprintln!("Database integrity check FAILED: {}", ok);
+            eprintln!("Database integrity check FAILED: {ok}");
         } else {
             println!("Database integrity: ok");
         }
@@ -756,12 +755,12 @@ async fn run_verify_install() -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
-    let asset_name = format!("uhoh-{}-{}", os, arch);
+    let asset_name = format!("uhoh-{os}-{arch}");
 
     println!("Binary:  {}", exe_path.display());
-    println!("Version: {}", version);
-    println!("Hash:    {}", local_hash);
-    println!("Asset:   {}", asset_name);
+    println!("Version: {version}");
+    println!("Hash:    {local_hash}");
+    println!("Asset:   {asset_name}");
 
     match uhoh::update::dns_verify_hash(version, &asset_name).await {
         Ok(expected) => {
@@ -770,13 +769,13 @@ async fn run_verify_install() -> Result<()> {
                 std::process::exit(0);
             } else {
                 eprintln!("Binary hash does not match DNS record!");
-                eprintln!("  Local:    {}", local_hash);
-                eprintln!("  Expected: {}", expected);
+                eprintln!("  Local:    {local_hash}");
+                eprintln!("  Expected: {expected}");
                 std::process::exit(2);
             }
         }
         Err(e) => {
-            eprintln!("Could not verify hash via DNS: {}", e);
+            eprintln!("Could not verify hash via DNS: {e}");
             // Non-fatal: installer treats this as a warning
             std::process::exit(0);
         }
