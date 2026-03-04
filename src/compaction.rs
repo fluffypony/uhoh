@@ -60,8 +60,7 @@ pub fn compact_project(
         }
 
         // Manual commits with messages get minimum daily retention
-        let is_manual_with_msg =
-            snapshot.trigger == "manual" && !snapshot.message.is_empty();
+        let is_manual_with_msg = snapshot.trigger == "manual" && !snapshot.message.is_empty();
 
         let dominated = if age < Duration::days(config.keep_5min_days as i64) {
             let bucket_secs = if is_manual_with_msg { 86400i64 } else { 300 };
@@ -90,7 +89,9 @@ pub fn compact_project(
         };
 
         if dominated {
-            let est = database.estimate_snapshot_blob_size(snapshot.rowid).unwrap_or(0);
+            let est = database
+                .estimate_snapshot_blob_size(snapshot.rowid)
+                .unwrap_or(0);
             freed_bytes = freed_bytes.saturating_add(est);
             database.delete_snapshot(snapshot.rowid)?;
         }

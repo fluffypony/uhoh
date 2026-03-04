@@ -219,34 +219,90 @@ pub struct SidecarUpdateConfig {
 }
 
 // === Default functions ===
-fn default_debounce_quiet_secs() -> u64 { 2 }
-fn default_min_snapshot_interval_secs() -> u64 { 5 }
-fn default_max_debounce_secs() -> u64 { 30 }
-fn default_emergency_delete_threshold() -> f64 { 0.30 }
-fn default_emergency_delete_min_files() -> usize { 5 }
-fn default_keep_all_minutes() -> u64 { 60 }
-fn default_keep_5min_days() -> u64 { 14 }
-fn default_keep_hourly_days() -> u64 { 30 }
-fn default_keep_daily_days() -> u64 { 180 }
-fn default_keep_weekly_beyond() -> bool { true }
-fn default_emergency_expire_hours() -> u64 { 48 }
-pub fn default_max_binary_blob_bytes() -> u64 { 1_048_576 }
-pub fn default_max_text_blob_bytes() -> u64 { 52_428_800 }
-fn default_max_copy_blob_bytes() -> u64 { 50 * 1024 * 1024 }
-fn default_storage_limit_fraction() -> f64 { 0.15 }
-fn default_storage_min_bytes() -> u64 { 524_288_000 } // 500MB floor
-fn default_compress_level() -> i32 { 3 }
-fn default_skip_on_battery() -> bool { true }
-fn default_max_context_tokens() -> usize { 8192 }
-fn default_idle_shutdown_secs() -> u64 { 300 }
-fn default_min_available_memory_gb() -> u64 { 4 }
-fn default_auto_update() -> bool { true }
-fn default_update_interval_hours() -> u64 { 24 }
-fn default_true() -> bool { true }
-fn default_server_port() -> u16 { 22822 }
-fn default_bind_address() -> String { "127.0.0.1".to_string() }
-fn default_sidecar_check_hours() -> u64 { 24 }
-fn default_llama_repo() -> String { "ggml-org/llama.cpp".to_string() }
+fn default_debounce_quiet_secs() -> u64 {
+    2
+}
+fn default_min_snapshot_interval_secs() -> u64 {
+    5
+}
+fn default_max_debounce_secs() -> u64 {
+    30
+}
+fn default_emergency_delete_threshold() -> f64 {
+    0.30
+}
+fn default_emergency_delete_min_files() -> usize {
+    5
+}
+fn default_keep_all_minutes() -> u64 {
+    60
+}
+fn default_keep_5min_days() -> u64 {
+    14
+}
+fn default_keep_hourly_days() -> u64 {
+    30
+}
+fn default_keep_daily_days() -> u64 {
+    180
+}
+fn default_keep_weekly_beyond() -> bool {
+    true
+}
+fn default_emergency_expire_hours() -> u64 {
+    48
+}
+pub fn default_max_binary_blob_bytes() -> u64 {
+    1_048_576
+}
+pub fn default_max_text_blob_bytes() -> u64 {
+    52_428_800
+}
+fn default_max_copy_blob_bytes() -> u64 {
+    50 * 1024 * 1024
+}
+fn default_storage_limit_fraction() -> f64 {
+    0.15
+}
+fn default_storage_min_bytes() -> u64 {
+    524_288_000
+} // 500MB floor
+fn default_compress_level() -> i32 {
+    3
+}
+fn default_skip_on_battery() -> bool {
+    true
+}
+fn default_max_context_tokens() -> usize {
+    8192
+}
+fn default_idle_shutdown_secs() -> u64 {
+    300
+}
+fn default_min_available_memory_gb() -> u64 {
+    4
+}
+fn default_auto_update() -> bool {
+    true
+}
+fn default_update_interval_hours() -> u64 {
+    24
+}
+fn default_true() -> bool {
+    true
+}
+fn default_server_port() -> u16 {
+    22822
+}
+fn default_bind_address() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_sidecar_check_hours() -> u64 {
+    24
+}
+fn default_llama_repo() -> String {
+    "ggml-org/llama.cpp".to_string()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -356,16 +412,32 @@ impl Config {
             let config: Config = toml::from_str(&content)
                 .with_context(|| format!("Failed to parse config: {}", path.display()))?;
             // Basic validation
-            if config.watch.debounce_quiet_secs == 0 { anyhow::bail!("watch.debounce_quiet_secs must be > 0"); }
-            if config.watch.min_snapshot_interval_secs == 0 { anyhow::bail!("watch.min_snapshot_interval_secs must be > 0"); }
-            if !(0.0..=1.0).contains(&config.storage.storage_limit_fraction) || config.storage.storage_limit_fraction <= 0.0 {
+            if config.watch.debounce_quiet_secs == 0 {
+                anyhow::bail!("watch.debounce_quiet_secs must be > 0");
+            }
+            if config.watch.min_snapshot_interval_secs == 0 {
+                anyhow::bail!("watch.min_snapshot_interval_secs must be > 0");
+            }
+            if !(0.0..=1.0).contains(&config.storage.storage_limit_fraction)
+                || config.storage.storage_limit_fraction <= 0.0
+            {
                 anyhow::bail!("storage.storage_limit_fraction must be in (0.0, 1.0]");
             }
-            if config.compaction.emergency_expire_hours == 0 { anyhow::bail!("compaction.emergency_expire_hours must be > 0"); }
-            if config.ai.max_context_tokens == 0 { anyhow::bail!("ai.max_context_tokens must be > 0"); }
-            if !(1..=22).contains(&config.storage.compress_level) { anyhow::bail!("storage.compress_level must be between 1 and 22 (inclusive)"); }
-            if config.server.port == 0 { anyhow::bail!("server.port must be > 0"); }
-            if config.sidecar_update.check_interval_hours == 0 { anyhow::bail!("sidecar_update.check_interval_hours must be > 0"); }
+            if config.compaction.emergency_expire_hours == 0 {
+                anyhow::bail!("compaction.emergency_expire_hours must be > 0");
+            }
+            if config.ai.max_context_tokens == 0 {
+                anyhow::bail!("ai.max_context_tokens must be > 0");
+            }
+            if !(1..=22).contains(&config.storage.compress_level) {
+                anyhow::bail!("storage.compress_level must be between 1 and 22 (inclusive)");
+            }
+            if config.server.port == 0 {
+                anyhow::bail!("server.port must be > 0");
+            }
+            if config.sidecar_update.check_interval_hours == 0 {
+                anyhow::bail!("sidecar_update.check_interval_hours must be > 0");
+            }
             Ok(config)
         } else {
             let config = Config::default();

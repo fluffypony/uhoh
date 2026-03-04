@@ -1,8 +1,8 @@
 use anyhow::Result;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::cas;
 use crate::config::Config;
@@ -52,16 +52,30 @@ pub fn create_snapshot(
         // If any changed path is a directory or equals project root, fall back to full scan
         let mut requires_full = false;
         for p in paths {
-            if p == project_path || p.is_dir() { requires_full = true; break; }
+            if p == project_path || p.is_dir() {
+                requires_full = true;
+                break;
+            }
         }
         if requires_full {
-            return create_snapshot(uhoh_dir, database, project_hash, project_path, trigger, message, config, None);
+            return create_snapshot(
+                uhoh_dir,
+                database,
+                project_hash,
+                project_path,
+                trigger,
+                message,
+                config,
+                None,
+            );
         }
 
         // Build set of relative changed file paths
         let mut rel_changed: HashSet<String> = HashSet::new();
         for p in paths {
-            if !p.starts_with(project_path) { continue; }
+            if !p.starts_with(project_path) {
+                continue;
+            }
             if let Ok(rel) = p.strip_prefix(project_path) {
                 let rel_s = cas::encode_relpath(rel);
                 rel_changed.insert(rel_s);
@@ -117,7 +131,16 @@ pub fn create_snapshot(
                                     new_files.push(rel_path.clone());
                                 }
                                 let mtime_i = mtime_to_i64(mtime);
-                                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored: true, executable: false, mtime: Some(mtime_i), storage_method: cas::StorageMethod::Copy.to_db(), is_symlink: true });
+                                files_for_manifest.push(crate::db::SnapFileEntry {
+                                    path: rel_path.clone(),
+                                    hash: hash.clone(),
+                                    size,
+                                    stored: true,
+                                    executable: false,
+                                    mtime: Some(mtime_i),
+                                    storage_method: cas::StorageMethod::Copy.to_db(),
+                                    is_symlink: true,
+                                });
                                 current_hashes.insert(rel_path.clone(), (hash, true));
                                 inserted.insert(rel_path.clone());
                                 if bytes_written > 0 {
@@ -158,18 +181,43 @@ pub fn create_snapshot(
                             config.storage.compress_level,
                         ) {
                             Ok((hash, size, method, bytes_written)) => {
-                                let is_new_or_changed = prev_files.get(rel_path).map_or(true, |prev| prev.hash != hash);
-                                if is_new_or_changed { has_changes = true; new_files.push(rel_path.clone()); }
+                                let is_new_or_changed = prev_files
+                                    .get(rel_path)
+                                    .map_or(true, |prev| prev.hash != hash);
+                                if is_new_or_changed {
+                                    has_changes = true;
+                                    new_files.push(rel_path.clone());
+                                }
                                 let mtime_i = mtime_to_i64(mtime);
                                 let stored = method.is_recoverable();
-                                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored, executable, mtime: Some(mtime_i), storage_method: method.to_db(), is_symlink: false });
+                                files_for_manifest.push(crate::db::SnapFileEntry {
+                                    path: rel_path.clone(),
+                                    hash: hash.clone(),
+                                    size,
+                                    stored,
+                                    executable,
+                                    mtime: Some(mtime_i),
+                                    storage_method: method.to_db(),
+                                    is_symlink: false,
+                                });
                                 current_hashes.insert(rel_path.clone(), (hash, stored));
                                 inserted.insert(rel_path.clone());
-                                if bytes_written > 0 { let _ = database.add_blob_bytes(bytes_written as i64); }
+                                if bytes_written > 0 {
+                                    let _ = database.add_blob_bytes(bytes_written as i64);
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
-                                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: String::new(), size, stored: false, executable, mtime: Some(mtime_to_i64(mtime)), storage_method: cas::StorageMethod::None.to_db(), is_symlink: false });
+                                files_for_manifest.push(crate::db::SnapFileEntry {
+                                    path: rel_path.clone(),
+                                    hash: String::new(),
+                                    size,
+                                    stored: false,
+                                    executable,
+                                    mtime: Some(mtime_to_i64(mtime)),
+                                    storage_method: cas::StorageMethod::None.to_db(),
+                                    is_symlink: false,
+                                });
                                 current_hashes.insert(rel_path.clone(), (String::new(), false));
                                 inserted.insert(rel_path.clone());
                             }
@@ -197,7 +245,9 @@ pub fn create_snapshot(
 
         // Carry forward all other unchanged files from previous snapshot
         for (path, cached) in &prev_files {
-            if inserted.contains(path) { continue; }
+            if inserted.contains(path) {
+                continue;
+            }
             files_for_manifest.push(crate::db::SnapFileEntry {
                 path: path.clone(),
                 hash: cached.hash.clone(),
@@ -217,32 +267,63 @@ pub fn create_snapshot(
 
         // Pre-count entries to optionally show a progress bar for large scans
         let mut entries: Vec<ignore::DirEntry> = Vec::new();
-        for entry in walker { if let Ok(e) = entry { entries.push(e); } }
+        for entry in walker {
+            if let Ok(e) = entry {
+                entries.push(e);
+            }
+        }
         let show_pb = entries.len() > 1000;
         let pb = if show_pb {
             let pb = ProgressBar::new(entries.len() as u64);
-            pb.set_style(ProgressStyle::default_bar().template("[{elapsed_precise}] {bar:40} {pos}/{len} files").unwrap());
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] {bar:40} {pos}/{len} files")
+                    .unwrap(),
+            );
             Some(pb)
-        } else { None };
+        } else {
+            None
+        };
 
         for entry in entries {
             let path = entry.path();
-            if path.file_name().map_or(false, |n| n == ".uhoh") { if let Some(pb) = &pb { pb.inc(1); } continue; }
+            if path.file_name().map_or(false, |n| n == ".uhoh") {
+                if let Some(pb) = &pb {
+                    pb.inc(1);
+                }
+                continue;
+            }
             match std::fs::symlink_metadata(path) {
                 Ok(meta) => {
                     let ft = meta.file_type();
                     if !ft.is_file() && !ft.is_symlink() {
-                        if let Some(pb) = &pb { pb.inc(1); }
+                        if let Some(pb) = &pb {
+                            pb.inc(1);
+                        }
                         continue;
                     }
-                    let rel_path = match path.strip_prefix(project_path) { Ok(r) => cas::encode_relpath(r), Err(_) => { if let Some(pb) = &pb { pb.inc(1); } continue } };
+                    let rel_path = match path.strip_prefix(project_path) {
+                        Ok(r) => cas::encode_relpath(r),
+                        Err(_) => {
+                            if let Some(pb) = &pb {
+                                pb.inc(1);
+                            }
+                            continue;
+                        }
+                    };
                     current_files.insert(rel_path, (path.to_path_buf(), meta));
                 }
-                Err(e) => { tracing::warn!("Cannot stat {}: {}", path.display(), e); }
+                Err(e) => {
+                    tracing::warn!("Cannot stat {}: {}", path.display(), e);
+                }
             }
-            if let Some(pb) = &pb { pb.inc(1); }
+            if let Some(pb) = &pb {
+                pb.inc(1);
+            }
         }
-        if let Some(pb) = pb { pb.finish_and_clear(); }
+        if let Some(pb) = pb {
+            pb.finish_and_clear();
+        }
 
         for (rel_path, (abs_path, meta)) in &current_files {
             let size = meta.len();
@@ -254,8 +335,14 @@ pub fn create_snapshot(
                 let cached_secs = mtime_to_i64(cached.mtime);
                 if cached.size == size && cached_secs == fs_mtime_secs {
                     files_for_manifest.push(crate::db::SnapFileEntry {
-                        path: rel_path.clone(), hash: cached.hash.clone(), size: cached.size, stored: cached.stored,
-                        executable: cached.executable, mtime: Some(cached_secs), storage_method: cached.storage_method, is_symlink: cached.is_symlink,
+                        path: rel_path.clone(),
+                        hash: cached.hash.clone(),
+                        size: cached.size,
+                        stored: cached.stored,
+                        executable: cached.executable,
+                        mtime: Some(cached_secs),
+                        storage_method: cached.storage_method,
+                        is_symlink: cached.is_symlink,
                     });
                     continue;
                 }
@@ -271,7 +358,16 @@ pub fn create_snapshot(
                             new_files.push(rel_path.clone());
                         }
                         let mtime_i = mtime_to_i64(mtime);
-                        files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored: true, executable: false, mtime: Some(mtime_i), storage_method: cas::StorageMethod::Copy.to_db(), is_symlink: true });
+                        files_for_manifest.push(crate::db::SnapFileEntry {
+                            path: rel_path.clone(),
+                            hash: hash.clone(),
+                            size,
+                            stored: true,
+                            executable: false,
+                            mtime: Some(mtime_i),
+                            storage_method: cas::StorageMethod::Copy.to_db(),
+                            is_symlink: true,
+                        });
                         current_hashes.insert(rel_path.clone(), (hash, true));
                         if bytes_written > 0 {
                             let _ = database.add_blob_bytes(bytes_written as i64);
@@ -300,19 +396,52 @@ pub fn create_snapshot(
                     }
                 }
             } else {
-                match cas::store_blob_from_file(&blob_root, abs_path, config.storage.max_copy_blob_bytes, config.storage.max_binary_blob_bytes, config.storage.max_text_blob_bytes, cfg!(feature = "compression") && config.storage.compress, config.storage.compress_level) {
+                match cas::store_blob_from_file(
+                    &blob_root,
+                    abs_path,
+                    config.storage.max_copy_blob_bytes,
+                    config.storage.max_binary_blob_bytes,
+                    config.storage.max_text_blob_bytes,
+                    cfg!(feature = "compression") && config.storage.compress,
+                    config.storage.compress_level,
+                ) {
                     Ok((hash, size, method, bytes_written)) => {
-                        let is_new_or_changed = prev_files.get(rel_path).map_or(true, |prev| prev.hash != hash);
-                        if is_new_or_changed { has_changes = true; new_files.push(rel_path.clone()); }
+                        let is_new_or_changed = prev_files
+                            .get(rel_path)
+                            .map_or(true, |prev| prev.hash != hash);
+                        if is_new_or_changed {
+                            has_changes = true;
+                            new_files.push(rel_path.clone());
+                        }
                         let mtime_i = mtime_to_i64(mtime);
                         let stored = method.is_recoverable();
-                        files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored, executable, mtime: Some(mtime_i), storage_method: method.to_db(), is_symlink: false });
+                        files_for_manifest.push(crate::db::SnapFileEntry {
+                            path: rel_path.clone(),
+                            hash: hash.clone(),
+                            size,
+                            stored,
+                            executable,
+                            mtime: Some(mtime_i),
+                            storage_method: method.to_db(),
+                            is_symlink: false,
+                        });
                         current_hashes.insert(rel_path.clone(), (hash, stored));
-                        if bytes_written > 0 { let _ = database.add_blob_bytes(bytes_written as i64); }
+                        if bytes_written > 0 {
+                            let _ = database.add_blob_bytes(bytes_written as i64);
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
-                        files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: String::new(), size, stored: false, executable, mtime: Some(mtime_to_i64(mtime)), storage_method: cas::StorageMethod::None.to_db(), is_symlink: false });
+                        files_for_manifest.push(crate::db::SnapFileEntry {
+                            path: rel_path.clone(),
+                            hash: String::new(),
+                            size,
+                            stored: false,
+                            executable,
+                            mtime: Some(mtime_to_i64(mtime)),
+                            storage_method: cas::StorageMethod::None.to_db(),
+                            is_symlink: false,
+                        });
                         current_hashes.insert(rel_path.clone(), (String::new(), false));
                     }
                 }
@@ -323,7 +452,13 @@ pub fn create_snapshot(
         for (path, cached) in &prev_files {
             if !current_paths.contains(path) {
                 has_changes = true;
-                deleted_for_manifest.push((path.clone(), cached.hash.clone(), cached.size, cached.stored, cas::StorageMethod::from_db(cached.storage_method).to_db()));
+                deleted_for_manifest.push((
+                    path.clone(),
+                    cached.hash.clone(),
+                    cached.size,
+                    cached.stored,
+                    cas::StorageMethod::from_db(cached.storage_method).to_db(),
+                ));
             }
         }
     }
@@ -383,9 +518,20 @@ pub fn create_snapshot(
     if ai::should_run_ai(&config.ai) {
         let uhoh_dir_cl = uhoh_dir.to_path_buf();
         let cfg_cloned = config.clone();
-        let files_added: Vec<String> = new_files.iter().filter(|p| !prev_files.contains_key(*p)).cloned().collect();
-        let files_modified: Vec<String> = new_files.iter().filter(|p| prev_files.contains_key(*p)).cloned().collect();
-        let files_deleted: Vec<String> = deleted_for_manifest.iter().map(|(p, _, _, _, _)| p.clone()).collect();
+        let files_added: Vec<String> = new_files
+            .iter()
+            .filter(|p| !prev_files.contains_key(*p))
+            .cloned()
+            .collect();
+        let files_modified: Vec<String> = new_files
+            .iter()
+            .filter(|p| prev_files.contains_key(*p))
+            .cloned()
+            .collect();
+        let files_deleted: Vec<String> = deleted_for_manifest
+            .iter()
+            .map(|(p, _, _, _, _)| p.clone())
+            .collect();
         let db_rowid = rowid;
 
         // Build compact diff text for modified files
@@ -393,11 +539,14 @@ pub fn create_snapshot(
         let mut diff_chunks = String::new();
         const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024; // 512KB cap for AI diff
         for path in files_modified.iter().take(10) {
-            if let (Some(prev), Some((curr_hash, curr_stored))) = (prev_files.get(path), current_hashes.get(path)) {
+            if let (Some(prev), Some((curr_hash, curr_stored))) =
+                (prev_files.get(path), current_hashes.get(path))
+            {
                 if prev.stored && *curr_stored && !prev.hash.is_empty() && !curr_hash.is_empty() {
                     // Enforce size cap and skip binary
                     if prev.size > MAX_AI_DIFF_FILE_SIZE {
-                        diff_chunks.push_str(&format!("--- {}\n[File too large for AI diff]\n", path));
+                        diff_chunks
+                            .push_str(&format!("--- {}\n[File too large for AI diff]\n", path));
                         continue;
                     }
                     let old = crate::cas::read_blob(&blob_root, &prev.hash).ok().flatten();
@@ -405,17 +554,25 @@ pub fn create_snapshot(
                     if let (Some(old), Some(new)) = (old, new) {
                         let head_old = &old[..old.len().min(8192)];
                         let head_new = &new[..new.len().min(8192)];
-                        if content_inspector::inspect(head_old).is_binary() || content_inspector::inspect(head_new).is_binary() {
+                        if content_inspector::inspect(head_old).is_binary()
+                            || content_inspector::inspect(head_new).is_binary()
+                        {
                             diff_chunks.push_str(&format!("--- {}\n[Binary file]\n", path));
                             continue;
                         }
-                        if let (Ok(old_s), Ok(new_s)) = (String::from_utf8(old), String::from_utf8(new)) {
+                        if let (Ok(old_s), Ok(new_s)) =
+                            (String::from_utf8(old), String::from_utf8(new))
+                        {
                             let d = similar::TextDiff::from_lines(&old_s, &new_s);
                             diff_chunks.push_str(&format!("--- a/{}\n+++ b/{}\n", path, path));
                             for hunk in d.unified_diff().context_radius(2).iter_hunks() {
                                 diff_chunks.push_str(&format!("{}\n", hunk.header()));
                                 for change in hunk.iter_changes() {
-                                    let sign = match change.tag() { similar::ChangeTag::Delete => '-', similar::ChangeTag::Insert => '+', similar::ChangeTag::Equal => ' '};
+                                    let sign = match change.tag() {
+                                        similar::ChangeTag::Delete => '-',
+                                        similar::ChangeTag::Insert => '+',
+                                        similar::ChangeTag::Equal => ' ',
+                                    };
                                     diff_chunks.push(sign);
                                     diff_chunks.push_str(&change.to_string());
                                 }
@@ -428,13 +585,22 @@ pub fn create_snapshot(
 
         std::thread::spawn(move || {
             let cfg = cfg_cloned;
-            let files = crate::ai::summary::FileChangeSummary { added: files_added, deleted: files_deleted, modified: files_modified };
-            match crate::ai::summary::generate_summary_blocking(&uhoh_dir_cl, &cfg, &diff_chunks, &files) {
+            let files = crate::ai::summary::FileChangeSummary {
+                added: files_added,
+                deleted: files_deleted,
+                modified: files_modified,
+            };
+            match crate::ai::summary::generate_summary_blocking(
+                &uhoh_dir_cl,
+                &cfg,
+                &diff_chunks,
+                &files,
+            ) {
                 Ok(text) if !text.is_empty() => {
                     if let Ok(db) = crate::db::Database::open(&uhoh_dir_cl.join("uhoh.db")) {
                         let _ = db.set_ai_summary(db_rowid, &text);
+                    }
                 }
-            }
                 Ok(_) => {}
                 Err(e) => tracing::warn!("AI summary generation failed: {}", e),
             }
@@ -498,7 +664,9 @@ fn enforce_storage_limit(
     );
 
     let mut blob_size = database.total_blob_size_for_project(project_hash)?;
-    if blob_size <= max_blob_size { return Ok(()); }
+    if blob_size <= max_blob_size {
+        return Ok(());
+    }
 
     tracing::info!(
         "Blob storage for {} exceeds limit: {:.1}MB > {:.1}MB, pruning...",
@@ -509,8 +677,12 @@ fn enforce_storage_limit(
 
     // Delete oldest unpinned snapshots until under limit (approximate freed space)
     for snap in database.list_snapshots_oldest_first(project_hash)? {
-        if blob_size <= max_blob_size { break; }
-        if snap.pinned { continue; }
+        if blob_size <= max_blob_size {
+            break;
+        }
+        if snap.pinned {
+            continue;
+        }
         // Estimate how much this snapshot frees
         let freed = database.estimate_snapshot_blob_size(snap.rowid)?;
         let _ = database.delete_snapshot(snap.rowid);

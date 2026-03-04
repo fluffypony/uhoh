@@ -27,8 +27,12 @@ pub fn should_run_ai(config: &AiConfig) -> bool {
 
 /// Like should_run_ai, but reuse a provided sysinfo::System snapshot.
 pub fn should_run_ai_with(config: &AiConfig, sys: &sysinfo::System) -> bool {
-    if !config.enabled { return false; }
-    if config.skip_on_battery && !on_ac_power() { return false; }
+    if !config.enabled {
+        return false;
+    }
+    if config.skip_on_battery && !on_ac_power() {
+        return false;
+    }
     let available_gb = sys.available_memory() / (1024 * 1024 * 1024);
     available_gb >= config.min_available_memory_gb
 }

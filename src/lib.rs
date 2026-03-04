@@ -21,4 +21,6 @@ pub mod update;
 pub mod watcher;
 
 // Single source of truth for ~/.uhoh directory
-pub fn uhoh_dir() -> std::path::PathBuf { crate::platform::uhoh_dir() }
+pub fn uhoh_dir() -> std::path::PathBuf {
+    crate::platform::uhoh_dir()
+}

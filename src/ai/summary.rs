@@ -20,9 +20,13 @@ pub fn generate_summary_blocking(
     let max_chars = capped_tokens.saturating_mul(4);
     let truncated = if diff_text.len() > max_chars {
         let mut cut = max_chars;
-        while cut > 0 && !diff_text.is_char_boundary(cut) { cut -= 1; }
+        while cut > 0 && !diff_text.is_char_boundary(cut) {
+            cut -= 1;
+        }
         &diff_text[..cut]
-    } else { diff_text };
+    } else {
+        diff_text
+    };
 
     // Choose a model tier using centralized selector
     let Some(model) = crate::ai::models::select_model(&config.ai) else {
@@ -41,7 +45,12 @@ pub fn generate_summary_blocking(
 
     // Spawn or reuse sidecar
     // Pass through context size cap so sidecar uses a consistent ctx-size
-    let port = crate::ai::sidecar::get_or_spawn_port_with_ctx(&model_path, uhoh_dir, config.ai.idle_shutdown_secs, capped_tokens as u64)?;
+    let port = crate::ai::sidecar::get_or_spawn_port_with_ctx(
+        &model_path,
+        uhoh_dir,
+        config.ai.idle_shutdown_secs,
+        capped_tokens as u64,
+    )?;
 
     // Build prompt
     let prompt = format!(
@@ -49,26 +58,30 @@ pub fn generate_summary_blocking(
         files.added.join(", "), files.deleted.join(", "), files.modified.join(", "), truncated
     );
 
-    let resp: serde_json::Value = std::thread::spawn(move || -> anyhow::Result<serde_json::Value> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()?;
-        let r = client
-            .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
-            .json(&serde_json::json!({
-                "model": model.name,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 256,
-                "temperature": 0.3,
-            }))
-            .send()?
-            .json()?;
-        Ok(r)
-    })
-    .join()
-    .map_err(|_| anyhow::anyhow!("HTTP join error"))??;
+    let resp: serde_json::Value =
+        std::thread::spawn(move || -> anyhow::Result<serde_json::Value> {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()?;
+            let r = client
+                .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+                .json(&serde_json::json!({
+                    "model": model.name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 256,
+                    "temperature": 0.3,
+                }))
+                .send()?
+                .json()?;
+            Ok(r)
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("HTTP join error"))??;
 
-    Ok(resp["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string())
+    Ok(resp["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string())
 }
 
 // Removed async generate_summary variant to avoid duplication and drift. The

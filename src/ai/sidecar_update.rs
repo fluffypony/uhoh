@@ -75,7 +75,10 @@ pub fn read_manifest(sidecar_dir: &Path) -> Option<SidecarManifest> {
 }
 
 fn write_manifest(sidecar_dir: &Path, manifest: &SidecarManifest) -> Result<()> {
-    fs::write(sidecar_dir.join("manifest.json"), serde_json::to_string_pretty(manifest)?)?;
+    fs::write(
+        sidecar_dir.join("manifest.json"),
+        serde_json::to_string_pretty(manifest)?,
+    )?;
     Ok(())
 }
 
@@ -88,7 +91,10 @@ pub fn check_for_update(
     let current = read_manifest(sidecar_dir);
 
     let url = if let Some(version) = pin_version {
-        format!("https://api.github.com/repos/{}/releases/tags/{}", repo, version)
+        format!(
+            "https://api.github.com/repos/{}/releases/tags/{}",
+            repo, version
+        )
     } else {
         format!("https://api.github.com/repos/{}/releases/latest", repo)
     };
@@ -106,7 +112,10 @@ pub fn check_for_update(
         return Ok(None);
     }
     if !response.status().is_success() {
-        tracing::warn!("GitHub API returned {}; skipping sidecar update check", response.status());
+        tracing::warn!(
+            "GitHub API returned {}; skipping sidecar update check",
+            response.status()
+        );
         return Ok(None);
     }
 
@@ -120,7 +129,10 @@ pub fn check_for_update(
     let asset = release
         .assets
         .iter()
-        .find(|asset| asset.name.contains(platform) && (asset.name.ends_with(".zip") || asset.name.ends_with(".tar.gz")))
+        .find(|asset| {
+            asset.name.contains(platform)
+                && (asset.name.ends_with(".zip") || asset.name.ends_with(".tar.gz"))
+        })
         .or_else(|| {
             let fallback = match platform {
                 p if p.starts_with("linux-cuda") => "ubuntu-x64",
@@ -128,27 +140,53 @@ pub fn check_for_update(
                 _ => return None,
             };
             release.assets.iter().find(|asset| {
-                asset.name.contains(fallback) && (asset.name.ends_with(".zip") || asset.name.ends_with(".tar.gz"))
+                asset.name.contains(fallback)
+                    && (asset.name.ends_with(".zip") || asset.name.ends_with(".tar.gz"))
             })
         });
 
     if let Some(asset) = asset {
-        Ok(Some((release.tag_name, asset.browser_download_url.clone(), asset.size)))
+        Ok(Some((
+            release.tag_name,
+            asset.browser_download_url.clone(),
+            asset.size,
+        )))
     } else {
         tracing::warn!("No matching sidecar asset for platform {}", platform);
         Ok(None)
     }
 }
 
-pub fn download_and_install(sidecar_dir: &Path, version: &str, download_url: &str, _expected_size: u64) -> Result<()> {
+pub fn download_and_install(
+    sidecar_dir: &Path,
+    version: &str,
+    download_url: &str,
+    _expected_size: u64,
+) -> Result<()> {
     let platform = detect_platform_asset_substring()?;
     fs::create_dir_all(sidecar_dir)?;
 
     let tmp_archive = sidecar_dir.join(".download.tmp");
-    let tmp_binary = sidecar_dir.join(if cfg!(windows) { ".llama-server.new.exe" } else { ".llama-server.new" });
-    let final_binary = sidecar_dir.join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" });
-    let backup_binary = sidecar_dir.join(if cfg!(windows) { "llama-server.exe.bak" } else { "llama-server.bak" });
-    let binary_name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let tmp_binary = sidecar_dir.join(if cfg!(windows) {
+        ".llama-server.new.exe"
+    } else {
+        ".llama-server.new"
+    });
+    let final_binary = sidecar_dir.join(if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    });
+    let backup_binary = sidecar_dir.join(if cfg!(windows) {
+        "llama-server.exe.bak"
+    } else {
+        "llama-server.bak"
+    });
+    let binary_name = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("uhoh-sidecar-updater")

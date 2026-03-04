@@ -113,7 +113,11 @@ fn remove_launchagent() -> Result<()> {
 
     let uid = unsafe { libc::getuid() };
     std::process::Command::new("launchctl")
-        .args(["bootout", &format!("gui/{}", uid), &plist_path.to_string_lossy()])
+        .args([
+            "bootout",
+            &format!("gui/{}", uid),
+            &plist_path.to_string_lossy(),
+        ])
         .status()
         .or_else(|_| {
             std::process::Command::new("launchctl")
@@ -232,13 +236,15 @@ pub fn is_uhoh_process_alive(pid: u32) -> bool {
 
     #[cfg(target_os = "windows")]
     {
-        use winapi::um::processthreadsapi::OpenProcess;
-        use winapi::um::winnt::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
         use winapi::um::handleapi::CloseHandle;
+        use winapi::um::processthreadsapi::OpenProcess;
         use winapi::um::psapi::GetModuleFileNameExW;
+        use winapi::um::winnt::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
-            if handle.is_null() { return false; }
+            if handle.is_null() {
+                return false;
+            }
             let mut buf = [0u16; 32767];
             let len = GetModuleFileNameExW(handle, std::ptr::null_mut(), buf.as_mut_ptr(), 32767);
             CloseHandle(handle);

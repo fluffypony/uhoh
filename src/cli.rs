@@ -23,15 +23,11 @@ pub struct Cli {
 pub enum Commands {
     /// Register a folder for watching (default: current directory)
     #[command(alias = "+")]
-    Add {
-        path: Option<String>,
-    },
+    Add { path: Option<String> },
 
     /// Unregister a folder
     #[command(alias = "-")]
-    Remove {
-        target: Option<String>,
-    },
+    Remove { target: Option<String> },
 
     /// List all registered folders with status
     #[command(alias = "l")]
@@ -39,9 +35,7 @@ pub enum Commands {
 
     /// List snapshots for a project
     #[command(alias = "s")]
-    Snapshots {
-        target: Option<String>,
-    },
+    Snapshots { target: Option<String> },
 
     /// Restore working directory to a snapshot
     #[command(alias = "r")]
@@ -60,10 +54,7 @@ pub enum Commands {
 
     /// Restore a snapshot into a git stash entry
     #[command(alias = "g")]
-    Gitstash {
-        id: String,
-        target: Option<String>,
-    },
+    Gitstash { id: String, target: Option<String> },
 
     /// Create a manual snapshot with optional message
     #[command(alias = "c")]
@@ -83,16 +74,11 @@ pub enum Commands {
 
     /// Print a file at a point in time
     #[command(alias = "p")]
-    Cat {
-        path: String,
-        id: String,
-    },
+    Cat { path: String, id: String },
 
     /// History of a specific file across snapshots
     #[command(alias = "o")]
-    Log {
-        path: String,
-    },
+    Log { path: String },
 
     /// Run MCP server over STDIO for AI agent integration
     Mcp,
@@ -145,19 +131,13 @@ pub enum Commands {
     },
 
     /// Mark the start of an AI-agent operation for grouped undo
-    Mark {
-        label: String,
-    },
+    Mark { label: String },
 
     /// Revert the last completed operation
-    Undo {
-        target: Option<String>,
-    },
+    Undo { target: Option<String> },
 
     /// List recorded operations
-    Operations {
-        target: Option<String>,
-    },
+    Operations { target: Option<String> },
 
     /// Install system service for auto-start
     #[command(name = "service-install", hide = true)]
@@ -173,12 +153,7 @@ pub enum ConfigAction {
     /// Open the config file in $EDITOR
     Edit,
     /// Set a key to a value (supports up to two-level nesting: section.key)
-    Set {
-        key: String,
-        value: String,
-    },
+    Set { key: String, value: String },
     /// Get the current value for a key
-    Get {
-        key: String,
-    },
+    Get { key: String },
 }

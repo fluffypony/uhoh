@@ -7,8 +7,8 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::cas;
-use chrono::TimeZone;
 use crate::db::{Database, ProjectEntry};
+use chrono::TimeZone;
 use syntect::easy::HighlightLines;
 // Style imported implicitly via ranges; suppress unused warnings by not importing it explicitly
 use syntect::util::as_24_bit_terminal_escaped;
@@ -66,7 +66,9 @@ pub fn compute_structured_diff(
         };
     }
 
-    if old_content.len() > MAX_STRUCTURED_DIFF_BYTES || new_content.len() > MAX_STRUCTURED_DIFF_BYTES {
+    if old_content.len() > MAX_STRUCTURED_DIFF_BYTES
+        || new_content.len() > MAX_STRUCTURED_DIFF_BYTES
+    {
         return FileDiff {
             path: file_path.to_string(),
             status: "modified".to_string(),
@@ -251,14 +253,20 @@ pub fn cmd_diff(
         if old_content.len() > MAX_DIFF_BYTES || new_content.len() > MAX_DIFF_BYTES {
             writeln!(stdout, "\n--- {}/{}", label1, path)?;
             writeln!(stdout, "+++ {}/{}", label2, path)?;
-            writeln!(stdout, "[Diff skipped due to large file size > {} bytes]", MAX_DIFF_BYTES)?;
+            writeln!(
+                stdout,
+                "[Diff skipped due to large file size > {} bytes]",
+                MAX_DIFF_BYTES
+            )?;
             continue;
         }
 
         let display_path = if path.strip_prefix("b64:").is_some() {
             let os = crate::cas::decode_relpath_to_os(path);
             os.to_string_lossy().into_owned()
-        } else { path.to_string() };
+        } else {
+            path.to_string()
+        };
         writeln!(stdout, "\n--- {}/{}", label1, display_path)?;
         writeln!(stdout, "+++ {}/{}", label2, display_path)?;
 
@@ -280,7 +288,9 @@ pub fn cmd_diff(
                     ChangeTag::Equal => " ",
                 };
                 // Apply highlighting per line
-                if let Ok(ranges) = highlighter.highlight_line(change.to_string().as_str(), &SYNTAX_SET) {
+                if let Ok(ranges) =
+                    highlighter.highlight_line(change.to_string().as_str(), &SYNTAX_SET)
+                {
                     let escaped = as_24_bit_terminal_escaped(&ranges, false);
                     write!(stdout, "{}{}", sign, escaped)?;
                 } else {
@@ -306,13 +316,21 @@ pub fn cmd_cat(
         database
             .list_snapshots(&project.hash)?
             .into_iter()
-            .find(|s| chrono::DateTime::parse_from_rfc3339(&s.timestamp).map(|d| d.with_timezone(&chrono::Utc) <= target).unwrap_or(false))
+            .find(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s.timestamp)
+                    .map(|d| d.with_timezone(&chrono::Utc) <= target)
+                    .unwrap_or(false)
+            })
     } else if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(id_str, "%Y-%m-%dT%H:%M:%S") {
         let target = chrono::Utc.from_utc_datetime(&ts);
         database
             .list_snapshots(&project.hash)?
             .into_iter()
-            .find(|s| chrono::DateTime::parse_from_rfc3339(&s.timestamp).map(|d| d.with_timezone(&chrono::Utc) <= target).unwrap_or(false))
+            .find(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s.timestamp)
+                    .map(|d| d.with_timezone(&chrono::Utc) <= target)
+                    .unwrap_or(false)
+            })
     } else if let Some(_) = crate::cas::base58_to_id(id_str) {
         database.find_snapshot_by_base58(&project.hash, id_str)?
     } else {
@@ -324,8 +342,12 @@ pub fn cmd_cat(
     let entry = files
         .iter()
         .find(|f| {
-            if f.path == file_path { return true; }
-            if let Some(_) = file_path.strip_prefix("b64:") { return f.path == file_path; }
+            if f.path == file_path {
+                return true;
+            }
+            if let Some(_) = file_path.strip_prefix("b64:") {
+                return f.path == file_path;
+            }
             // Try decoding stored path for non-UTF8 encoding
             let stored_os = crate::cas::decode_relpath_to_os(&f.path);
             stored_os.to_string_lossy() == file_path
@@ -355,7 +377,11 @@ pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> 
     let mut prev_hash = String::new();
     for (snapshot_id, timestamp, hash, trigger) in &history {
         let id_str = cas::id_to_base58(*snapshot_id);
-        let changed = if hash != &prev_hash { "changed" } else { "same" };
+        let changed = if hash != &prev_hash {
+            "changed"
+        } else {
+            "same"
+        };
         println!("  {} [{}] {} ({})", timestamp, id_str, changed, trigger);
         prev_hash = hash.clone();
     }
@@ -363,15 +389,18 @@ pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> 
 }
 
 /// Build a file list from the current working directory (for diffing against current state).
-fn build_current_file_list_readonly(
-    project_path: &Path,
-) -> Result<Vec<crate::db::FileEntryRow>> {
+fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db::FileEntryRow>> {
     let walker = crate::ignore_rules::build_walker(project_path);
     let mut entries = Vec::new();
     for entry in walker {
-        let entry = match entry { Ok(e) => e, Err(_) => continue };
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
         let path = entry.path();
-        if path.file_name().map_or(false, |n| n == ".uhoh") { continue; }
+        if path.file_name().map_or(false, |n| n == ".uhoh") {
+            continue;
+        }
         let meta = match std::fs::symlink_metadata(path) {
             Ok(m) => m,
             Err(_) => continue,
@@ -380,7 +409,10 @@ fn build_current_file_list_readonly(
         if !ft.is_file() && !ft.is_symlink() {
             continue;
         }
-        let rel_path = match path.strip_prefix(project_path) { Ok(r) => cas::encode_relpath(r), Err(_) => continue };
+        let rel_path = match path.strip_prefix(project_path) {
+            Ok(r) => cas::encode_relpath(r),
+            Err(_) => continue,
+        };
         let (hash, size, is_symlink, executable) = if ft.is_symlink() {
             let target = std::fs::read_link(path)?;
             #[cfg(unix)]
@@ -405,7 +437,9 @@ fn build_current_file_list_readonly(
                 let mut total = 0u64;
                 loop {
                     let n = std::io::Read::read(&mut f, &mut buf)?;
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     hasher.update(&buf[..n]);
                     total += n as u64;
                 }

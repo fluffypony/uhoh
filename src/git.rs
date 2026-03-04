@@ -3,8 +3,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::cas;
-use which::which;
 use crate::db::{Database, ProjectEntry};
+use which::which;
 
 /// Create a git stash entry from a snapshot using plumbing commands.
 /// This does NOT modify the working tree — it constructs the stash directly
@@ -30,11 +30,22 @@ pub fn cmd_gitstash(
     let blob_root = uhoh_dir.join("blobs");
 
     // Warn about unstored files before proceeding
-    let unstored: Vec<&str> = files.iter().filter(|f| !f.stored).map(|f| f.path.as_str()).collect();
+    let unstored: Vec<&str> = files
+        .iter()
+        .filter(|f| !f.stored)
+        .map(|f| f.path.as_str())
+        .collect();
     if !unstored.is_empty() {
-        tracing::warn!("WARNING: {} file(s) are not stored and will be omitted from the stash.", unstored.len());
-        for p in unstored.iter().take(10) { tracing::warn!("  - {} (not recoverable)", p); }
-        if unstored.len() > 10 { tracing::warn!("  ... and {} more", unstored.len() - 10); }
+        tracing::warn!(
+            "WARNING: {} file(s) are not stored and will be omitted from the stash.",
+            unstored.len()
+        );
+        for p in unstored.iter().take(10) {
+            tracing::warn!("  - {} (not recoverable)", p);
+        }
+        if unstored.len() > 10 {
+            tracing::warn!("  ... and {} more", unstored.len() - 10);
+        }
         eprintln!(
             "⚠ {} file(s) are not recoverable and will be omitted from the stash. \
              Applying this stash may effectively delete those files from your working tree.",
@@ -68,7 +79,10 @@ pub fn cmd_gitstash(
             .context("Failed to create git blob")?;
 
         if !output.status.success() {
-            bail!("git hash-object failed: {}", String::from_utf8_lossy(&output.stderr));
+            bail!(
+                "git hash-object failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let git_hash = String::from_utf8(output.stdout)?.trim().to_string();
@@ -79,13 +93,21 @@ pub fn cmd_gitstash(
     let git_dir = project_path.join(".git");
     let tmp_index = git_dir.join("index.uhoh-tmp");
     // Use per-command environment to avoid global side effects
-    run_git_with_index(project_path, &tmp_index, &["read-tree", "--empty"]) ?;
+    run_git_with_index(project_path, &tmp_index, &["read-tree", "--empty"])?;
     // Build a lookup for executable flag from DB
     let mut exec_map = std::collections::HashSet::new();
     let snap_files = database.get_snapshot_files(snap.rowid)?;
-    for f in &snap_files { if f.executable { exec_map.insert(f.path.as_str()); } }
+    for f in &snap_files {
+        if f.executable {
+            exec_map.insert(f.path.as_str());
+        }
+    }
     let mut symlink_map = std::collections::HashSet::new();
-    for f in &snap_files { if f.is_symlink { symlink_map.insert(f.path.as_str()); } }
+    for f in &snap_files {
+        if f.is_symlink {
+            symlink_map.insert(f.path.as_str());
+        }
+    }
 
     // Use a single git update-index --index-info process and stream entries to stdin
     let mut upd = Command::new("git")
@@ -100,22 +122,36 @@ pub fn cmd_gitstash(
         for (path, blob_hash) in &tree_entries {
             // Path traversal guard
             let p = std::path::Path::new(path);
-            if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            if p.is_absolute()
+                || p.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
                 tracing::warn!("Skipping suspicious path in git stash: {}", path);
                 continue;
             }
             // Symlink mode handling (120000) if snapshot recorded it as non-executable and content looks like link
-            let mode = if symlink_map.contains(path.as_str()) { "120000" } else if exec_map.contains(path.as_str()) { "100755" } else { "100644" };
+            let mode = if symlink_map.contains(path.as_str()) {
+                "120000"
+            } else if exec_map.contains(path.as_str()) {
+                "100755"
+            } else {
+                "100644"
+            };
             // Write NUL-terminated entries: "<mode> <hash>\t<path>\0"
             write!(sin, "{} {}\t{}\0", mode, blob_hash, path)?;
-    }
+        }
     }
     let status = upd.wait()?;
     if !status.success() {
-        bail!("git update-index --index-info failed with status {}", status);
+        bail!(
+            "git update-index --index-info failed with status {}",
+            status
+        );
     }
     //  - write-tree
-    let tree_hash = run_git_output_with_index(project_path, &tmp_index, &["write-tree"])?.trim().to_string();
+    let tree_hash = run_git_output_with_index(project_path, &tmp_index, &["write-tree"])?
+        .trim()
+        .to_string();
 
     // Step 3: Get current HEAD commit
     let head_output = run_git_output(project_path, &["rev-parse", "HEAD"])?;
@@ -126,28 +162,54 @@ pub fn cmd_gitstash(
     // Create index commit first
     let index_commit_out = Command::new("git")
         .current_dir(project_path)
-        .args(["commit-tree", &tree_hash, "-p", &head_commit, "-m", &format!("index on {}", id_str)])
+        .args([
+            "commit-tree",
+            &tree_hash,
+            "-p",
+            &head_commit,
+            "-m",
+            &format!("index on {}", id_str),
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
         .context("Failed to create index commit for stash")?;
     if !index_commit_out.status.success() {
-        bail!("git commit-tree (index) failed: {}", String::from_utf8_lossy(&index_commit_out.stderr));
+        bail!(
+            "git commit-tree (index) failed: {}",
+            String::from_utf8_lossy(&index_commit_out.stderr)
+        );
     }
-    let index_commit = String::from_utf8(index_commit_out.stdout)?.trim().to_string();
+    let index_commit = String::from_utf8(index_commit_out.stdout)?
+        .trim()
+        .to_string();
 
     // Create the stash commit with two parents
     let stash_commit_out = Command::new("git")
         .current_dir(project_path)
-        .args(["commit-tree", &tree_hash, "-p", &head_commit, "-p", &index_commit, "-m", &msg])
+        .args([
+            "commit-tree",
+            &tree_hash,
+            "-p",
+            &head_commit,
+            "-p",
+            &index_commit,
+            "-m",
+            &msg,
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
         .context("Failed to create two-parent stash commit")?;
     if !stash_commit_out.status.success() {
-        bail!("git commit-tree (stash) failed: {}", String::from_utf8_lossy(&stash_commit_out.stderr));
+        bail!(
+            "git commit-tree (stash) failed: {}",
+            String::from_utf8_lossy(&stash_commit_out.stderr)
+        );
     }
-    let stash_commit = String::from_utf8(stash_commit_out.stdout)?.trim().to_string();
+    let stash_commit = String::from_utf8(stash_commit_out.stdout)?
+        .trim()
+        .to_string();
 
     // Step 5: Store as a stash entry
     run_git(project_path, &["stash", "store", "-m", &msg, &stash_commit])?;
@@ -178,7 +240,10 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
     let exe_str = if which("uhoh").is_ok() {
         "uhoh".to_string()
     } else {
-        crate::platform::uhoh_dir().join("bin/uhoh").to_string_lossy().to_string()
+        crate::platform::uhoh_dir()
+            .join("bin/uhoh")
+            .to_string_lossy()
+            .to_string()
     };
 
     let uhoh_hook_content = format!(
@@ -229,9 +294,18 @@ pub fn remove_hook(project_path: &Path) -> Result<()> {
         let mut new_content = String::new();
         let mut in_block = false;
         for line in content.lines() {
-            if line.contains("# BEGIN uhoh pre-commit hook") { in_block = true; continue; }
-            if line.contains("# END uhoh pre-commit hook") { in_block = false; continue; }
-            if !in_block { new_content.push_str(line); new_content.push('\n'); }
+            if line.contains("# BEGIN uhoh pre-commit hook") {
+                in_block = true;
+                continue;
+            }
+            if line.contains("# END uhoh pre-commit hook") {
+                in_block = false;
+                continue;
+            }
+            if !in_block {
+                new_content.push_str(line);
+                new_content.push('\n');
+            }
         }
         let trimmed = new_content.trim();
         if trimmed == "#!/bin/sh" || trimmed.is_empty() {

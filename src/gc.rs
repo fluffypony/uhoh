@@ -23,7 +23,9 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
                         if let Ok(meta) = std::fs::metadata(&p) {
                             if let Ok(mtime) = meta.modified() {
                                 if let Ok(age) = now.duration_since(mtime) {
-                                    if age > max_age { let _ = std::fs::remove_file(&p); }
+                                    if age > max_age {
+                                        let _ = std::fs::remove_file(&p);
+                                    }
                                 }
                             }
                         }
@@ -82,11 +84,17 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::MetadataExt;
-                        let usage = if meta.nlink() > 1 { meta.len() / meta.nlink() } else { meta.len() };
+                        let usage = if meta.nlink() > 1 {
+                            meta.len() / meta.nlink()
+                        } else {
+                            meta.len()
+                        };
                         total_size += usage;
                     }
                     #[cfg(not(unix))]
-                    { total_size += meta.len(); }
+                    {
+                        total_size += meta.len();
+                    }
                 }
                 orphaned.push(blob_entry.path());
             }

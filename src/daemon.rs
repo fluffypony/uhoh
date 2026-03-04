@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -80,15 +80,21 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         // Try graceful termination first
-        let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T"]).status();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .status();
         // Wait briefly for process to end
         for _ in 0..50 {
-            if !crate::platform::is_uhoh_process_alive(pid) { break; }
+            if !crate::platform::is_uhoh_process_alive(pid) {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         if crate::platform::is_uhoh_process_alive(pid) {
             // Force kill as fallback
-            let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string(), "/T"]).status();
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string(), "/T"])
+                .status();
         }
     }
 
@@ -123,17 +129,14 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     };
 
     let mut last_sidecar_check: Option<std::time::Instant> = None;
-    let mut sidecar_check_interval = std::time::Duration::from_secs(
-        config.sidecar_update.check_interval_hours * 3600,
-    );
+    let mut sidecar_check_interval =
+        std::time::Duration::from_secs(config.sidecar_update.check_interval_hours * 3600);
 
     #[cfg(windows)]
     let _daemon_mutex = {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
-        let name: Vec<u16> = OsStr::new("Global\\uhoh-daemon\0")
-            .encode_wide()
-            .collect();
+        let name: Vec<u16> = OsStr::new("Global\\uhoh-daemon\0").encode_wide().collect();
         unsafe {
             let handle = winapi::um::synchapi::CreateMutexW(
                 std::ptr::null_mut(),
@@ -155,7 +158,10 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
 
     // Write PID file with exclusive lock to avoid races
     let pid_path = uhoh_dir.join("daemon.pid");
-    let pid_file = std::fs::OpenOptions::new().write(true).create(true).open(&pid_path)?;
+    let pid_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&pid_path)?;
     #[cfg(unix)]
     {
         use fs4::FileExt;
@@ -183,7 +189,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
 
     // Set up logging to file
     let log_path = uhoh_dir.join("daemon.log");
-    tracing::info!("Daemon starting, PID={}, log={}", std::process::id(), log_path.display());
+    tracing::info!(
+        "Daemon starting, PID={}, log={}",
+        std::process::id(),
+        log_path.display()
+    );
 
     // Check inotify watch limit on Linux
     #[cfg(target_os = "linux")]
@@ -211,28 +221,41 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let _bin_watcher = if let Some(ref exe) = exe_path {
         let (bin_notify_tx, bin_notify_rx) = std::sync::mpsc::channel();
         let mut watcher = notify::RecommendedWatcher::new(
-            move |res| { let _ = bin_notify_tx.send(res); },
+            move |res| {
+                let _ = bin_notify_tx.send(res);
+            },
             notify::Config::default(),
-        ).ok();
+        )
+        .ok();
         if let Some(ref mut w) = watcher {
-            if let Some(parent) = exe.parent() { let _ = w.watch(parent, RecursiveMode::NonRecursive); }
+            if let Some(parent) = exe.parent() {
+                let _ = w.watch(parent, RecursiveMode::NonRecursive);
+            }
             let _ = w.watch(&uhoh_dir, RecursiveMode::NonRecursive);
         }
         let exe_clone = exe.clone();
         let tx = bin_event_tx.clone();
-        std::thread::Builder::new().name("bin-watcher-bridge".into()).spawn(move || {
-            for result in bin_notify_rx {
-                if let Ok(evt) = result {
-                    let involves_binary = evt.paths.iter().any(|p| p == &exe_clone) ||
-                        evt.paths.iter().any(|p| p.file_name().map_or(false, |n| n == ".update-ready"));
-                    if involves_binary {
-                        let _ = tx.send(());
+        std::thread::Builder::new()
+            .name("bin-watcher-bridge".into())
+            .spawn(move || {
+                for result in bin_notify_rx {
+                    if let Ok(evt) = result {
+                        let involves_binary = evt.paths.iter().any(|p| p == &exe_clone)
+                            || evt
+                                .paths
+                                .iter()
+                                .any(|p| p.file_name().map_or(false, |n| n == ".update-ready"));
+                        if involves_binary {
+                            let _ = tx.send(());
+                        }
                     }
                 }
-            }
-        }).ok();
+            })
+            .ok();
         watcher
-    } else { None };
+    } else {
+        None
+    };
 
     // Per-project state
     let mut project_states: HashMap<String, ProjectDaemonState> = HashMap::new();
@@ -261,7 +284,9 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN); } // ignore SIGHUP
+        unsafe {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        } // ignore SIGHUP
         let mut sigterm = signal(SignalKind::terminate())?;
         let shutdown_tx2 = shutdown_tx.clone();
         tokio::spawn(async move {
@@ -275,8 +300,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let mut recover_attempts: u32 = 0;
     let mut next_recover_at: Option<Instant> = None;
     let mut tick_interval = tokio::time::interval(Duration::from_secs(60));
-    let mut update_check_interval = tokio::time::interval(Duration::from_secs(config.update.check_interval_hours * 3600));
-    let mut debounce_interval = tokio::time::interval(Duration::from_secs(config.watch.debounce_quiet_secs));
+    let mut update_check_interval = tokio::time::interval(Duration::from_secs(
+        config.update.check_interval_hours * 3600,
+    ));
+    let mut debounce_interval =
+        tokio::time::interval(Duration::from_secs(config.watch.debounce_quiet_secs));
     let update_trigger = uhoh_dir.join(".update-ready");
     let mut compaction_index: usize = 0;
 
@@ -641,7 +669,9 @@ fn handle_watch_event(
         let now = Instant::now();
         for (project_path, state) in states.iter_mut() {
             state.pending_changes.insert(PathBuf::from(project_path));
-            if state.first_change_at.is_none() { state.first_change_at = Some(now); }
+            if state.first_change_at.is_none() {
+                state.first_change_at = Some(now);
+            }
             state.last_change_at = Some(now);
         }
         return;
@@ -663,7 +693,9 @@ fn handle_watch_event(
             // Rely on ignore rules during snapshot walk; do not pre-filter here to avoid mismatches
             state.pending_changes.insert(path.clone());
             let now = Instant::now();
-            if state.first_change_at.is_none() { state.first_change_at = Some(now); }
+            if state.first_change_at.is_none() {
+                state.first_change_at = Some(now);
+            }
             state.last_change_at = Some(now);
             break;
         }
@@ -689,7 +721,11 @@ async fn process_pending_snapshots(
     let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
     let concurrency = std::cmp::max(1, (logical / 2).max(1));
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
-    let mut join: tokio::task::JoinSet<(String, Vec<PathBuf>, anyhow::Result<Option<SnapshotResult>>)> = tokio::task::JoinSet::new();
+    let mut join: tokio::task::JoinSet<(
+        String,
+        Vec<PathBuf>,
+        anyhow::Result<Option<SnapshotResult>>,
+    )> = tokio::task::JoinSet::new();
     for (project_path, state) in states.iter_mut() {
         if state.pending_changes.is_empty() {
             continue;
@@ -706,10 +742,12 @@ async fn process_pending_snapshots(
         let since_first_change = now.duration_since(first_change);
         let since_last_snapshot = now.duration_since(state.last_snapshot);
 
-        let quiet_elapsed = since_last_change >= Duration::from_secs(config.watch.debounce_quiet_secs);
+        let quiet_elapsed =
+            since_last_change >= Duration::from_secs(config.watch.debounce_quiet_secs);
         // Force snapshot after max_debounce_secs from the FIRST observed change
         let max_ceiling = since_first_change >= Duration::from_secs(config.watch.max_debounce_secs);
-        let min_interval = since_last_snapshot >= Duration::from_secs(config.watch.min_snapshot_interval_secs);
+        let min_interval =
+            since_last_snapshot >= Duration::from_secs(config.watch.min_snapshot_interval_secs);
 
         if (quiet_elapsed || max_ceiling) && min_interval {
             let uhoh_dir_buf = uhoh_dir.to_path_buf();
@@ -727,12 +765,22 @@ async fn process_pending_snapshots(
             join.spawn(async move {
                 let proj_hash_for_log = project_hash.clone();
                 let res = tokio::task::spawn_blocking(move || {
-                    match snapshot::create_snapshot(&uhoh_dir_buf, &db_for_task, &project_hash, &proj_path, "auto", None, &cfg, Some(&changed)) {
+                    match snapshot::create_snapshot(
+                        &uhoh_dir_buf,
+                        &db_for_task,
+                        &project_hash,
+                        &proj_path,
+                        "auto",
+                        None,
+                        &cfg,
+                        Some(&changed),
+                    ) {
                         Ok(Some(id)) => Ok(Some(SnapshotResult::Created(id))),
                         Ok(None) => Ok(Some(SnapshotResult::NoChanges)),
                         Err(e) => Err(e),
                     }
-                }).await;
+                })
+                .await;
                 let task_result = match res {
                     Ok(Ok(v)) => Ok(v),
                     Ok(Err(e)) => {
@@ -760,14 +808,20 @@ async fn process_pending_snapshots(
                     state.last_snapshot = Instant::now();
                     if let Ok(Some(rowid)) = database.latest_snapshot_rowid(&state.hash) {
                         if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
-                            let _ = event_tx.send(crate::server::events::ServerEvent::SnapshotCreated {
-                                project_hash: state.hash.clone(),
-                                snapshot_id: crate::cas::id_to_base58(id),
-                                timestamp: row.timestamp,
-                                trigger: row.trigger,
-                                file_count: row.file_count as usize,
-                                message: if row.message.is_empty() { None } else { Some(row.message) },
-                            });
+                            let _ = event_tx.send(
+                                crate::server::events::ServerEvent::SnapshotCreated {
+                                    project_hash: state.hash.clone(),
+                                    snapshot_id: crate::cas::id_to_base58(id),
+                                    timestamp: row.timestamp,
+                                    trigger: row.trigger,
+                                    file_count: row.file_count as usize,
+                                    message: if row.message.is_empty() {
+                                        None
+                                    } else {
+                                        Some(row.message)
+                                    },
+                                },
+                            );
                         }
                     }
                 }
@@ -808,17 +862,40 @@ async fn process_ai_summary_queue(
     const MAX_ATTEMPTS: i64 = 5;
     if let Ok(jobs) = database.dequeue_pending_ai(MAX_PER_TICK) {
         for (rowid, project_hash, attempts, _queued_at) in jobs {
-            if attempts >= MAX_ATTEMPTS { let _ = database.delete_pending_ai(rowid); continue; }
+            if attempts >= MAX_ATTEMPTS {
+                let _ = database.delete_pending_ai(rowid);
+                continue;
+            }
 
             // Rebuild a minimal diff for this snapshot
             // Fetch files of this snapshot and prior snapshot for the project
-            let this = match database.get_snapshot_by_rowid(rowid) { Ok(Some(s)) => s, _ => { let _ = database.delete_pending_ai(rowid); continue; } };
-            let prev = match database.snapshot_before(&project_hash, this.snapshot_id) { Ok(v) => v, Err(_) => None };
-            let this_files = match database.get_snapshot_files(this.rowid) { Ok(v) => v, Err(_) => { let _ = database.increment_ai_attempts(rowid); continue; } };
-            let prev_files_vec = prev.as_ref().and_then(|p| database.get_snapshot_files(p.rowid).ok()).unwrap_or_default();
+            let this = match database.get_snapshot_by_rowid(rowid) {
+                Ok(Some(s)) => s,
+                _ => {
+                    let _ = database.delete_pending_ai(rowid);
+                    continue;
+                }
+            };
+            let prev = match database.snapshot_before(&project_hash, this.snapshot_id) {
+                Ok(v) => v,
+                Err(_) => None,
+            };
+            let this_files = match database.get_snapshot_files(this.rowid) {
+                Ok(v) => v,
+                Err(_) => {
+                    let _ = database.increment_ai_attempts(rowid);
+                    continue;
+                }
+            };
+            let prev_files_vec = prev
+                .as_ref()
+                .and_then(|p| database.get_snapshot_files(p.rowid).ok())
+                .unwrap_or_default();
             use std::collections::HashMap;
             let mut prev_map: HashMap<String, (String, bool, u64)> = HashMap::new();
-            for f in prev_files_vec { prev_map.insert(f.path.clone(), (f.hash, f.stored, f.size)); }
+            for f in prev_files_vec {
+                prev_map.insert(f.path.clone(), (f.hash, f.stored, f.size));
+            }
 
             let mut added = Vec::new();
             let mut modified = Vec::new();
@@ -832,27 +909,44 @@ async fn process_ai_summary_queue(
                 if let Some((prev_hash, prev_stored, prev_size)) = prev_map.get(&f.path) {
                     if &f.hash != prev_hash {
                         modified.push(f.path.clone());
-                        if f.stored && *prev_stored && *prev_size <= MAX_AI_DIFF_FILE_SIZE && f.size <= MAX_AI_DIFF_FILE_SIZE {
+                        if f.stored
+                            && *prev_stored
+                            && *prev_size <= MAX_AI_DIFF_FILE_SIZE
+                            && f.size <= MAX_AI_DIFF_FILE_SIZE
+                        {
                             let old = crate::cas::read_blob(&blob_root, prev_hash).ok().flatten();
                             let new = crate::cas::read_blob(&blob_root, &f.hash).ok().flatten();
                             if let (Some(old), Some(new)) = (old, new) {
                                 let head_old = &old[..old.len().min(8192)];
                                 let head_new = &new[..new.len().min(8192)];
-                                if !(content_inspector::inspect(head_old).is_binary() || content_inspector::inspect(head_new).is_binary()) {
-                                    if let (Ok(old_s), Ok(new_s)) = (String::from_utf8(old), String::from_utf8(new)) {
+                                if !(content_inspector::inspect(head_old).is_binary()
+                                    || content_inspector::inspect(head_new).is_binary())
+                                {
+                                    if let (Ok(old_s), Ok(new_s)) =
+                                        (String::from_utf8(old), String::from_utf8(new))
+                                    {
                                         let d = similar::TextDiff::from_lines(&old_s, &new_s);
-                                        diff_chunks.push_str(&format!("--- a/{}\n+++ b/{}\n", f.path, f.path));
-                                        for hunk in d.unified_diff().context_radius(2).iter_hunks() {
+                                        diff_chunks.push_str(&format!(
+                                            "--- a/{}\n+++ b/{}\n",
+                                            f.path, f.path
+                                        ));
+                                        for hunk in d.unified_diff().context_radius(2).iter_hunks()
+                                        {
                                             diff_chunks.push_str(&format!("{}\n", hunk.header()));
                                             for change in hunk.iter_changes() {
-                                                let sign = match change.tag() { similar::ChangeTag::Delete => '-', similar::ChangeTag::Insert => '+', similar::ChangeTag::Equal => ' '};
+                                                let sign = match change.tag() {
+                                                    similar::ChangeTag::Delete => '-',
+                                                    similar::ChangeTag::Insert => '+',
+                                                    similar::ChangeTag::Equal => ' ',
+                                                };
                                                 diff_chunks.push(sign);
                                                 diff_chunks.push_str(&change.to_string());
                                             }
                                         }
                                     }
                                 } else {
-                                    diff_chunks.push_str(&format!("--- {}\n[Binary file]\n", f.path));
+                                    diff_chunks
+                                        .push_str(&format!("--- {}\n[Binary file]\n", f.path));
                                 }
                             }
                         }
@@ -862,30 +956,52 @@ async fn process_ai_summary_queue(
                 }
             }
             // Determine deleted
-            let this_map: std::collections::HashMap<String, ()> = this_files.iter().map(|f| (f.path.clone(), ())).collect();
-            for (p, _, _, _) in prev_map.iter().map(|(p, (h,s,sz))| (p.clone(), h.clone(), *s, *sz)) {
-                if !this_map.contains_key(&p) { deleted.push(p); }
+            let this_map: std::collections::HashMap<String, ()> =
+                this_files.iter().map(|f| (f.path.clone(), ())).collect();
+            for (p, _, _, _) in prev_map
+                .iter()
+                .map(|(p, (h, s, sz))| (p.clone(), h.clone(), *s, *sz))
+            {
+                if !this_map.contains_key(&p) {
+                    deleted.push(p);
+                }
             }
 
             // Generate via sidecar
-            let files = crate::ai::summary::FileChangeSummary { added: added.clone(), deleted: deleted.clone(), modified: modified.clone() };
-            match crate::ai::summary::generate_summary_blocking(uhoh_dir, &config.clone(), &diff_chunks, &files) {
+            let files = crate::ai::summary::FileChangeSummary {
+                added: added.clone(),
+                deleted: deleted.clone(),
+                modified: modified.clone(),
+            };
+            match crate::ai::summary::generate_summary_blocking(
+                uhoh_dir,
+                &config.clone(),
+                &diff_chunks,
+                &files,
+            ) {
                 Ok(text) if !text.is_empty() => {
                     if let Err(e) = database.set_ai_summary(rowid, &text) {
                         tracing::warn!("Failed to set AI summary: {}", e);
                     } else {
                         let _ = database.delete_pending_ai(rowid);
                         if let Ok(Some(snapshot)) = database.get_snapshot_by_rowid(rowid) {
-                            let _ = event_tx.send(crate::server::events::ServerEvent::AiSummaryCompleted {
-                                project_hash: project_hash.clone(),
-                                snapshot_id: crate::cas::id_to_base58(snapshot.snapshot_id),
-                                summary: text,
-                            });
+                            let _ = event_tx.send(
+                                crate::server::events::ServerEvent::AiSummaryCompleted {
+                                    project_hash: project_hash.clone(),
+                                    snapshot_id: crate::cas::id_to_base58(snapshot.snapshot_id),
+                                    summary: text,
+                                },
+                            );
                         }
                     }
                 }
-                Ok(_) => { let _ = database.increment_ai_attempts(rowid); }
-                Err(e) => { tracing::debug!("Deferred AI summary failed: {}", e); let _ = database.increment_ai_attempts(rowid); }
+                Ok(_) => {
+                    let _ = database.increment_ai_attempts(rowid);
+                }
+                Err(e) => {
+                    tracing::debug!("Deferred AI summary failed: {}", e);
+                    let _ = database.increment_ai_attempts(rowid);
+                }
             }
         }
     }
@@ -899,7 +1015,8 @@ fn check_moved_folders(
 ) {
     use once_cell::sync::Lazy;
     use std::sync::Mutex;
-    static FAILURES: Lazy<Mutex<std::collections::HashMap<String, u32>>> = Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+    static FAILURES: Lazy<Mutex<std::collections::HashMap<String, u32>>> =
+        Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
     let mut failures = FAILURES.lock().unwrap();
     for project in projects {
         let path = Path::new(&project.current_path);
@@ -932,10 +1049,21 @@ fn check_moved_folders(
                         let _ = watcher.watch(&new_path, RecursiveMode::Recursive);
                         // Update in-memory state key
                         if let Some(state) = states.remove(&project.current_path) {
-                            states.insert(new_path.to_string_lossy().to_string(), ProjectDaemonState { last_change_at: None, ..state });
+                            states.insert(
+                                new_path.to_string_lossy().to_string(),
+                                ProjectDaemonState {
+                                    last_change_at: None,
+                                    ..state
+                                },
+                            );
                         }
-                        let _ = database.update_project_path(&project.hash, &new_path.to_string_lossy());
-                        tracing::info!("Relocated project {} -> {}", &project.hash[..project.hash.len().min(12)], new_path.display());
+                        let _ = database
+                            .update_project_path(&project.hash, &new_path.to_string_lossy());
+                        tracing::info!(
+                            "Relocated project {} -> {}",
+                            &project.hash[..project.hash.len().min(12)],
+                            new_path.display()
+                        );
                     }
                     break;
                 }

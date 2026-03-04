@@ -1,9 +1,9 @@
 use crate::config::{AiConfig, ModelTierConfig};
 use anyhow::Result;
+use std::io::IsTerminal;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use sysinfo::{System, RefreshKind, MemoryRefreshKind};
-use std::io::IsTerminal;
+use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 
 /// Default model tiers (used when config has none).
 /// Updated to Qwen3.5 tiers.
@@ -25,14 +25,16 @@ pub fn select_model(config: &AiConfig) -> Option<ModelTierConfig> {
     } else {
         config.models.clone()
     };
-    let sys = System::new_with_specifics(RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()));
+    let sys = System::new_with_specifics(
+        RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
+    );
     let total_ram_gb = sys.total_memory() / (1024 * 1024 * 1024);
     let available_ram_gb = sys.available_memory() / (1024 * 1024 * 1024);
     let min_available_margin = 2; // require a small headroom
-    tiers
-        .into_iter()
-        .rev()
-        .find(|t| available_ram_gb >= t.min_ram_gb.saturating_add(min_available_margin as u64) || (total_ram_gb >= t.min_ram_gb && available_ram_gb >= t.min_ram_gb))
+    tiers.into_iter().rev().find(|t| {
+        available_ram_gb >= t.min_ram_gb.saturating_add(min_available_margin as u64)
+            || (total_ram_gb >= t.min_ram_gb && available_ram_gb >= t.min_ram_gb)
+    })
 }
 
 /// Ensure the model file is present under ~/.uhoh/sidecar and return its path.
@@ -40,62 +42,108 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
     let target_dir = uhoh_dir.join("models");
     std::fs::create_dir_all(&target_dir)?;
     let target = target_dir.join(&model.filename);
-    if target.exists() { return Ok(target); }
+    if target.exists() {
+        return Ok(target);
+    }
 
     tracing::info!("Downloading model {} from {}...", model.name, model.url);
     let client = reqwest::blocking::Client::new();
     let tmp = target.with_extension("downloading");
     let mut start = 0u64;
     if tmp.exists() {
-        if let Ok(meta) = std::fs::metadata(&tmp) { start = meta.len(); }
+        if let Ok(meta) = std::fs::metadata(&tmp) {
+            start = meta.len();
+        }
     }
     // HEAD to get length
-    let total = client.head(&model.url).send().ok().and_then(|r| r.headers().get(reqwest::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|s| s.parse::<u64>().ok()));
+    let total = client.head(&model.url).send().ok().and_then(|r| {
+        r.headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+    });
     // Open file for append/create
-    let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&tmp)?;
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&tmp)?;
     // Show a progress bar if total known
     let is_tty = std::io::stderr().is_terminal();
-    let pb = if is_tty { total.map(|t| {
-        let bar = indicatif::ProgressBar::new(t);
-        bar.set_position(start);
-        bar.set_style(indicatif::ProgressStyle::default_bar().template("{spinner:.green} [{bar:40}] {bytes}/{total_bytes} ({eta})").unwrap());
-        bar
-    }) } else { None };
+    let pb = if is_tty {
+        total.map(|t| {
+            let bar = indicatif::ProgressBar::new(t);
+            bar.set_position(start);
+            bar.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{bar:40}] {bytes}/{total_bytes} ({eta})")
+                    .unwrap(),
+            );
+            bar
+        })
+    } else {
+        None
+    };
     // Download loop with Range
     let mut pos = start;
     loop {
         let mut req = client.get(&model.url);
-        if pos > 0 { req = req.header(reqwest::header::RANGE, format!("bytes={}-", pos)); }
+        if pos > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={}-", pos));
+        }
         let resp = req.send()?;
         if pos > 0 && resp.status() == reqwest::StatusCode::OK {
-            tracing::warn!("Server ignored Range request for {}, restarting download from zero", model.name);
+            tracing::warn!(
+                "Server ignored Range request for {}, restarting download from zero",
+                model.name
+            );
             pos = 0;
             out.set_len(0)?;
             use std::io::Seek;
             out.seek(std::io::SeekFrom::Start(0))?;
             continue;
         }
-        if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE { break; }
-        if !resp.status().is_success() { anyhow::bail!("Failed to download model: HTTP {}", resp.status()); }
+        if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            break;
+        }
+        if !resp.status().is_success() {
+            anyhow::bail!("Failed to download model: HTTP {}", resp.status());
+        }
         let mut reader = std::io::BufReader::new(resp);
         let mut buf = [0u8; 64 * 1024];
         let mut received_any = false;
         loop {
             let n = reader.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             out.write_all(&buf[..n])?;
             pos += n as u64;
             received_any = true;
-            if let Some(ref bar) = pb { bar.set_position(pos); }
+            if let Some(ref bar) = pb {
+                bar.set_position(pos);
+            }
         }
         out.flush()?;
-        if let Some(total) = total { if pos >= total { break; } }
-        if total.is_none() && !received_any { break; }
-        if total.is_none() && received_any { break; }
-        tracing::info!("Download interrupted at {} bytes, retrying with resume", pos);
+        if let Some(total) = total {
+            if pos >= total {
+                break;
+            }
+        }
+        if total.is_none() && !received_any {
+            break;
+        }
+        if total.is_none() && received_any {
+            break;
+        }
+        tracing::info!(
+            "Download interrupted at {} bytes, retrying with resume",
+            pos
+        );
     }
     out.sync_all()?;
-    if let Some(bar) = pb { bar.finish_and_clear(); }
+    if let Some(bar) = pb {
+        bar.finish_and_clear();
+    }
     std::fs::rename(&tmp, &target)?;
     Ok(target)
 }

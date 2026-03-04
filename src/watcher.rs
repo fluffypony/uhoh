@@ -35,20 +35,22 @@ pub fn start_watching(
         let res = std::panic::catch_unwind(|| {
             for result in file_rx {
                 match result {
-                    Ok(event) => {
-                        match event.kind {
-                            EventKind::Remove(_) => {
-                                for p in event.paths { let _ = sender.send(WatchEvent::FileDeleted(p)); }
+                    Ok(event) => match event.kind {
+                        EventKind::Remove(_) => {
+                            for p in event.paths {
+                                let _ = sender.send(WatchEvent::FileDeleted(p));
                             }
-                            EventKind::Create(_) | EventKind::Modify(_) => {
-                                for p in event.paths { let _ = sender.send(WatchEvent::FileChanged(p)); }
-                            }
-                            EventKind::Other => {
-                                let _ = sender.send(WatchEvent::Overflow);
-                            }
-                            _ => {}
                         }
-                    }
+                        EventKind::Create(_) | EventKind::Modify(_) => {
+                            for p in event.paths {
+                                let _ = sender.send(WatchEvent::FileChanged(p));
+                            }
+                        }
+                        EventKind::Other => {
+                            let _ = sender.send(WatchEvent::Overflow);
+                        }
+                        _ => {}
+                    },
                     Err(e) => {
                         tracing::warn!("Watch error: {}", e);
                         // On error, treat as overflow (global rescan)

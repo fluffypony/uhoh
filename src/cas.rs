@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::ffi::OsString;
-use base64::Engine;
 
 #[cfg(feature = "compression")]
 const COMPRESSION_MAGIC_NEW: &[u8; 12] = b"UHZS\x00ZSTD\x00v1";
@@ -25,7 +25,9 @@ impl StorageMethod {
     pub fn is_recoverable(self) -> bool {
         !matches!(self, StorageMethod::None)
     }
-    pub fn to_db(self) -> i64 { self as i64 }
+    pub fn to_db(self) -> i64 {
+        self as i64
+    }
     pub fn from_db(v: i64) -> Self {
         match v {
             1 => StorageMethod::Copy,
@@ -113,10 +115,7 @@ pub fn store_blob_with_level(
 
 /// Reads a symlink target at `abs_path`, stores the target bytes in CAS,
 /// and returns (hash, target_byte_count, bytes_written_to_disk).
-pub fn store_symlink_target(
-    blob_root: &Path,
-    abs_path: &Path,
-) -> Result<(String, u64, u64)> {
+pub fn store_symlink_target(blob_root: &Path, abs_path: &Path) -> Result<(String, u64, u64)> {
     let target = std::fs::read_link(abs_path)
         .with_context(|| format!("Failed to read symlink: {}", abs_path.display()))?;
 
@@ -244,7 +243,8 @@ pub fn store_blob_from_file(
                 drop(file);
                 let _ = std::fs::remove_file(&tmp_path);
 
-                let mut src = std::io::BufReader::with_capacity(64 * 1024, std::fs::File::open(file_path)?);
+                let mut src =
+                    std::io::BufReader::with_capacity(64 * 1024, std::fs::File::open(file_path)?);
                 let mut dst = create_restricted_file(&tmp_path)?;
                 loop {
                     let n = src.read(&mut buf)?;
@@ -343,7 +343,10 @@ pub fn blob_exists(blob_root: &Path, hash: &str) -> bool {
     if hash.len() < 2 {
         return false;
     }
-    blob_root.join(&hash[..hash.len().min(2)]).join(hash).exists()
+    blob_root
+        .join(&hash[..hash.len().min(2)])
+        .join(hash)
+        .exists()
 }
 
 fn set_blob_readonly(path: &Path) {
@@ -377,8 +380,8 @@ pub fn maybe_compress(data: &[u8]) -> Vec<u8> {
 #[cfg(feature = "compression")]
 pub fn maybe_compress_with_level(data: &[u8], level: i32) -> Vec<u8> {
     let lvl = if (1..=22).contains(&level) { level } else { 3 };
-    let compressed = zstd::encode_all(std::io::Cursor::new(data), lvl)
-        .unwrap_or_else(|_| data.to_vec());
+    let compressed =
+        zstd::encode_all(std::io::Cursor::new(data), lvl).unwrap_or_else(|_| data.to_vec());
     maybe_wrap_compressed(data, &compressed)
 }
 
@@ -414,7 +417,9 @@ pub fn id_to_base58(id: u64) -> String {
     // Note: base58 for zero is a single '1'. We never assign snapshot id 0.
     // Guard: if id==0 is somehow passed, return empty to avoid ambiguity with ID 1.
     // This behavior is documented in README under Tips.
-    if id == 0 { return String::new(); }
+    if id == 0 {
+        return String::new();
+    }
     let bytes = id.to_be_bytes();
     // Strip leading zero bytes for shorter IDs
     let start = bytes.iter().position(|&b| b != 0).unwrap_or(7);
@@ -424,8 +429,12 @@ pub fn id_to_base58(id: u64) -> String {
 }
 
 pub fn base58_to_id(s: &str) -> Option<u64> {
-    if s.is_empty() { return None; }
-    if s.len() > 22 { return None; }
+    if s.is_empty() {
+        return None;
+    }
+    if s.len() > 22 {
+        return None;
+    }
     let bytes = bs58::decode(s)
         .with_alphabet(bs58::Alphabet::BITCOIN)
         .into_vec()
@@ -437,7 +446,9 @@ pub fn base58_to_id(s: &str) -> Option<u64> {
     let start = 8usize.saturating_sub(bytes.len());
     buf[start..].copy_from_slice(&bytes);
     let id = u64::from_be_bytes(buf);
-    if id == 0 { return None; }
+    if id == 0 {
+        return None;
+    }
     Some(id)
 }
 
@@ -462,14 +473,21 @@ fn encode_relpath_bytes(rel: &Path) -> String {
     {
         use std::os::unix::ffi::OsStrExt;
         let bytes = rel.as_os_str().as_bytes();
-        format!("b64:{}", base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes))
+        format!(
+            "b64:{}",
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
+        )
     }
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
         let wide: Vec<u16> = rel.as_os_str().encode_wide().collect();
-        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
-        format!("b64:{}", base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes))
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
+        format!(
+            "b64:{}",
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
+        )
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -594,7 +612,11 @@ mod tests {
     fn test_base58_short_ids() {
         // ID 1 should produce a short string, not an 8+ char padded string
         let encoded = id_to_base58(1);
-        assert!(encoded.len() <= 2, "ID 1 encoded as '{}' (too long)", encoded);
+        assert!(
+            encoded.len() <= 2,
+            "ID 1 encoded as '{}' (too long)",
+            encoded
+        );
     }
 
     #[test]
@@ -637,6 +659,9 @@ mod tests {
 }
 fn fsync_parent_dir(path: &Path) {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::OpenOptions::new().read(true).open(parent).and_then(|f| f.sync_all());
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .open(parent)
+            .and_then(|f| f.sync_all());
     }
 }

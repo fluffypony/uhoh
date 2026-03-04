@@ -12,7 +12,9 @@ const _: () = {
     let mut i = 0;
     let mut all_zero = true;
     while i < 32 {
-        if bytes[i] != 0 { all_zero = false; }
+        if bytes[i] != 0 {
+            all_zero = false;
+        }
         i += 1;
     }
     if all_zero {
@@ -41,8 +43,8 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
     let current_version = env!("CARGO_PKG_VERSION");
     println!("Current version: {}", current_version);
 
-    let current_semver = semver::Version::parse(current_version)
-        .context("Cannot parse current version")?;
+    let current_semver =
+        semver::Version::parse(current_version).context("Cannot parse current version")?;
 
     // Fetch latest release from GitHub
     let client = reqwest::Client::new();
@@ -54,13 +56,11 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
         .json()
         .await?;
 
-    let latest = releases
-        .first()
-        .context("No releases found")?;
+    let latest = releases.first().context("No releases found")?;
 
     let latest_version_str = latest.tag_name.trim_start_matches('v');
-    let latest_semver = semver::Version::parse(latest_version_str)
-        .context("Cannot parse latest version")?;
+    let latest_semver =
+        semver::Version::parse(latest_version_str).context("Cannot parse latest version")?;
 
     if latest_semver <= current_semver {
         println!("Already up to date.");
@@ -70,11 +70,7 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
     println!("New version available: {}", latest.tag_name);
 
     // Find asset for current platform
-    let asset_name = format!(
-        "uhoh-{}-{}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    );
+    let asset_name = format!("uhoh-{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     let asset = latest
         .assets
         .iter()
@@ -149,7 +145,10 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
 
     // Apply update
     apply_update(uhoh_dir, &binary).await?;
-    println!("Updated to {}. Restart the daemon with `uhoh restart`.", latest.tag_name);
+    println!(
+        "Updated to {}. Restart the daemon with `uhoh restart`.",
+        latest.tag_name
+    );
 
     Ok(())
 }
@@ -157,8 +156,8 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
 fn verify_ed25519_signature(data: &[u8], signature_bytes: &[u8]) -> Result<bool> {
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-    let pubkey = VerifyingKey::from_bytes(UPDATE_PUBLIC_KEY)
-        .context("Invalid embedded public key")?;
+    let pubkey =
+        VerifyingKey::from_bytes(UPDATE_PUBLIC_KEY).context("Invalid embedded public key")?;
 
     // Hash the binary with BLAKE3, then verify signature of the hash
     let hash = blake3::hash(data);
@@ -176,7 +175,9 @@ fn verify_ed25519_signature(data: &[u8], signature_bytes: &[u8]) -> Result<bool>
 
 #[cfg(any(test, debug_assertions))]
 pub async fn dns_verify_hash(version: &str, asset: &str) -> Result<String> {
-    if let Ok(v) = std::env::var("UHOH_TEST_DNS_TXT") { return Ok(v); }
+    if let Ok(v) = std::env::var("UHOH_TEST_DNS_TXT") {
+        return Ok(v);
+    }
     dns_verify_hash_inner(version, asset).await
 }
 
@@ -189,8 +190,11 @@ async fn dns_verify_hash_inner(version: &str, asset: &str) -> Result<String> {
     use hickory_resolver::config::ResolverConfig;
     use hickory_resolver::{name_server::TokioConnectionProvider, Resolver};
     let query = format!("release-{asset}.{version}.releases.uhoh.it.");
-    let resolver: Resolver<_> = Resolver::builder_with_config(ResolverConfig::default(), TokioConnectionProvider::default())
-        .build();
+    let resolver: Resolver<_> = Resolver::builder_with_config(
+        ResolverConfig::default(),
+        TokioConnectionProvider::default(),
+    )
+    .build();
     let response = resolver
         .txt_lookup(query.clone())
         .await
@@ -222,8 +226,7 @@ async fn apply_update(uhoh_dir: &Path, binary: &[u8]) -> Result<()> {
     }
 
     // Use self-replace for atomic binary swap
-    self_replace::self_replace(&tmp_path)
-        .context("Failed to replace binary")?;
+    self_replace::self_replace(&tmp_path).context("Failed to replace binary")?;
     std::fs::remove_file(&tmp_path).ok();
 
     // Signal daemon to restart via trigger file
