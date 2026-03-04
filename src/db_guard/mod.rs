@@ -3,6 +3,7 @@ mod mysql;
 mod postgres;
 mod recovery;
 mod sqlite_guard;
+use std::collections::HashMap;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -16,11 +17,15 @@ pub use credentials::scrub_dsn;
 
 pub struct DbGuardSubsystem {
     healthy: bool,
+    sqlite_versions: HashMap<String, i64>,
 }
 
 impl DbGuardSubsystem {
     pub fn new() -> Self {
-        Self { healthy: true }
+        Self {
+            healthy: true,
+            sqlite_versions: HashMap::new(),
+        }
     }
 }
 
@@ -75,7 +80,7 @@ impl DbGuardSubsystem {
         for guard in guards {
             match guard.engine.as_str() {
                 "sqlite" => {
-                    sqlite_guard::tick_sqlite_guard(ctx, guard)?;
+                    sqlite_guard::tick_sqlite_guard(ctx, guard, &mut self.sqlite_versions)?;
                 }
                 "postgres" => {
                     postgres::tick_postgres_guard(ctx, guard)?;
@@ -84,6 +89,23 @@ impl DbGuardSubsystem {
                     mysql::tick_mysql_guard(ctx, guard)?;
                 }
                 _ => {}
+            }
+
+            // Global retention cleanup pass per guard.
+            let guard_base = ctx.uhoh_dir.join("db_guard").join(&guard.name);
+            let baseline = guard_base.join("baselines");
+            let recovery_dir = guard_base.join("recovery");
+            if baseline.exists() {
+                let _ = recovery::cleanup_retention(
+                    &baseline,
+                    ctx.config.db_guard.recovery_retention_days,
+                );
+            }
+            if recovery_dir.exists() {
+                let _ = recovery::cleanup_retention(
+                    &recovery_dir,
+                    ctx.config.db_guard.recovery_retention_days,
+                );
             }
         }
         Ok(())

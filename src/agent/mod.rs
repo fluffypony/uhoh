@@ -15,11 +15,17 @@ use crate::subsystem::{Subsystem, SubsystemContext, SubsystemHealth};
 
 pub struct AgentSubsystem {
     healthy: bool,
+    intercept_started: bool,
+    proxy_started: bool,
 }
 
 impl AgentSubsystem {
     pub fn new() -> Self {
-        Self { healthy: true }
+        Self {
+            healthy: true,
+            intercept_started: false,
+            proxy_started: false,
+        }
     }
 }
 
@@ -72,13 +78,26 @@ impl Subsystem for AgentSubsystem {
 impl AgentSubsystem {
     fn tick_agents(&mut self, ctx: &SubsystemContext, agents: &[AgentEntry]) -> Result<()> {
         if ctx.config.agent.intercept_enabled {
-            intercept::tick_session_tailers(ctx, agents)?;
+            if !self.intercept_started {
+                self.intercept_started = true;
+                let ctx_cl = ctx.clone();
+                let agents_cl = agents.to_vec();
+                std::thread::spawn(move || {
+                    let _ = intercept::run_session_tailers(&ctx_cl, &agents_cl);
+                });
+            }
         }
         if ctx.config.agent.audit_enabled {
             audit::tick_audit(ctx, agents)?;
         }
         if ctx.config.agent.mcp_proxy_enabled {
-            mcp_proxy::tick_proxy(ctx)?;
+            if !self.proxy_started {
+                self.proxy_started = true;
+                let ctx_cl = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = mcp_proxy::run_proxy(&ctx_cl);
+                });
+            }
         }
         Ok(())
     }
