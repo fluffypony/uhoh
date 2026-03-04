@@ -189,6 +189,61 @@ fn remove_systemd_user_unit() -> Result<()> {
     Ok(())
 }
 
+/// Cross-platform check whether the given PID is a running uhoh process.
+/// macOS: use `ps -p <pid> -o comm=` and check name contains "uhoh".
+/// Linux: read `/proc/<pid>/cmdline` and check name contains "uhoh".
+/// Windows: OpenProcess + GetModuleFileNameExW, check path contains "uhoh".
+pub fn is_uhoh_process_alive(pid: u32) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        match std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let name = String::from_utf8_lossy(&out.stdout).to_lowercase();
+                return name.contains("uhoh");
+            }
+            _ => return false,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{}/cmdline", pid);
+        match std::fs::read(&path) {
+            Ok(data) => {
+                let s = String::from_utf8_lossy(&data).to_lowercase();
+                return s.contains("uhoh");
+            }
+            Err(_) => return false,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::psapi::GetModuleFileNameExW;
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() { return false; }
+            let mut buf = [0u16; 260];
+            let len = GetModuleFileNameExW(handle, std::ptr::null_mut(), buf.as_mut_ptr(), 260);
+            CloseHandle(handle);
+            if len > 0 {
+                let name = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
+                return name.contains("uhoh");
+            }
+            return false;
+        }
+    }
+
+    #[allow(unreachable_code)]
+    false
+}
+
 #[cfg(target_os = "windows")]
 fn install_windows_task() -> Result<()> {
     let exe = std::env::current_exe()?;

@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::snapshot;
 use crate::watcher;
-use notify::{RecursiveMode, Watcher as _};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
 
 /// Check if a given PID is an alive uhoh process.
 pub fn is_uhoh_process_alive(pid: u32) -> bool {
@@ -166,6 +166,14 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
 
     let mut watcher_handle = watcher::start_watching(&watch_paths, event_tx.clone())?;
 
+    // Binary self-watch: watch the executable's parent and ~/.uhoh for .update-ready
+    let (bin_tx, bin_rx) = std::sync::mpsc::channel();
+    let bin_rx = std::sync::Arc::new(std::sync::Mutex::new(bin_rx));
+    let mut bin_watcher: RecommendedWatcher = notify::recommended_watcher(move |res| { let _ = bin_tx.send(res); })?;
+    let exe_path = std::env::current_exe()?;
+    if let Some(parent) = exe_path.parent() { let _ = bin_watcher.watch(parent, RecursiveMode::NonRecursive); }
+    let _ = bin_watcher.watch(&uhoh_dir, RecursiveMode::NonRecursive);
+
     // Per-project state
     let mut project_states: HashMap<String, ProjectDaemonState> = HashMap::new();
     for project in &projects {
@@ -213,6 +221,40 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
         tokio::select! {
             Some(event) = event_rx.recv() => {
                 handle_watch_event(&mut project_states, &event, &config);
+            }
+            // Binary change events
+            recv = tokio::task::spawn_blocking({
+                let bin_rx = bin_rx.clone();
+                move || {
+                    let guard = bin_rx.lock().unwrap();
+                    guard.recv()
+                }
+            }) => {
+                if let Ok(Ok(Ok(ev))) = recv { // JoinHandle -> RecvResult -> notify::Result<Event>
+                    let should_restart = ev.paths.iter().any(|p| {
+                        p == &exe_path || p == &uhoh_dir.join(".update-ready")
+                    });
+                    if should_restart {
+                        tracing::info!("Binary update detected; restarting daemon");
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::process::CommandExt;
+                            let args: Vec<String> = std::env::args().collect();
+                            let err = std::process::Command::new(&exe_path).args(&args[1..]).exec();
+                            anyhow::bail!("exec failed: {}", err);
+                        }
+                        #[cfg(windows)]
+                        {
+                            let args: Vec<String> = std::env::args().collect();
+                            let _child = std::process::Command::new(&exe_path)
+                                .args(&args[1..])
+                                .arg("--takeover")
+                                .arg(std::process::id().to_string())
+                                .spawn();
+                            break;
+                        }
+                    }
+                }
             }
             _ = debounce_interval.tick() => {
                 process_pending_snapshots(

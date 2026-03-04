@@ -131,6 +131,14 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    #[cfg(windows)]
+    if let Some(old_pid) = cli.takeover {
+        // Wait briefly for previous daemon to exit during self-update restart
+        for _ in 0..50 {
+            if !platform::is_uhoh_process_alive(old_pid) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
     let uhoh = ensure_uhoh_dir()?;
     let database = db::Database::open(&uhoh.join("uhoh.db"))?;
 

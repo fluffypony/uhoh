@@ -13,6 +13,10 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+
+    /// Internal: PID of previous daemon to wait for during update takeover (Windows)
+    #[arg(long, hide = true)]
+    pub takeover: Option<u32>,
 }
 
 #[derive(Subcommand)]

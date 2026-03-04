@@ -6,9 +6,16 @@ use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use std::time::Instant;
 
+#[derive(Clone, Debug)]
+enum Backend {
+    LlamaServer { binary: PathBuf },
+    MlxLm { python: PathBuf },
+}
+
 pub struct Sidecar {
     child: Option<Child>,
     port: u16,
+    backend: Backend,
 }
 
 impl Sidecar {
@@ -18,31 +25,10 @@ impl Sidecar {
         // We'll use a known range and find an available port
         let port = find_available_port()?;
 
-        let sidecar_binary = find_sidecar_binary(uhoh_dir)?;
-        let log_file = std::fs::File::create(uhoh_dir.join("sidecar.log"))?;
+        let backend = detect_backend(uhoh_dir)?;
+        let child = spawn_backend(&backend, model_path, uhoh_dir, port)?;
 
-        let child = Command::new(&sidecar_binary)
-            .args([
-                "--model",
-                &model_path.to_string_lossy(),
-                "--port",
-                &port.to_string(),
-                "--host",
-                "127.0.0.1",
-                "--ctx-size",
-                "8192", // Conservative context, not 131072
-                "--n-gpu-layers",
-                "999",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(log_file))
-            .spawn()
-            .context("Failed to spawn sidecar")?;
-
-        let sidecar = Sidecar {
-            child: Some(child),
-            port,
-        };
+        let sidecar = Sidecar { child: Some(child), port, backend };
 
         // Wait for sidecar to be ready with exponential backoff
         sidecar.wait_for_ready()?;
@@ -120,6 +106,7 @@ fn find_sidecar_binary(uhoh_dir: &Path) -> Result<PathBuf> {
 struct GlobalSidecar {
     child: Child,
     port: u16,
+    backend: Backend,
     last_used: Instant,
 }
 
@@ -148,30 +135,13 @@ pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs:
 
     // Spawn new sidecar
     let port = find_available_port()?;
-    let sidecar_binary = find_sidecar_binary(uhoh_dir)?;
-    let log_file = std::fs::File::create(uhoh_dir.join("sidecar.log"))?;
-    let child = Command::new(&sidecar_binary)
-        .args([
-            "--model",
-            &model_path.to_string_lossy(),
-            "--port",
-            &port.to_string(),
-            "--host",
-            "127.0.0.1",
-            "--ctx-size",
-            "8192",
-            "--n-gpu-layers",
-            "999",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(log_file))
-        .spawn()
-        .context("Failed to spawn sidecar")?;
+    let backend = detect_backend(uhoh_dir)?;
+    let child = spawn_backend(&backend, model_path, uhoh_dir, port)?;
 
     // Store globally and start idle watcher thread
     {
         let mut guard = GLOBAL_SIDECAR.lock().unwrap();
-        *guard = Some(GlobalSidecar { child, port, last_used: Instant::now() });
+        *guard = Some(GlobalSidecar { child, port, backend, last_used: Instant::now() });
     }
 
     let idle = idle_shutdown_secs.max(60);
@@ -199,4 +169,63 @@ pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs:
     });
 
     Ok(port)
+}
+
+fn detect_backend(uhoh_dir: &Path) -> Result<Backend> {
+    // Prefer MLX on Apple Silicon macOS when available
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        if Command::new("python3")
+            .args(["-c", "import mlx_lm; print('ok')"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Ok(Backend::MlxLm { python: PathBuf::from("python3") });
+        }
+    }
+    // Fallback to llama-server shipped in ~/.uhoh/sidecar (no PATH)
+    Ok(Backend::LlamaServer { binary: find_sidecar_binary(uhoh_dir)? })
+}
+
+fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, port: u16) -> Result<Child> {
+    let log_file = std::fs::File::create(uhoh_dir.join("sidecar.log"))?;
+    match backend {
+        Backend::LlamaServer { binary } => {
+            Command::new(binary)
+                .args([
+                    "--model",
+                    &model_path.to_string_lossy(),
+                    "--port",
+                    &port.to_string(),
+                    "--host",
+                    "127.0.0.1",
+                    "--ctx-size",
+                    "8192",
+                    "--n-gpu-layers",
+                    "999",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(log_file))
+                .spawn()
+                .context("Failed to spawn llama-server")
+        }
+        Backend::MlxLm { python } => {
+            Command::new(python)
+                .args([
+                    "-m",
+                    "mlx_lm.server",
+                    "--model",
+                    &model_path.to_string_lossy(),
+                    "--port",
+                    &port.to_string(),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(log_file))
+                .spawn()
+                .context("Failed to spawn mlx_lm server")
+        }
+    }
 }
