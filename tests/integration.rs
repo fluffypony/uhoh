@@ -1,7 +1,7 @@
 //! Basic integration tests for uhoh core functionality.
 
-use std::path::Path;
 use assert_cmd::prelude::*;
+use std::path::Path;
 use std::process::Command as TestCommand;
 
 #[test]
@@ -57,12 +57,40 @@ fn test_snapshot_creation_and_query() {
     assert_eq!(snap_id, 1);
 
     let files: Vec<uhoh::db::SnapFileEntry> = vec![
-        uhoh::db::SnapFileEntry { path: "src/main.rs".into(), hash: "hash1".into(), size: 100, stored: true, executable: false, mtime: None, storage_method: 1, is_symlink: false },
-        uhoh::db::SnapFileEntry { path: "README.md".into(), hash: "hash2".into(), size: 50, stored: true, executable: false, mtime: None, storage_method: 1, is_symlink: false },
+        uhoh::db::SnapFileEntry {
+            path: "src/main.rs".into(),
+            hash: "hash1".into(),
+            size: 100,
+            stored: true,
+            executable: false,
+            mtime: None,
+            storage_method: 1,
+            is_symlink: false,
+        },
+        uhoh::db::SnapFileEntry {
+            path: "README.md".into(),
+            hash: "hash2".into(),
+            size: 50,
+            stored: true,
+            executable: false,
+            mtime: None,
+            storage_method: 1,
+            is_symlink: false,
+        },
     ];
 
     let (rowid, _sid) = db
-        .create_snapshot("proj1", snap_id, "2025-01-01T00:00:00Z", "manual", "test", false, &files, &[], &[])
+        .create_snapshot(
+            "proj1",
+            snap_id,
+            "2025-01-01T00:00:00Z",
+            "manual",
+            "test",
+            false,
+            &files,
+            &[],
+            &[],
+        )
         .unwrap();
 
     let snap_files = db.get_snapshot_files(rowid).unwrap();

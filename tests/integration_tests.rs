@@ -37,7 +37,10 @@ fn test_pre_1970_mtime_roundtrip() {
 
     let test_cases = vec![
         (UNIX_EPOCH - Duration::from_secs(86400), -86400),
-        (UNIX_EPOCH - Duration::from_secs(365 * 86400), -(365 * 86400)),
+        (
+            UNIX_EPOCH - Duration::from_secs(365 * 86400),
+            -(365 * 86400),
+        ),
         (UNIX_EPOCH - Duration::from_millis(500), -1),
         (UNIX_EPOCH, 0),
         (UNIX_EPOCH + Duration::from_secs(1_000_000), 1_000_000),
@@ -137,15 +140,14 @@ async fn test_http_range_resume() {
                 let n = stream.read(&mut buf).await.unwrap();
                 let request = String::from_utf8_lossy(&buf[..n]);
 
-                let range_start = if let Some(range_line) =
-                    request.lines().find(|l| l.starts_with("Range:"))
-                {
-                    let bytes_eq = range_line.find("bytes=").unwrap() + 6;
-                    let dash = range_line.find('-').unwrap();
-                    range_line[bytes_eq..dash].parse::<usize>().unwrap_or(0)
-                } else {
-                    0
-                };
+                let range_start =
+                    if let Some(range_line) = request.lines().find(|l| l.starts_with("Range:")) {
+                        let bytes_eq = range_line.find("bytes=").unwrap() + 6;
+                        let dash = range_line.find('-').unwrap();
+                        range_line[bytes_eq..dash].parse::<usize>().unwrap_or(0)
+                    } else {
+                        0
+                    };
 
                 let slice = &data[range_start..];
 
