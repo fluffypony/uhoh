@@ -505,7 +505,6 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     }
                     break;
                 }
-                let _total_freed = 0u64; // unused placeholder; freed reported inside task
                 let current_projects = db_projects;
                 if !current_projects.is_empty() {
                     // Run compaction as a detached task; don't await inside main select loop

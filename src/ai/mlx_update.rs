@@ -40,7 +40,13 @@ pub async fn maybe_run_mlx_auto_update(
     }
 
     {
-        let mut guard = LAST_CHECK.lock().unwrap();
+        let mut guard = match LAST_CHECK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("MLX update check mutex poisoned, recovering state");
+                poisoned.into_inner()
+            }
+        };
         if let Some(last) = *guard {
             if last.elapsed().as_secs() < config.mlx.check_interval_hours.saturating_mul(3600) {
                 return Ok(());
@@ -67,7 +73,9 @@ pub async fn maybe_run_mlx_auto_update(
         "bin/python3"
     });
     let current = read_current_version(&python).await.unwrap_or_default();
-    let latest = fetch_latest_version().await.unwrap_or_else(|_| current.clone());
+    let latest = fetch_latest_version()
+        .await
+        .unwrap_or_else(|_| current.clone());
     if !current.is_empty() && !latest.is_empty() && current == latest {
         return Ok(());
     }

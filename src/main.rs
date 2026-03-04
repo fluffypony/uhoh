@@ -3,8 +3,6 @@ use clap::Parser;
 #[cfg(all(unix, target_os = "linux"))]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-#[cfg(unix)]
-use std::process::Command;
 use tracing::warn;
 use url::Url;
 
@@ -808,15 +806,13 @@ fn handle_db_commands(
             let connection_ref = uhoh::db_guard::scrub_dsn(dsn);
             database.add_db_guard(&guard_name, engine, &connection_ref, &tables_csv, mode)?;
             if let Some(creds) = extract_dsn_credentials(dsn) {
-                if let Err(err) =
-                    uhoh::db_guard::store_postgres_credentials_cli(&connection_ref, &creds)
-                {
-                    tracing::warn!(
-                        "Failed to persist encrypted credential for guard {}: {}",
-                        guard_name,
-                        err
-                    );
-                }
+                uhoh::db_guard::store_postgres_credentials_cli(&connection_ref, &creds)
+                    .with_context(|| {
+                        format!(
+                            "Failed to persist credentials for guard '{}'. Ensure UHOH_MASTER_KEY is set and valid before adding a DSN with embedded credentials",
+                            guard_name
+                        )
+                    })?;
             }
             println!("Added db guard '{guard_name}' ({engine})");
         }
@@ -1221,21 +1217,20 @@ fn apply_recovery_artifact(path: &str, uhoh_dir: &std::path::Path) -> Result<()>
         );
     }
 
+    if artifact_path
+        .symlink_metadata()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        anyhow::bail!(
+            "Recovery artifact must not be a symlink: {}",
+            artifact_path.display()
+        );
+    }
+
     let payload = std::fs::read(artifact_path)?;
     let decrypted = uhoh::db_guard::decrypt_recovery_payload(&payload, uhoh_dir)?;
     let sql = String::from_utf8(decrypted).context("Recovery artifact is not valid UTF-8 SQL")?;
-
-    #[cfg(unix)]
-    {
-        let status = Command::new("sh")
-            .arg("-c")
-            .arg(format!("cat '{}' >/dev/null", artifact_path.display()))
-            .status()
-            .context("Failed to verify artifact readability")?;
-        if !status.success() {
-            anyhow::bail!("Recovery artifact cannot be read safely");
-        }
-    }
 
     if !sql.contains("BEGIN;") || !sql.contains("COMMIT;") {
         anyhow::bail!("Recovery SQL must be transaction-wrapped (BEGIN/COMMIT)");

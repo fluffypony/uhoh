@@ -1288,12 +1288,7 @@ impl Database {
         let mut prev_hash = self.latest_ledger_hash_with_conn(&tx)?.unwrap_or_default();
         for event in events {
             let ts = chrono::Utc::now().to_rfc3339();
-            let chain_hash = event
-                .prev_hash
-                .clone()
-                .unwrap_or_else(|| {
-                    ledger::compute_event_chain_hash_with_id(&prev_hash, next_id, event, &ts)
-                });
+            let chain_hash = ledger::compute_event_chain_hash_with_id(&prev_hash, next_id, event, &ts);
             tx.execute(
                 "INSERT INTO event_ledger (
                     ts, source, event_type, severity, project_hash, agent_name, guard_name,
