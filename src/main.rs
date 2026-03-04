@@ -554,6 +554,11 @@ fn handle_db_commands(database: &db::Database, action: &DbAction) -> Result<()> 
                 anyhow::bail!("Unsupported DSN format");
             }
             let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
+
+            if engine == "postgres" {
+                install_postgres_monitoring_infrastructure(dsn, tables_csv.as_str())?;
+            }
+
             let connection_ref = uhoh::db_guard::scrub_dsn(dsn);
             database.add_db_guard(&guard_name, engine, &connection_ref, &tables_csv, mode)?;
             println!("Added db guard '{guard_name}' ({engine})");
@@ -620,6 +625,163 @@ fn handle_db_commands(database: &db::Database, action: &DbAction) -> Result<()> 
         }
     }
     Ok(())
+}
+
+fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build tokio runtime for postgres guard install")?;
+
+    rt.block_on(async move {
+        let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        client
+            .batch_execute(
+                "
+                CREATE TABLE IF NOT EXISTS _uhoh_ddl_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_tag TEXT NOT NULL,
+                    object_type TEXT,
+                    schema_name TEXT,
+                    object_identity TEXT,
+                    payload TEXT,
+                    occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+
+                CREATE TABLE IF NOT EXISTS _uhoh_delete_counts (
+                    table_name TEXT NOT NULL,
+                    txid BIGINT NOT NULL DEFAULT txid_current(),
+                    delete_count INTEGER NOT NULL DEFAULT 0,
+                    ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (table_name, txid)
+                );
+
+                CREATE OR REPLACE FUNCTION _uhoh_ddl_handler() RETURNS event_trigger AS $$
+                DECLARE rec RECORD;
+                DECLARE payload_json TEXT;
+                BEGIN
+                    FOR rec IN SELECT * FROM pg_event_trigger_dropped_objects() LOOP
+                        payload_json := json_build_object(
+                            'event_tag', tg_tag,
+                            'object_type', rec.object_type,
+                            'schema_name', rec.schema_name,
+                            'object_identity', rec.object_identity
+                        )::text;
+
+                        INSERT INTO _uhoh_ddl_events (
+                            event_tag,
+                            object_type,
+                            schema_name,
+                            object_identity,
+                            payload
+                        ) VALUES (
+                            tg_tag,
+                            rec.object_type,
+                            rec.schema_name,
+                            rec.object_identity,
+                            payload_json
+                        );
+
+                        PERFORM pg_notify('uhoh_events', payload_json);
+                    END LOOP;
+                END;
+                $$ LANGUAGE plpgsql;
+
+                DROP EVENT TRIGGER IF EXISTS uhoh_ddl_drop;
+                CREATE EVENT TRIGGER uhoh_ddl_drop ON sql_drop
+                    EXECUTE FUNCTION _uhoh_ddl_handler();
+                ",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+
+        let tables = parse_watched_tables(tables_csv);
+        if tables.is_empty() {
+            let rows = client
+                .query(
+                    "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = current_schema()",
+                    &[],
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+            let table_names: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
+            for table in table_names {
+                install_delete_counter_trigger(&client, &table).await?;
+            }
+            return Ok(());
+        }
+        for table in tables {
+            install_delete_counter_trigger(&client, &table).await?;
+        }
+
+        Ok(())
+    })
+}
+
+async fn install_delete_counter_trigger(
+    client: &tokio_postgres::Client,
+    table: &str,
+) -> Result<()> {
+    let fn_ident = format!("_uhoh_count_deletes_{}", sanitize_ident(table));
+    let trigger_ident = format!("uhoh_delete_counter_{}", sanitize_ident(table));
+
+    let install_sql = format!(
+        "
+        CREATE OR REPLACE FUNCTION {fn_ident}() RETURNS trigger AS $$
+        BEGIN
+            INSERT INTO _uhoh_delete_counts (table_name, txid, delete_count)
+            VALUES ('{table}', txid_current(), 1)
+            ON CONFLICT (table_name, txid)
+            DO UPDATE SET delete_count = _uhoh_delete_counts.delete_count + 1,
+                          ts = now();
+            RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        DROP TRIGGER IF EXISTS {trigger_ident} ON \"{table}\";
+        CREATE TRIGGER {trigger_ident}
+            BEFORE DELETE ON \"{table}\"
+            FOR EACH ROW EXECUTE FUNCTION {fn_ident}();
+        "
+    );
+
+    client
+        .batch_execute(&install_sql)
+        .await
+        .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+    Ok(())
+}
+
+fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
+    if tables_csv.trim() == "*" {
+        return Vec::new();
+    }
+    tables_csv
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .collect()
+}
+
+fn sanitize_ident(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Result<()> {

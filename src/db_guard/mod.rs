@@ -14,6 +14,7 @@ use crate::event_ledger::new_event;
 use crate::subsystem::{Subsystem, SubsystemContext, SubsystemHealth};
 
 pub use credentials::scrub_dsn;
+pub use credentials::scrub_error_message;
 
 pub struct DbGuardSubsystem {
     healthy: bool,
