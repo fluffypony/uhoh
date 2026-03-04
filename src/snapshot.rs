@@ -36,6 +36,7 @@ pub fn create_snapshot(
     // Walk directory respecting ignore rules
     let walker = ignore_rules::build_walker(project_path);
     let mut current_files: HashMap<String, (PathBuf, std::fs::Metadata)> = HashMap::new();
+    let mut total_project_size: u64 = 0;
 
     // Pre-count entries to optionally show a progress bar for large scans
     let mut entries: Vec<ignore::DirEntry> = Vec::new();
@@ -76,6 +77,7 @@ pub fn create_snapshot(
 
         match path.metadata() {
             Ok(meta) => {
+                total_project_size = total_project_size.saturating_add(meta.len());
                 current_files.insert(rel_path, (path.to_path_buf(), meta));
             }
             Err(e) => {
@@ -305,26 +307,17 @@ pub fn create_snapshot(
     );
 
     // Enforce storage limits after snapshot
-    enforce_storage_limit(database, project_path, project_hash, &config)?;
+    enforce_storage_limit(database, total_project_size, project_hash, &config)?;
 
     Ok(Some(snapshot_id))
 }
 
 fn enforce_storage_limit(
     database: &Database,
-    project_path: &Path,
+    project_size: u64,
     project_hash: &str,
     config: &Config,
 ) -> Result<()> {
-    // Calculate project directory size
-    let mut project_size = 0u64;
-    for entry in ignore::WalkBuilder::new(project_path).build() {
-        if let Ok(e) = entry {
-            if let Ok(meta) = e.metadata() {
-                if meta.is_file() { project_size += meta.len(); }
-            }
-        }
-    }
     let max_blob_size = std::cmp::max(
         (project_size as f64 * config.storage.storage_limit_fraction) as u64,
         config.storage.storage_min_bytes,

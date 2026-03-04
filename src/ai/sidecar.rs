@@ -23,9 +23,11 @@ impl Sidecar {
     pub fn spawn(model_path: &Path, uhoh_dir: &Path) -> Result<Self> {
         // Bind to port 0 = OS assigns an ephemeral port
         // We'll use a known range and find an available port
-        let port = find_available_port()?;
+        let (listener, port) = find_available_port_listener()?;
 
         let backend = detect_backend(uhoh_dir)?;
+        // Release listener just before spawn to minimize race
+        drop(listener);
         let child = spawn_backend(&backend, model_path, uhoh_dir, port)?;
 
         let sidecar = Sidecar { child: Some(child), port };
@@ -77,9 +79,10 @@ impl Drop for Sidecar {
     }
 }
 
-fn find_available_port() -> Result<u16> {
+fn find_available_port_listener() -> Result<(std::net::TcpListener, u16)> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
+    let port = listener.local_addr()?.port();
+    Ok((listener, port))
 }
 
 fn find_sidecar_binary(uhoh_dir: &Path) -> Result<PathBuf> {
@@ -133,8 +136,9 @@ pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs:
     }
 
     // Spawn new sidecar
-    let port = find_available_port()?;
+    let (listener, port) = find_available_port_listener()?;
     let backend = detect_backend(uhoh_dir)?;
+    drop(listener);
     let child = spawn_backend(&backend, model_path, uhoh_dir, port)?;
 
     // Store globally and start idle watcher thread

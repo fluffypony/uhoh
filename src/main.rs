@@ -18,11 +18,7 @@ use uhoh::restore;
 use uhoh::snapshot;
 use uhoh::update;
 
-fn uhoh_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("Could not determine home directory")
-        .join(".uhoh")
-}
+fn uhoh_dir() -> PathBuf { uhoh::platform::uhoh_dir() }
 
 fn ensure_uhoh_dir() -> Result<PathBuf> {
     let dir = uhoh_dir();
@@ -222,6 +218,13 @@ async fn main() -> Result<()> {
                     let pin = if s.pinned { " 📌" } else { "" };
                     let msg = if s.message.is_empty() { String::new() } else { format!(" — {}", s.message) };
                     println!("  {} [{}] {}{}{}", s.timestamp, id_str, s.trigger, pin, msg);
+                    // Show files with storage info
+                    let files = database.get_snapshot_files(s.rowid)?;
+                    for f in files.iter().take(10) {
+                        let method = if f.stored { "stored" } else { "none" };
+                        println!("       {:>8}  {:>6}  {}", f.size, method, f.path);
+                    }
+                    if files.len() > 10 { println!("       ... and {} more", files.len() - 10); }
                 }
             }
         }
@@ -335,7 +338,12 @@ async fn main() -> Result<()> {
             let total: u64 = projects.iter().filter_map(|p| database.snapshot_count(&p.hash).ok()).sum();
             println!("Snapshots: {}", total);
             let blobs = uhoh.join("blobs");
-            if blobs.exists() { println!("Blob storage: {:.1} MB", dir_size(&blobs) as f64 / 1_048_576.0); }
+            if blobs.exists() {
+                let size = tokio::task::spawn_blocking({ let blobs = blobs.clone(); move || dir_size(&blobs) })
+                    .await
+                    .unwrap_or(0);
+                println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0);
+            }
             let cfg = config::Config::load(&uhoh.join("config.toml")).unwrap_or_default();
             println!("AI: {}", if cfg.ai.enabled { "enabled" } else { "disabled" });
         }

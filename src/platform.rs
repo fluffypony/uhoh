@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-fn uhoh_dir() -> PathBuf {
+pub fn uhoh_dir() -> PathBuf {
     // Keep a single definition consistent with main; both resolve to ~/.uhoh
     dirs::home_dir()
         .expect("Cannot determine home directory")

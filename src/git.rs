@@ -28,6 +28,19 @@ pub fn cmd_gitstash(
     let files = database.get_snapshot_files(snap.rowid)?;
     let blob_root = uhoh_dir.join("blobs");
 
+    // Warn about unstored files before proceeding
+    let unstored: Vec<&str> = files.iter().filter(|f| !f.stored).map(|f| f.path.as_str()).collect();
+    if !unstored.is_empty() {
+        tracing::warn!("WARNING: {} file(s) are not stored and will be omitted from the stash.", unstored.len());
+        for p in unstored.iter().take(10) { tracing::warn!("  - {} (not recoverable)", p); }
+        if unstored.len() > 10 { tracing::warn!("  ... and {} more", unstored.len() - 10); }
+        eprintln!(
+            "⚠ {} file(s) are not recoverable and will be omitted from the stash. \
+             Applying this stash may effectively delete those files from your working tree.",
+            unstored.len()
+        );
+    }
+
     // Step 1: Create git blobs for each file in the snapshot
     let mut tree_entries: Vec<(String, String)> = Vec::new(); // (path, git_blob_hash)
 
@@ -128,9 +141,10 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
     let hook_path = hooks_dir.join("pre-commit");
 
     // Use absolute path to uhoh binary (prevents PATH hijacking)
-    let exe_path = std::env::current_exe()
-        .context("Cannot determine uhoh binary path")?;
-    let exe_str = exe_path.to_string_lossy();
+    let exe_str = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => "uhoh".to_string(), // fallback to PATH
+    };
 
     let uhoh_hook_content = format!(
         r#"
