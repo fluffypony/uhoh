@@ -121,12 +121,17 @@ fn poll_schema_snapshot(
     stored_credentials: Option<&CredentialMaterial>,
 ) -> Result<MysqlSnapshot> {
     let parsed = parse_mysql_ref(connection_ref)?;
-    let effective_user = stored_credentials
+    let env_credentials = resolve_mysql_env_credentials();
+    let effective_user = env_credentials
+        .as_ref()
         .and_then(|creds| creds.username.clone())
+        .or_else(|| stored_credentials.and_then(|creds| creds.username.clone()))
         .or(parsed.user.clone())
         .ok_or_else(|| anyhow::anyhow!("MySQL connection ref must include user@host"))?;
-    let effective_password = stored_credentials
+    let effective_password = env_credentials
+        .as_ref()
         .and_then(|creds| creds.password.clone())
+        .or_else(|| stored_credentials.and_then(|creds| creds.password.clone()))
         .or(parsed.password.clone());
 
     let mut defaults_guard: Option<NamedTempFile> = None;
@@ -249,5 +254,23 @@ fn parse_mysql_ref(connection_ref: &str) -> Result<ParsedMysqlRef> {
         user,
         password,
         database,
+    })
+}
+
+fn resolve_mysql_env_credentials() -> Option<CredentialMaterial> {
+    let user = std::env::var("UHOH_MYSQL_USER").ok();
+    let password = std::env::var("UHOH_MYSQL_PASSWORD").ok();
+    if user.as_deref().map(str::trim).unwrap_or_default().is_empty()
+        && password
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return None;
+    }
+    Some(CredentialMaterial {
+        username: user.filter(|v| !v.trim().is_empty()),
+        password: password.filter(|v| !v.trim().is_empty()),
     })
 }
