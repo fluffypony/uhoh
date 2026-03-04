@@ -3,152 +3,549 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>uhoh - Time Machine</title>
+  <title>uhoh - Time Machine UI</title>
   <style>
     :root {
-      --bg: #0b1216;
-      --panel: #122129;
-      --panel-2: #17313d;
-      --ink: #e5f5fb;
-      --muted: #8db0bf;
-      --accent: #5bd3ff;
-      --accent-2: #ffd166;
-      --danger: #ff6b6b;
-      --ok: #77dd77;
-      --mono: "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
-      --ui: "Avenir Next", "Segoe UI", sans-serif;
+      --bg-app: #0a0a0a;
+      --bg-panel: rgba(23, 23, 23, 0.7);
+      --bg-panel-header: rgba(31, 31, 31, 0.9);
+      --bg-input: rgba(10, 10, 10, 0.8);
+      --bg-hover: rgba(192, 132, 252, 0.12);
+      --bg-selection: rgba(168, 85, 247, 0.15);
+      --border-dark: #2e2a41;
+      --border-light: #5b5478;
+      --text-primary: #e9e4ff;
+      --text-secondary: #94a3b8;
+      --text-muted: #5b5478;
+      --accent-blue: #d8b4fe;
+      --accent-purple: #c084fc;
+      --accent-purple-dim: #2e2a41;
+      --status-new: #d8b4fe;
+      --status-mod: #c084fc;
+      --status-del: #9333ea;
+      --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+      --space-sm: 4px;
+      --space-md: 8px;
+      --space-lg: 12px;
+      --glow-blue: 0 0 6px rgba(216, 180, 254, 0.4);
     }
 
-    * { box-sizing: border-box; }
+    * {
+      box-sizing: border-box;
+      user-select: none;
+    }
 
     body {
       margin: 0;
-      background:
-        radial-gradient(circle at 10% 10%, rgba(91, 211, 255, 0.15), transparent 50%),
-        radial-gradient(circle at 90% 90%, rgba(255, 209, 102, 0.12), transparent 45%),
-        var(--bg);
-      color: var(--ink);
-      font-family: var(--ui);
+      padding: 0;
+      background-color: var(--bg-app);
+      background-image:
+        radial-gradient(circle at 50% 30%, rgba(216, 180, 254, 0.05) 0%, transparent 60%),
+        radial-gradient(circle at 80% 80%, rgba(192, 132, 252, 0.05) 0%, transparent 50%);
+      color: var(--text-primary);
+      font-family: var(--font-ui);
+      font-size: 11px;
       height: 100vh;
       overflow: hidden;
-      display: grid;
-      grid-template-rows: 48px 1fr 220px;
+      display: flex;
+      flex-direction: column;
+      text-shadow: 0 1px 1px rgba(0, 0, 0, 0.3);
     }
 
-    header {
+    .grow {
+      flex-grow: 1;
+    }
+
+    .icon {
+      width: 14px;
+      height: 14px;
+      fill: currentColor;
+      opacity: 0.7;
+    }
+
+    ::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+      background: var(--bg-panel);
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border-light);
+      border: 2px solid var(--bg-panel);
+      border-radius: 5px;
+    }
+
+    ::-webkit-scrollbar-corner {
+      background: var(--bg-panel);
+    }
+
+    #app-header {
+      height: 38px;
+      background: #171717;
+      border-bottom: 1px solid var(--border-dark);
       display: flex;
       align-items: center;
-      gap: 12px;
-      padding: 0 12px;
-      border-bottom: 1px solid #20414f;
-      background: rgba(18, 33, 41, 0.9);
-      backdrop-filter: blur(8px);
+      padding: 0 var(--space-md);
+      gap: var(--space-lg);
+      font-weight: 500;
+      z-index: 10;
     }
 
     .logo {
       font-weight: 700;
-      letter-spacing: 0.08em;
-      color: var(--accent);
+      color: var(--accent-purple);
+      letter-spacing: 1px;
+      margin-right: var(--space-md);
       text-transform: uppercase;
-      font-size: 13px;
+      font-size: 14px;
     }
 
-    button, select, input {
-      background: var(--panel-2);
-      color: var(--ink);
-      border: 1px solid #2d5160;
-      border-radius: 6px;
-      padding: 6px 10px;
-      font-size: 12px;
+    .dropdown-trigger {
+      display: flex;
+      align-items: center;
+      gap: var(--space-sm);
+      cursor: pointer;
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--border-dark);
+      background: rgba(255, 255, 255, 0.03);
+      transition: all 0.2s;
+      color: var(--text-secondary);
+      max-width: 300px;
     }
 
-    .btn-danger { border-color: #6a2f2f; color: #ffd8d8; }
-    .btn-primary { border-color: #2e6b82; }
+    .dropdown-trigger:hover {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-primary);
+    }
+
+    #projectSelect {
+      appearance: none;
+      border: 0;
+      outline: none;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      width: 100%;
+      min-width: 150px;
+      cursor: pointer;
+    }
+
+    #projectSelect option {
+      color: #fff;
+      background: #171717;
+    }
+
+    .time-display {
+      font-family: var(--font-mono);
+      color: var(--accent-blue);
+      letter-spacing: 1px;
+      background: rgba(0, 0, 0, 0.2);
+      padding: 2px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border-dark);
+      min-width: 96px;
+      text-align: center;
+    }
+
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: var(--space-sm);
+      border-left: 1px solid var(--border-dark);
+      padding-left: var(--space-lg);
+    }
+
+    .btn {
+      background: transparent;
+      border: 1px solid var(--border-light);
+      color: var(--text-secondary);
+      padding: 4px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 10px;
+      transition: all 0.2s;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-weight: 600;
+    }
+
+    .btn:hover {
+      background: var(--bg-hover);
+      border-color: var(--accent-purple);
+      color: var(--text-primary);
+    }
+
+    .btn-primary {
+      background: var(--accent-purple-dim);
+      color: var(--text-primary);
+      border: 1px solid var(--border-light);
+    }
+
+    .btn-primary:hover {
+      background: var(--border-light);
+      border-color: var(--accent-purple);
+    }
+
+    .btn-text {
+      color: var(--text-muted);
+      border-color: transparent;
+      text-transform: uppercase;
+    }
+
+    .notification-bar {
+      background: #1f1f1f;
+      color: var(--text-secondary);
+      padding: 6px 16px;
+      font-size: 10px;
+      display: none;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border-dark);
+    }
+
+    .notification-bar.show {
+      display: flex;
+    }
+
+    .dry-run-info strong {
+      color: var(--accent-purple);
+    }
 
     #workspace {
-      display: grid;
-      grid-template-columns: 320px 1fr;
-      min-height: 0;
+      display: flex;
+      flex-grow: 1;
+      overflow: hidden;
+      min-height: 200px;
+    }
+
+    #file-browser {
+      width: 300px;
+      min-width: 220px;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border-dark);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .panel-header {
+      height: 30px;
+      display: flex;
+      align-items: center;
+      padding: 0 var(--space-md);
+      background: var(--bg-panel-header);
+      border-bottom: 1px solid var(--border-dark);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    .search-box {
+      padding: var(--space-md);
+      background: rgba(0, 0, 0, 0.1);
+    }
+
+    .search-input {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border-dark);
+      color: var(--text-primary);
+      padding: 6px 10px;
+      font-size: 11px;
+      border-radius: 4px;
+    }
+
+    .search-input:focus {
+      outline: none;
+      border-color: var(--accent-blue);
     }
 
     #tree {
-      border-right: 1px solid #20414f;
-      background: rgba(18, 33, 41, 0.7);
-      overflow: auto;
-      padding: 8px;
-      font-size: 12px;
+      flex-grow: 1;
+      overflow-y: auto;
+      padding: var(--space-sm) 0;
+    }
+
+    .tree-item {
+      display: flex;
+      align-items: center;
+      padding: 4px var(--space-md);
+      gap: 6px;
+      cursor: pointer;
+      color: var(--text-secondary);
+      border-left: 2px solid transparent;
+      transition: all 0.1s;
+    }
+
+    .tree-item:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .tree-item.selected {
+      background: var(--bg-selection);
+      border-left: 2px solid var(--accent-blue);
+      color: var(--text-primary);
+    }
+
+    .tree-item small {
+      margin-left: auto;
+      color: var(--text-muted);
+      font-size: 10px;
+    }
+
+    #diff-viewer {
+      flex-grow: 1;
+      background: #171717;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .tab-bar {
+      display: flex;
+      background: #1f1f1f;
+      border-bottom: 1px solid var(--border-dark);
+      height: 32px;
+      align-items: flex-end;
+      padding-left: 8px;
+    }
+
+    .tab {
+      padding: 0 16px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      color: var(--text-muted);
+      font-size: 11px;
+      border-bottom: 2px solid transparent;
+    }
+
+    .tab.active {
+      color: var(--accent-purple);
+      border-bottom: 2px solid var(--accent-purple);
+      background: rgba(255, 255, 255, 0.02);
     }
 
     #content {
-      min-height: 0;
+      flex-grow: 1;
       overflow: auto;
-      padding: 12px;
-      font-family: var(--mono);
+      font-family: var(--font-mono);
       font-size: 12px;
-      line-height: 1.5;
+      line-height: 1.6;
+      padding: var(--space-lg);
+      color: var(--text-secondary);
       user-select: text;
-      white-space: pre-wrap;
     }
 
-    .row {
-      padding: 4px 8px;
-      border-radius: 4px;
-      cursor: pointer;
+    .code-line {
       display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 2px;
     }
 
-    .row:hover { background: rgba(91, 211, 255, 0.12); }
-    .row.active { background: rgba(91, 211, 255, 0.2); }
-    .row small { color: var(--muted); }
+    .line-num {
+      width: 40px;
+      text-align: right;
+      padding-right: 15px;
+      color: var(--text-muted);
+      user-select: none;
+      opacity: 0.4;
+      flex-shrink: 0;
+    }
+
+    .line-code {
+      flex-grow: 1;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .diff-add {
+      background: rgba(216, 180, 254, 0.08);
+    }
+
+    .diff-add .line-num {
+      border-left: 2px solid var(--status-new);
+      color: var(--status-new);
+    }
+
+    .diff-rem {
+      background: rgba(147, 51, 234, 0.08);
+    }
+
+    .diff-rem .line-num {
+      border-left: 2px solid var(--status-del);
+      color: var(--status-del);
+    }
+
+    .empty-state {
+      color: var(--text-muted);
+      padding: 14px;
+      border-left: 2px solid var(--border-dark);
+      background: rgba(0, 0, 0, 0.15);
+    }
 
     #timeline {
-      border-top: 1px solid #20414f;
-      background: rgba(18, 33, 41, 0.85);
-      overflow: auto;
-      padding: 8px;
-      font-size: 12px;
+      height: 220px;
+      background: #171717;
+      border-top: 1px solid var(--border-dark);
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    .time-ruler {
+      height: 24px;
+      background: #171717;
+      border-bottom: 1px solid var(--border-dark);
+      display: flex;
+      align-items: center;
+      color: var(--text-muted);
+      font-size: 9px;
+      font-family: var(--font-mono);
+      padding-left: 12px;
+    }
+
+    .timeline-controls {
+      height: 32px;
+      display: flex;
+      align-items: center;
+      padding: 0 var(--space-md);
+      border-bottom: 1px solid var(--border-dark);
+      gap: var(--space-lg);
+      background: rgba(0, 0, 0, 0.1);
+    }
+
+    .timeline-track-area {
+      flex-grow: 1;
+      position: relative;
+      overflow-y: auto;
+      background-image: linear-gradient(var(--border-dark) 1px, transparent 1px);
+      background-size: 100% 30px;
+      padding: 8px 12px;
+    }
+
+    .event-row {
+      min-height: 30px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 6px;
+      flex-wrap: wrap;
     }
 
     .event {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      margin-right: 8px;
-      margin-bottom: 8px;
-      background: rgba(23, 49, 61, 0.8);
-      border: 1px solid #2a5d71;
-      padding: 6px 8px;
-      border-radius: 999px;
+      width: 10px;
+      height: 10px;
+      background: var(--border-dark);
+      transform: rotate(45deg);
+      border: 1px solid var(--border-light);
       cursor: pointer;
+      transition: all 0.2s;
     }
 
-    .event.active { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(91, 211, 255, 0.3); }
-    .muted { color: var(--muted); }
-    .danger { color: var(--danger); }
-    .ok { color: var(--ok); }
-    .hl { background: rgba(255, 209, 102, 0.2); }
+    .event.active {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+      transform: rotate(45deg) scale(1.2);
+      box-shadow: var(--glow-blue);
+    }
+
+    .event-label {
+      color: var(--text-secondary);
+      font-size: 10px;
+      max-width: 230px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-right: 8px;
+    }
+
+    .muted {
+      color: var(--text-muted);
+    }
+
+    .danger {
+      color: var(--status-del);
+    }
+
+    .ok {
+      color: var(--status-new);
+    }
+
+    @media (max-width: 900px) {
+      #workspace {
+        flex-direction: column;
+      }
+
+      #file-browser {
+        width: 100%;
+      }
+
+      #timeline {
+        height: 190px;
+      }
+    }
   </style>
 </head>
 <body>
-  <header>
+  <header id="app-header">
     <div class="logo">uhoh</div>
-    <select id="projectSelect"></select>
-    <button id="refreshBtn" class="btn-primary">Refresh</button>
-    <button id="snapshotBtn" class="btn-primary">Snapshot</button>
-    <button id="restoreBtn" class="btn-danger">Restore</button>
-    <input id="searchInput" placeholder="Search snapshots" />
-    <span id="status" class="muted">Ready</span>
+
+    <div class="dropdown-trigger">
+      <select id="projectSelect"></select>
+      <span style="font-size: 8px; opacity: 0.5;">▼</span>
+    </div>
+
+    <div id="clock" class="time-display">--:--:--</div>
+
+    <div class="grow"></div>
+
+    <div class="toolbar-group">
+      <span id="status" class="btn-text">Ready</span>
+    </div>
+
+    <div class="toolbar-group">
+      <button id="refreshBtn" class="btn">Refresh</button>
+      <button id="snapshotBtn" class="btn btn-primary">Snapshot</button>
+      <button id="restoreBtn" class="btn">Restore State...</button>
+    </div>
   </header>
 
+  <div id="notificationBar" class="notification-bar">
+    <span id="notificationText" class="dry-run-info"></span>
+    <button id="confirmRestoreBtn" class="btn">Confirm</button>
+  </div>
+
   <section id="workspace">
-    <aside id="tree"></aside>
-    <main id="content">Select a file to inspect changes</main>
+    <aside id="file-browser">
+      <div class="panel-header">Project Explorer</div>
+      <div class="search-box">
+        <input id="searchInput" type="text" class="search-input" placeholder="Search files or history..." />
+      </div>
+      <div id="tree"></div>
+    </aside>
+
+    <main id="diff-viewer">
+      <div class="tab-bar">
+        <div class="tab active">Diff View</div>
+        <div class="tab">Raw Source</div>
+        <div class="tab">Timeline</div>
+      </div>
+      <div id="content" class="empty-state">Select a file to inspect changes</div>
+    </main>
   </section>
 
-  <section id="timeline"></section>
+  <section id="timeline">
+    <div class="time-ruler">Snapshot Timeline</div>
+    <div class="timeline-controls">
+      <span class="btn-text">SNAP: ON</span>
+      <div class="grow"></div>
+      <span class="btn-text">LIVE</span>
+    </div>
+    <div id="timelineEvents" class="timeline-track-area"></div>
+  </section>
 
   <script>
     const API = '/api/v1';
@@ -160,6 +557,7 @@
       previous: null,
       files: [],
       selectedPath: null,
+      pendingRestore: null,
     };
 
     const statusEl = document.getElementById('status');
@@ -167,6 +565,28 @@
     function setStatus(text, cls = 'muted') {
       statusEl.className = cls;
       statusEl.textContent = text;
+    }
+
+    function updateClock() {
+      const now = new Date();
+      const hh = String(now.getHours()).padStart(2, '0');
+      const mm = String(now.getMinutes()).padStart(2, '0');
+      const ss = String(now.getSeconds()).padStart(2, '0');
+      document.getElementById('clock').textContent = `${hh}:${mm}:${ss}`;
+    }
+
+    function showDryRun(result) {
+      const bar = document.getElementById('notificationBar');
+      const text = document.getElementById('notificationText');
+      const modifyCount = result.files_modified || 0;
+      const deleteCount = result.files_deleted || 0;
+      text.innerHTML = `<strong>DRY RUN:</strong> Restoring snapshot '${escapeHtml(result.snapshot_id)}' will modify ${modifyCount} file(s) and delete ${deleteCount} file(s).`;
+      bar.classList.add('show');
+    }
+
+    function hideDryRun() {
+      state.pendingRestore = null;
+      document.getElementById('notificationBar').classList.remove('show');
     }
 
     function authHeaders(base = {}) {
@@ -208,6 +628,8 @@
 
     async function init() {
       bindEvents();
+      updateClock();
+      setInterval(updateClock, 1000);
       await loadProjects();
       connectWs();
     }
@@ -218,6 +640,7 @@
       document.getElementById('snapshotBtn').addEventListener('click', createSnapshot);
       document.getElementById('restoreBtn').addEventListener('click', restoreSnapshot);
       document.getElementById('searchInput').addEventListener('input', onSearch);
+      document.getElementById('confirmRestoreBtn').addEventListener('click', confirmRestore);
     }
 
     async function loadProjects() {
@@ -236,18 +659,25 @@
       if (state.projects.length > 0) {
         state.project = state.projects[0];
         await loadSnapshots();
+      } else {
+        const content = document.getElementById('content');
+        content.className = 'empty-state';
+        content.textContent = 'No projects found';
       }
       setStatus('Ready', 'ok');
     }
 
     async function onProjectChange(e) {
       const hash = e.target.value;
-      state.project = state.projects.find(p => p.project_hash === hash) || null;
+      hideDryRun();
+      state.project = state.projects.find((p) => p.project_hash === hash) || null;
       await loadSnapshots();
     }
 
     async function loadSnapshots() {
-      if (!state.project) return;
+      if (!state.project) {
+        return;
+      }
       setStatus('Loading snapshots');
       const data = await api(`${API}/projects/${state.project.project_hash}/snapshots?limit=200`);
       state.snapshots = data.snapshots || [];
@@ -259,12 +689,16 @@
     }
 
     async function loadFiles() {
-      if (!state.project || !state.snapshot) return;
+      if (!state.project || !state.snapshot) {
+        return;
+      }
       const data = await api(`${API}/projects/${state.project.project_hash}/snapshots/${state.snapshot.id}/files`);
       state.files = data.flat_files || [];
       renderTree();
       if (state.files.length === 0) {
-        document.getElementById('content').textContent = 'No files in this snapshot';
+        const content = document.getElementById('content');
+        content.className = 'empty-state';
+        content.textContent = 'No files in this snapshot';
       }
     }
 
@@ -272,14 +706,22 @@
       const tree = document.getElementById('tree');
       tree.innerHTML = '';
       const search = document.getElementById('searchInput').value.toLowerCase().trim();
-      const files = state.files.filter(f => !search || f.path.toLowerCase().includes(search));
-      files.forEach(file => {
+      const files = state.files.filter((f) => !search || f.path.toLowerCase().includes(search));
+
+      files.forEach((file) => {
         const row = document.createElement('div');
-        row.className = 'row' + (state.selectedPath === file.path ? ' active' : '');
-        row.innerHTML = `<span>📄</span><span>${escapeHtml(file.path)}</span><small>${file.size}b</small>`;
+        row.className = 'tree-item' + (state.selectedPath === file.path ? ' selected' : '');
+        row.innerHTML = `<svg class="icon" viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6z"></path></svg><span>${escapeHtml(file.path)}</span><small>${file.size}b</small>`;
         row.onclick = () => selectFile(file.path);
         tree.appendChild(row);
       });
+
+      if (files.length === 0) {
+        const row = document.createElement('div');
+        row.className = 'tree-item';
+        row.textContent = 'No matching files';
+        tree.appendChild(row);
+      }
     }
 
     async function selectFile(path) {
@@ -289,94 +731,132 @@
     }
 
     async function renderDiff(path) {
-      if (!state.project || !state.snapshot) return;
+      if (!state.project || !state.snapshot) {
+        return;
+      }
       const params = new URLSearchParams();
       params.set('file', path);
-      if (state.previous) params.set('against', state.previous.id);
+      if (state.previous) {
+        params.set('against', state.previous.id);
+      }
       const data = await api(`${API}/projects/${state.project.project_hash}/snapshots/${state.snapshot.id}/diff?${params.toString()}`);
       const diffs = data.diffs || [];
       if (diffs.length === 0) {
-        document.getElementById('content').textContent = 'No diff for selected file';
+        const content = document.getElementById('content');
+        content.className = 'empty-state';
+        content.textContent = 'No diff for selected file';
         return;
       }
 
       let out = '';
-      diffs.forEach(diff => {
+      let lineNo = 1;
+      diffs.forEach((diff) => {
         if (diff.binary) {
-          out += `binary file: ${diff.path}\n`;
+          out += `<div class="empty-state">binary file: ${escapeHtml(diff.path)}</div>`;
           return;
         }
         if (diff.too_large) {
-          out += `file too large: ${diff.path}\n`;
+          out += `<div class="empty-state">file too large: ${escapeHtml(diff.path)}</div>`;
           return;
         }
-        (diff.hunks || []).forEach(hunk => {
-          (hunk.lines || []).forEach(line => {
+        (diff.hunks || []).forEach((hunk) => {
+          (hunk.lines || []).forEach((line) => {
+            const changeType = line.change_type === 'add' ? 'diff-add' : line.change_type === 'remove' ? 'diff-rem' : '';
             const prefix = line.change_type === 'add' ? '+' : line.change_type === 'remove' ? '-' : ' ';
-            const text = line.content || '';
-            out += `${prefix}${text}\n`;
+            out += `<div class="code-line ${changeType}"><span class="line-num">${lineNo++}</span><span class="line-code">${escapeHtml(prefix + (line.content || ''))}</span></div>`;
           });
         });
       });
-      document.getElementById('content').textContent = out || 'No content';
+
+      const content = document.getElementById('content');
+      content.className = '';
+      content.innerHTML = out || '<div class="empty-state">No content</div>';
     }
 
     function renderTimeline() {
-      const root = document.getElementById('timeline');
+      const root = document.getElementById('timelineEvents');
       root.innerHTML = '';
+
+      if (state.snapshots.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        empty.textContent = 'No snapshots available';
+        root.appendChild(empty);
+        return;
+      }
+
       state.snapshots.forEach((snapshot, index) => {
+        const row = document.createElement('div');
+        row.className = 'event-row';
+
         const node = document.createElement('div');
         node.className = 'event' + (state.snapshot && state.snapshot.id === snapshot.id ? ' active' : '');
         const time = new Date(snapshot.timestamp).toLocaleTimeString();
-        node.innerHTML = `<strong>${index + 1}</strong><span>${snapshot.trigger}</span><span class="muted">${time}</span>`;
+        node.title = `${snapshot.id} | ${snapshot.trigger} | ${time}`;
         node.onclick = async () => {
+          hideDryRun();
           state.snapshot = snapshot;
           state.previous = state.snapshots[index + 1] || null;
           state.selectedPath = null;
           renderTimeline();
           await loadFiles();
         };
-        root.appendChild(node);
+
+        const label = document.createElement('div');
+        label.className = 'event-label';
+        label.textContent = `${snapshot.trigger} · ${time}`;
+
+        row.appendChild(node);
+        row.appendChild(label);
+        root.appendChild(row);
       });
     }
 
     async function createSnapshot() {
-      if (!state.project) return;
+      if (!state.project) {
+        return;
+      }
       const message = prompt('Snapshot message', 'Manual snapshot');
-      if (message === null) return;
+      if (message === null) {
+        return;
+      }
       setStatus('Creating snapshot');
       await withAuth(() => api(`${API}/projects/${state.project.project_hash}/snapshots`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message }),
       }));
+      hideDryRun();
       await loadSnapshots();
       setStatus('Snapshot created', 'ok');
     }
 
     async function restoreSnapshot() {
-      if (!state.project || !state.snapshot) return;
-      const ok = confirm(`Restore snapshot ${state.snapshot.id}`);
-      if (!ok) return;
+      if (!state.project || !state.snapshot) {
+        return;
+      }
       setStatus('Running dry run');
-      await withAuth(() => api(`${API}/projects/${state.project.project_hash}/restore/${state.snapshot.id}`, {
+      const dryRun = await withAuth(() => api(`${API}/projects/${state.project.project_hash}/restore/${state.snapshot.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dry_run: true }),
       }));
+      state.pendingRestore = state.snapshot.id;
+      showDryRun(dryRun);
+      setStatus('Dry run ready', 'ok');
+    }
 
-      const really = confirm('Dry run complete. Apply restore');
-      if (!really) {
-        setStatus('Restore canceled');
+    async function confirmRestore() {
+      if (!state.project || !state.pendingRestore) {
         return;
       }
-
       setStatus('Restoring snapshot', 'danger');
-      await withAuth(() => api(`${API}/projects/${state.project.project_hash}/restore/${state.snapshot.id}`, {
+      await withAuth(() => api(`${API}/projects/${state.project.project_hash}/restore/${state.pendingRestore}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dry_run: false, confirm: true }),
       }));
+      hideDryRun();
       setStatus('Restore complete', 'ok');
       await loadSnapshots();
     }
@@ -387,19 +867,22 @@
         renderTree();
         return;
       }
-      if (!state.project) return;
+      if (!state.project) {
+        return;
+      }
       if (query.startsWith('#')) {
         const q = query.slice(1);
         const data = await api(`${API}/search?q=${encodeURIComponent(q)}&project=${state.project.project_hash}`);
         const tree = document.getElementById('tree');
         tree.innerHTML = '';
-        (data.results || []).forEach(result => {
+        (data.results || []).forEach((result) => {
           const row = document.createElement('div');
-          row.className = 'row';
-          row.innerHTML = `<span>📸</span><span>${escapeHtml(result.snapshot_id)}</span><small>${escapeHtml(result.match_context || '')}</small>`;
+          row.className = 'tree-item';
+          row.innerHTML = `<svg class="icon" viewBox="0 0 24 24"><path d="M12 3 1 9l11 6 9-4.91V17h2V9z"></path><path d="m3 11 9 4.91L21 11v2l-9 4.91L3 13z"></path></svg><span>${escapeHtml(result.snapshot_id)}</span><small>${escapeHtml(result.match_context || '')}</small>`;
           row.onclick = () => {
-            const snap = state.snapshots.find(s => s.id === result.snapshot_id);
+            const snap = state.snapshots.find((s) => s.id === result.snapshot_id);
             if (snap) {
+              hideDryRun();
               state.snapshot = snap;
               state.previous = state.snapshots[state.snapshots.indexOf(snap) + 1] || null;
               renderTimeline();
@@ -414,6 +897,7 @@
     }
 
     async function refreshAll() {
+      hideDryRun();
       await loadSnapshots();
       setStatus('Refreshed', 'ok');
     }
