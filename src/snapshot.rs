@@ -417,9 +417,9 @@ mod tests {
     #[test]
     fn test_compute_tree_hashes() {
         let files = vec![
-            ("src/main.rs".to_string(), "abc123".to_string(), 100, true, false),
-            ("src/lib.rs".to_string(), "def456".to_string(), 200, true, false),
-            ("README.md".to_string(), "ghi789".to_string(), 50, true, false),
+            ("src/main.rs".to_string(), "abc123".to_string(), 100u64, true, false, None),
+            ("src/lib.rs".to_string(), "def456".to_string(), 200u64, true, false, None),
+            ("README.md".to_string(), "ghi789".to_string(), 50u64, true, false, None),
         ];
         let hashes = compute_tree_hashes(&files);
         assert!(!hashes.is_empty());

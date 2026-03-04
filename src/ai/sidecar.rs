@@ -110,7 +110,7 @@ fn find_sidecar_binary(uhoh_dir: &Path) -> Result<PathBuf> {
     }
 
     anyhow::bail!(
-        "llama-server not found. Install it in {:?} or add to PATH.",
+        "llama-server not found. Place it in {:?}. PATH is intentionally ignored for security.",
         sidecar_dir
     )
 }

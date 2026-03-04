@@ -1,5 +1,6 @@
 use crate::config::{AiConfig, ModelTierConfig};
 use anyhow::Result;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use sysinfo::System;
 
@@ -16,27 +17,46 @@ pub fn default_model_tiers() -> Vec<ModelTierConfig> {
 }
 
 /// Select the best model tier based on available system RAM.
-pub fn select_model(config: &AiConfig) -> Option<&ModelTierConfig> {
-    let tiers = if config.models.is_empty() { return None } else { &config.models };
+pub fn select_model(config: &AiConfig) -> Option<ModelTierConfig> {
+    let tiers: Vec<ModelTierConfig> = if config.models.is_empty() {
+        default_model_tiers()
+    } else {
+        config.models.clone()
+    };
     let mut sys = System::new();
     sys.refresh_memory();
     let total_ram_gb = sys.total_memory() / (1024 * 1024 * 1024);
-    tiers.iter().rev().find(|t| total_ram_gb >= t.min_ram_gb + 2)
+    tiers.into_iter().rev().find(|t| total_ram_gb >= t.min_ram_gb)
 }
 
 /// Ensure the model file is present under ~/.uhoh/sidecar and return its path.
 pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Result<PathBuf> {
-    let target_dir = uhoh_dir.join("sidecar");
+    let target_dir = uhoh_dir.join("models");
     std::fs::create_dir_all(&target_dir)?;
     let target = target_dir.join(&model.filename);
     if target.exists() { return Ok(target); }
 
-    tracing::info!("Downloading model {}...", model.name);
-    let resp = reqwest::blocking::get(&model.url)?;
+    tracing::info!("Downloading model {} from {}...", model.name, model.url);
+    let resp = reqwest::blocking::Client::new().get(&model.url).send()?;
     if !resp.status().is_success() {
         anyhow::bail!("Failed to download model: HTTP {}", resp.status());
     }
-    let bytes = resp.bytes()?;
-    std::fs::write(&target, &bytes)?;
+    let total = resp.content_length();
+    let tmp = target.with_extension("downloading");
+    {
+        let mut out = std::fs::File::create(&tmp)?;
+        let mut reader = std::io::BufReader::new(resp);
+        let mut buf = [0u8; 64 * 1024];
+        let mut downloaded = 0u64;
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 { break; }
+            out.write_all(&buf[..n])?;
+            downloaded += n as u64;
+            if let Some(total) = total { if downloaded >= total { break; } }
+        }
+        out.sync_all()?;
+    }
+    std::fs::rename(&tmp, &target)?;
     Ok(target)
 }

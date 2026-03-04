@@ -205,6 +205,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
     let mut tick_interval = tokio::time::interval(Duration::from_secs(60));
     let mut update_check_interval = tokio::time::interval(Duration::from_secs(config.update.check_interval_hours * 3600));
     let mut debounce_interval = tokio::time::interval(Duration::from_millis(500));
+    let update_trigger = uhoh_dir.join(".update-ready");
 
     tracing::info!("Daemon running, watching {} projects", projects.len());
 
@@ -226,6 +227,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 check_moved_folders(database, &mut watcher_handle, &mut project_states);
                 // Discover newly added projects and watch them
                 check_for_new_projects(database, &mut watcher_handle, &mut project_states);
+                // If an update has been applied (trigger file present), exit gracefully so service manager can restart
+                if update_trigger.exists() {
+                    tracing::info!("Update ready trigger detected; stopping daemon for restart");
+                    break;
+                }
                 let mut total_freed = 0u64;
                 for project in &projects {
                     if let Ok(freed) = crate::compaction::compact_project(database, &project.hash, &config.compaction) {
@@ -334,10 +340,12 @@ async fn process_pending_snapshots(
         // Check debounce: quiet period elapsed OR max ceiling reached
         let last_change = state.last_change_at.unwrap_or(first_change);
         let since_last_change = now.duration_since(last_change);
+        let since_first_change = now.duration_since(first_change);
         let since_last_snapshot = now.duration_since(state.last_snapshot);
 
         let quiet_elapsed = since_last_change >= Duration::from_secs(config.watch.debounce_quiet_secs);
-        let max_ceiling = since_last_change >= Duration::from_secs(config.watch.max_debounce_secs);
+        // Force snapshot after max_debounce_secs from the FIRST observed change
+        let max_ceiling = since_first_change >= Duration::from_secs(config.watch.max_debounce_secs);
         let min_interval = since_last_snapshot >= Duration::from_secs(config.watch.min_snapshot_interval_secs);
 
         if (quiet_elapsed || max_ceiling) && min_interval {
@@ -346,6 +354,7 @@ async fn process_pending_snapshots(
             let db_path = uhoh_dir_buf.join("uhoh.db");
             let project_hash = state.hash.clone();
             let proj_path = Path::new(project_path).to_path_buf();
+            let cfg = config.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let database = crate::db::Database::open(&db_path)?;
                 snapshot::create_snapshot(
@@ -355,7 +364,7 @@ async fn process_pending_snapshots(
                     &proj_path,
                     "auto",
                     None,
-                    &crate::config::Config::load(&uhoh_dir_buf.join("config.toml")).unwrap_or_default(),
+                    &cfg,
                 )
             }).await;
 
