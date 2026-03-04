@@ -11,6 +11,8 @@ use crate::snapshot;
 use crate::watcher;
 use notify::{RecursiveMode, Watcher as _};
 // already imported above
+use once_cell::sync::Lazy;
+use std::sync::Mutex as StdMutex;
 
 // Removed duplicate is_uhoh_process_alive; use crate::platform::is_uhoh_process_alive instead
 
@@ -76,7 +78,7 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         // Try graceful termination first
-        let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string()]).status();
+        let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T"]).status();
         // Wait briefly for process to end
         for _ in 0..50 {
             if !crate::platform::is_uhoh_process_alive(pid) { break; }
@@ -84,7 +86,7 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
         }
         if crate::platform::is_uhoh_process_alive(pid) {
             // Force kill as fallback
-            let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).status();
+            let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string(), "/T"]).status();
         }
     }
 
@@ -117,8 +119,13 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
     }
     #[cfg(not(unix))]
     {
-        use std::io::Write as _;
+        use fs2::FileExt;
+        use std::io::{Seek, SeekFrom, Write};
+        // Lock PID file on Windows too to prevent multiple daemons
+        pid_file.try_lock_exclusive()?;
         let mut f = &pid_file;
+        let _ = f.set_len(0);
+        let _ = f.seek(SeekFrom::Start(0));
         let _ = f.write_all(std::process::id().to_string().as_bytes());
     }
 
@@ -379,9 +386,12 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 }
 
                 // Periodic database backup (hourly by default)
-                static mut LAST_BACKUP: Option<std::time::Instant> = None;
+                static LAST_BACKUP: Lazy<StdMutex<Option<std::time::Instant>>> = Lazy::new(|| StdMutex::new(None));
                 let backup_interval = std::time::Duration::from_secs(config.update.check_interval_hours * 3600);
-                let do_backup = unsafe { LAST_BACKUP.map(|t| t.elapsed() >= backup_interval).unwrap_or(true) };
+                let do_backup = {
+                    let last = LAST_BACKUP.lock().unwrap();
+                    last.map(|t| t.elapsed() >= backup_interval).unwrap_or(true)
+                };
                 if do_backup {
                     let backups_dir = uhoh_dir.join("backups");
                     let _ = std::fs::create_dir_all(&backups_dir);
@@ -399,8 +409,13 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                                 for e in files.iter().take(to_remove) { let _ = std::fs::remove_file(e.path()); }
                             }
                         }
-                        unsafe { LAST_BACKUP = Some(std::time::Instant::now()); }
+                        if let Ok(mut last) = LAST_BACKUP.lock() { *last = Some(std::time::Instant::now()); }
                     }
+                }
+
+                // Process deferred AI summaries when conditions allow
+                if crate::ai::should_run_ai(&config.ai) {
+                    process_ai_summary_queue(&uhoh_dir, database, &config).await;
                 }
             }
             _ = update_check_interval.tick() => {
@@ -472,18 +487,7 @@ fn handle_watch_event(
     // Find which project this path belongs to
     for (project_path, state) in states.iter_mut() {
         if path.starts_with(project_path) {
-            // Ignore common noisy directories to avoid event storms
-            // Fast structural filter: skip events anywhere under these dirs
-            let noisy_dirs = [".git", "node_modules", "target", "dist", "build", "out"];
-            let mut skip = false;
-            for comp in path.components() {
-                if let std::path::Component::Normal(os) = comp {
-                    if let Some(s) = os.to_str() {
-                        if noisy_dirs.contains(&s) { skip = true; break; }
-                    }
-                }
-            }
-            if skip { continue; }
+            // Rely on ignore rules during snapshot walk; do not pre-filter here to avoid mismatches
             state.pending_changes.insert(path.clone());
             let now = Instant::now();
             if state.first_change_at.is_none() { state.first_change_at = Some(now); }
@@ -568,6 +572,88 @@ async fn process_pending_snapshots(
 
 fn database_backup_to(database: &Database, path: &std::path::Path) -> anyhow::Result<()> {
     database.backup_to(path)
+}
+
+/// Process a small batch of deferred AI summary jobs when conditions allow.
+async fn process_ai_summary_queue(uhoh_dir: &Path, database: &Database, config: &Config) {
+    // Limit per tick to avoid overwhelming the sidecar
+    const MAX_PER_TICK: u32 = 2;
+    const MAX_ATTEMPTS: i64 = 5;
+    // TTL cleanup best-effort
+    let _ = database.prune_ai_queue_ttl(7);
+
+    if let Ok(jobs) = database.dequeue_pending_ai(MAX_PER_TICK) {
+        for (rowid, project_hash, attempts, _queued_at) in jobs {
+            if attempts >= MAX_ATTEMPTS { let _ = database.delete_pending_ai(rowid); continue; }
+
+            // Rebuild a minimal diff for this snapshot
+            // Fetch files of this snapshot and prior snapshot for the project
+            let this = match database.get_snapshot_by_rowid(rowid) { Ok(Some(s)) => s, _ => { let _ = database.delete_pending_ai(rowid); continue; } };
+            let prev = match database.snapshot_before(&project_hash, this.snapshot_id) { Ok(v) => v, Err(_) => None };
+            let this_files = match database.get_snapshot_files(this.rowid) { Ok(v) => v, Err(_) => { let _ = database.increment_ai_attempts(rowid); continue; } };
+            let prev_files_vec = prev.as_ref().and_then(|p| database.get_snapshot_files(p.rowid).ok()).unwrap_or_default();
+            use std::collections::HashMap;
+            let mut prev_map: HashMap<String, (String, bool, u64)> = HashMap::new();
+            for f in prev_files_vec { prev_map.insert(f.path.clone(), (f.hash, f.stored, f.size)); }
+
+            let mut added = Vec::new();
+            let mut modified = Vec::new();
+            let mut deleted = Vec::new();
+            let blob_root = uhoh_dir.join("blobs");
+            let mut diff_chunks = String::new();
+            const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024;
+
+            // Determine added/modified
+            for f in &this_files {
+                if let Some((prev_hash, prev_stored, prev_size)) = prev_map.get(&f.path) {
+                    if &f.hash != prev_hash {
+                        modified.push(f.path.clone());
+                        if f.stored && *prev_stored && *prev_size <= MAX_AI_DIFF_FILE_SIZE && f.size <= MAX_AI_DIFF_FILE_SIZE {
+                            let old = crate::cas::read_blob(&blob_root, prev_hash).ok().flatten();
+                            let new = crate::cas::read_blob(&blob_root, &f.hash).ok().flatten();
+                            if let (Some(old), Some(new)) = (old, new) {
+                                let head_old = &old[..old.len().min(8192)];
+                                let head_new = &new[..new.len().min(8192)];
+                                if !(content_inspector::inspect(head_old).is_binary() || content_inspector::inspect(head_new).is_binary()) {
+                                    if let (Ok(old_s), Ok(new_s)) = (String::from_utf8(old), String::from_utf8(new)) {
+                                        let d = similar::TextDiff::from_lines(&old_s, &new_s);
+                                        diff_chunks.push_str(&format!("--- a/{}\n+++ b/{}\n", f.path, f.path));
+                                        for hunk in d.unified_diff().context_radius(2).iter_hunks() {
+                                            diff_chunks.push_str(&format!("{}\n", hunk.header()));
+                                            for change in hunk.iter_changes() {
+                                                let sign = match change.tag() { similar::ChangeTag::Delete => '-', similar::ChangeTag::Insert => '+', similar::ChangeTag::Equal => ' '};
+                                                diff_chunks.push(sign);
+                                                diff_chunks.push_str(&change.to_string());
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    diff_chunks.push_str(&format!("--- {}\n[Binary file]\n", f.path));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    added.push(f.path.clone());
+                }
+            }
+            // Determine deleted
+            let this_map: std::collections::HashMap<String, ()> = this_files.iter().map(|f| (f.path.clone(), ())).collect();
+            for (p, _, _, _) in prev_map.iter().map(|(p, (h,s,sz))| (p.clone(), h.clone(), *s, *sz)) {
+                if !this_map.contains_key(&p) { deleted.push(p); }
+            }
+
+            // Generate via sidecar
+            let files = crate::ai::summary::FileChangeSummary { added: added.clone(), deleted: deleted.clone(), modified: modified.clone() };
+            match crate::ai::summary::generate_summary_blocking(uhoh_dir, &config.clone(), &diff_chunks, &files) {
+                Ok(text) if !text.is_empty() => {
+                    if let Err(e) = database.set_ai_summary(rowid, &text) { tracing::warn!("Failed to set AI summary: {}", e); } else { let _ = database.delete_pending_ai(rowid); }
+                }
+                Ok(_) => { let _ = database.increment_ai_attempts(rowid); }
+                Err(e) => { tracing::debug!("Deferred AI summary failed: {}", e); let _ = database.increment_ai_attempts(rowid); }
+            }
+        }
+    }
 }
 
 fn check_moved_folders(

@@ -226,6 +226,22 @@ impl Database {
             conn.execute_batch("COMMIT;")?;
         }
 
+        // Schema v4: pending AI summaries queue
+        if version < 4 {
+            conn.execute_batch("BEGIN EXCLUSIVE TRANSACTION;")?;
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS pending_ai_summaries (
+                    snapshot_rowid INTEGER PRIMARY KEY REFERENCES snapshots(rowid) ON DELETE CASCADE,
+                    project_hash   TEXT NOT NULL,
+                    queued_at      TEXT NOT NULL,
+                    attempts       INTEGER NOT NULL DEFAULT 0
+                );",
+            )?;
+            conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_ai_queue_time ON pending_ai_summaries(queued_at);")?;
+            conn.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (4);")?;
+            conn.execute_batch("COMMIT;")?;
+        }
+
         Ok(())
     }
 
@@ -495,6 +511,33 @@ impl Database {
         Ok(snapshots)
     }
 
+    /// Lookup a snapshot by its internal rowid
+    pub fn get_snapshot_by_rowid(&self, rowid: i64) -> Result<Option<SnapshotRow>> {
+        let conn = self.conn();
+        conn
+            .query_row(
+                "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
+                        s.ai_summary,
+                        COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                 FROM snapshots s WHERE s.rowid = ?1",
+                params![rowid],
+                |row| {
+                    Ok(SnapshotRow {
+                        rowid: row.get(0)?,
+                        snapshot_id: row.get::<_, i64>(1)? as u64,
+                        timestamp: row.get(2)?,
+                        trigger: row.get(3)?,
+                        message: row.get(4)?,
+                        pinned: row.get::<_, i32>(5)? != 0,
+                        ai_summary: row.get(6)?,
+                        file_count: row.get::<_, i64>(7)? as u64,
+                    })
+                },
+            )
+            .optional()
+            .context("Failed to query snapshot by rowid")
+    }
+
     pub fn snapshot_count(&self, project_hash: &str) -> Result<u64> {
         let conn = self.conn();
         let count: i64 = conn.query_row(
@@ -657,6 +700,72 @@ impl Database {
             params![summary, snapshot_rowid],
         )?;
         Ok(())
+    }
+
+    // === AI summary queue ===
+
+    /// Enqueue a snapshot for deferred AI summary generation (idempotent per rowid).
+    pub fn enqueue_ai_summary(&self, snapshot_rowid: i64, project_hash: &str) -> Result<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR IGNORE INTO pending_ai_summaries (snapshot_rowid, project_hash, queued_at, attempts)
+             VALUES (?1, ?2, ?3, 0)",
+            params![snapshot_rowid, project_hash, now],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch up to `limit` oldest pending summaries across all projects.
+    pub fn dequeue_pending_ai(&self, limit: u32) -> Result<Vec<(i64, String, i64, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT snapshot_rowid, project_hash, attempts, queued_at
+             FROM pending_ai_summaries
+             ORDER BY queued_at ASC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r?); }
+        Ok(out)
+    }
+
+    pub fn delete_pending_ai(&self, snapshot_rowid: i64) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM pending_ai_summaries WHERE snapshot_rowid = ?1",
+            params![snapshot_rowid],
+        )?;
+        Ok(())
+    }
+
+    pub fn increment_ai_attempts(&self, snapshot_rowid: i64) -> Result<i64> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE pending_ai_summaries SET attempts = attempts + 1 WHERE snapshot_rowid = ?1",
+            params![snapshot_rowid],
+        )?;
+        let attempts: i64 = conn.query_row(
+            "SELECT attempts FROM pending_ai_summaries WHERE snapshot_rowid = ?1",
+            params![snapshot_rowid],
+            |row| row.get(0),
+        ).unwrap_or(0);
+        Ok(attempts)
+    }
+
+    /// Remove queue entries older than `ttl_days` days.
+    pub fn prune_ai_queue_ttl(&self, ttl_days: i64) -> Result<u64> {
+        let conn = self.conn();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(ttl_days);
+        let cutoff_s = cutoff.to_rfc3339();
+        let affected = conn.execute(
+            "DELETE FROM pending_ai_summaries WHERE queued_at < ?1",
+            params![cutoff_s],
+        )? as u64;
+        Ok(affected)
     }
 
     // === Operations ===

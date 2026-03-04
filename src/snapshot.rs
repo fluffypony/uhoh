@@ -193,16 +193,16 @@ pub fn create_snapshot(
             // Check if this looks like a git branch switch (suppress false positives)
             if !is_likely_git_operation(project_path) {
                 // Apply a short cooldown to avoid repeated emergency snapshots
-                static mut LAST_EMERGENCY_AT: Option<std::time::Instant> = None;
+                use once_cell::sync::Lazy;
+                use std::sync::Mutex;
+                static LAST_EMERGENCY_AT: Lazy<Mutex<Option<std::time::Instant>>> = Lazy::new(|| Mutex::new(None));
                 let now = std::time::Instant::now();
-                let fire = unsafe {
-                    match LAST_EMERGENCY_AT {
-                        Some(t) => now.duration_since(t) > std::time::Duration::from_secs(30),
-                        None => true,
-                    }
+                let fire = {
+                    let last = LAST_EMERGENCY_AT.lock().unwrap();
+                    last.map(|t| now.duration_since(t) > std::time::Duration::from_secs(30)).unwrap_or(true)
                 };
                 if fire {
-                    unsafe { LAST_EMERGENCY_AT = Some(now); }
+                    if let Ok(mut last) = LAST_EMERGENCY_AT.lock() { *last = Some(now); }
                     "emergency-delete"
                 } else { trigger }
             } else {
@@ -244,7 +244,7 @@ pub fn create_snapshot(
         }
     }
 
-    // Fire-and-forget AI summary generation via ai::summary
+    // AI summary: attempt now if allowed, else enqueue for later
     if ai::should_run_ai(&config.ai) {
         let uhoh_dir_cl = uhoh_dir.to_path_buf();
         let cfg_cloned = config.clone();
@@ -304,6 +304,9 @@ pub fn create_snapshot(
                 Err(e) => tracing::warn!("AI summary generation failed: {}", e),
             }
         });
+    } else {
+        // Queue summary for later processing
+        let _ = database.enqueue_ai_summary(rowid, project_hash);
     }
 
     let id_str = cas::id_to_base58(snapshot_id);
