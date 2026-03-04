@@ -18,6 +18,7 @@ use uhoh::restore;
 use uhoh::snapshot;
 use uhoh::update;
 
+// Use the platform-provided uhoh_dir; deduplicated here for clarity
 fn uhoh_dir() -> PathBuf { uhoh::platform::uhoh_dir() }
 
 fn ensure_uhoh_dir() -> Result<PathBuf> {

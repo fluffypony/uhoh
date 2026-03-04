@@ -129,8 +129,18 @@ fn remove_launchagent() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn install_systemd_user_unit() -> Result<()> {
-    let exe = std::env::current_exe()?;
+    let current_exe = std::env::current_exe()?;
     let uhoh = uhoh_dir();
+    // Ensure we have a stable binary location at ~/.uhoh/bin/uhoh for service registration
+    let bin_dir = uhoh.join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+    let target_bin = bin_dir.join("uhoh");
+    std::fs::copy(&current_exe, &target_bin).ok();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&target_bin, std::fs::Permissions::from_mode(0o755));
+    }
 
     let unit = format!(
         r#"[Unit]
@@ -147,7 +157,7 @@ StandardError=append:{log}
 [Install]
 WantedBy=default.target
 "#,
-        exe = exe.display(),
+        exe = target_bin.display(),
         log = uhoh.join("daemon.log").display(),
     );
 

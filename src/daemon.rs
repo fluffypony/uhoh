@@ -41,11 +41,10 @@ pub fn spawn_detached_daemon() -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
         const DETACHED_PROCESS: u32 = 0x00000008;
         std::process::Command::new(&exe)
             .args(["start", "--service"])
-            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+            .creation_flags(DETACHED_PROCESS)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .stdin(std::process::Stdio::null())
@@ -326,15 +325,29 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 }
                 let mut total_freed = 0u64;
                 if let Ok(current_projects) = database.list_projects() {
-                    for project in &current_projects {
-                        if let Ok(freed) = crate::compaction::compact_project(database, &project.hash, &config.compaction) {
-                            total_freed = total_freed.saturating_add(freed);
+                    // Run compaction in a blocking task to avoid stalling the runtime
+                    let db_path = uhoh_dir.join("uhoh.db");
+                    let cfg = config.compaction.clone();
+                    total_freed = tokio::task::spawn_blocking(move || {
+                        let db = crate::db::Database::open(&db_path).ok();
+                        let mut freed = 0u64;
+                        if let Some(d) = db {
+                            for project in &current_projects {
+                                if let Ok(f) = crate::compaction::compact_project(&d, &project.hash, &cfg) { freed = freed.saturating_add(f); }
+                            }
                         }
-                    }
+                        freed
+                    }).await.unwrap_or(0);
                 }
                 if total_freed > 100 * 1024 * 1024 {
                     tracing::info!("Compaction estimated freed {:.1} MB; triggering GC", total_freed as f64 / 1_048_576.0);
-                    let _ = crate::gc::run_gc(&uhoh_dir, database);
+                    let uhoh_dir_cl = uhoh_dir.clone();
+                    let db_path = uhoh_dir_cl.join("uhoh.db");
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(db) = crate::db::Database::open(&db_path) {
+                            let _ = crate::gc::run_gc(&uhoh_dir_cl, &db);
+                        }
+                    });
                 }
 
                 // Periodic database backup (hourly by default)

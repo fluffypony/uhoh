@@ -94,7 +94,7 @@ pub fn create_snapshot(
 
     // Determine changes
     let mut new_files = Vec::new();
-    let mut files_for_manifest: Vec<(String, String, u64, bool, bool, Option<i64>, i64)> = Vec::new();
+    let mut files_for_manifest: Vec<crate::db::SnapFileEntry> = Vec::new();
     let mut deleted_for_manifest: Vec<(String, String, u64, bool, i64)> = Vec::new();
     let mut has_changes = false;
 
@@ -119,15 +119,15 @@ pub fn create_snapshot(
                 .as_secs() as i64;
             if cached.size == size && cached_secs == fs_mtime_secs {
                 // Carry forward unchanged file
-                files_for_manifest.push((
-                    rel_path.clone(),
-                    cached.hash.clone(),
-                    cached.size,
-                    cached.stored,
-                    cached.executable,
-                    Some(cached.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
-                    cached.storage_method,
-                ));
+                files_for_manifest.push(crate::db::SnapFileEntry {
+                    path: rel_path.clone(),
+                    hash: cached.hash.clone(),
+                    size: cached.size,
+                    stored: cached.stored,
+                    executable: cached.executable,
+                    mtime: Some(cached.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
+                    storage_method: cached.storage_method,
+                });
                 continue;
             }
         }
@@ -148,21 +148,13 @@ pub fn create_snapshot(
                 }
                 let mtime_i = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
                 let stored = method.is_recoverable();
-                files_for_manifest.push((rel_path.clone(), hash, size, stored, executable, Some(mtime_i), method.to_db()));
-                current_hashes.insert(rel_path.clone(), (files_for_manifest.last().unwrap().1.clone(), stored));
+                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: hash.clone(), size, stored, executable, mtime: Some(mtime_i), storage_method: method.to_db() });
+                current_hashes.insert(rel_path.clone(), (hash, stored));
             }
             Err(e) => {
                 tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
                 // Record as unstored
-                files_for_manifest.push((
-                    rel_path.clone(),
-                    String::new(),
-                    size,
-                    false,
-                    executable,
-                    Some(mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
-                    cas::StorageMethod::None.to_db(),
-                ));
+                files_for_manifest.push(crate::db::SnapFileEntry { path: rel_path.clone(), hash: String::new(), size, stored: false, executable, mtime: Some(mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64), storage_method: cas::StorageMethod::None.to_db() });
                 current_hashes.insert(rel_path.clone(), (String::new(), false));
             }
         }

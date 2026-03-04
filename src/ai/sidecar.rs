@@ -21,9 +21,11 @@ pub struct Sidecar {
 impl Sidecar {
     /// Spawn the inference sidecar on an ephemeral port.
     pub fn spawn(model_path: &Path, uhoh_dir: &Path) -> Result<Self> {
-        // Bind to port 0 = OS assigns an ephemeral port
-        // We'll use a known range and find an available port
-        let (listener, port) = find_available_port_listener()?;
+        // Bind to port 0 = OS assigns an ephemeral port; add a simple retry in case of TOCTOU
+        let (listener, port) = match find_available_port_listener() {
+            Ok(v) => v,
+            Err(_) => find_available_port_listener()?,
+        };
 
         let backend = detect_backend(uhoh_dir)?;
         // Release listener just before spawn to minimize race
@@ -220,13 +222,13 @@ fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, port: u1
                     let cfg_path = home.join(".uhoh").join("config.toml");
                     if let Ok(cfg) = std::fs::read_to_string(&cfg_path) {
                         if let Ok(conf) = toml::from_str::<crate::config::Config>(&cfg) {
-                            conf.ai.max_context_tokens.to_string()
+                            std::cmp::min(conf.ai.max_context_tokens, 8192).to_string()
                         } else { "8192".to_string() }
                     } else { "8192".to_string() }
                 } else { "8192".to_string() }
             };
-            Command::new(binary)
-                .args([
+            let mut cmd = Command::new(binary);
+            cmd.args([
                     "--model",
                     &model_path.to_string_lossy(),
                     "--port",
@@ -237,8 +239,8 @@ fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, port: u1
                     &ctx_size,
                     "--n-gpu-layers",
                     "999",
-                ])
-                .stdout(Stdio::null())
+                ]);
+            cmd.stdout(Stdio::null())
                 .stderr(Stdio::from(log_file))
                 .spawn()
                 .context("Failed to spawn llama-server")
@@ -254,16 +256,16 @@ fn spawn_backend(backend: &Backend, model_path: &Path, uhoh_dir: &Path, port: u1
                     _ => stem.to_string(),
                 }
             };
-            Command::new(python)
-                .args([
+            let mut cmd = Command::new(python);
+            cmd.args([
                     "-m",
                     "mlx_lm.server",
                     "--model",
                     &model_id,
                     "--port",
                     &port.to_string(),
-                ])
-                .stdout(Stdio::null())
+                ]);
+            cmd.stdout(Stdio::null())
                 .stderr(Stdio::from(log_file))
                 .spawn()
                 .context("Failed to spawn mlx_lm server")

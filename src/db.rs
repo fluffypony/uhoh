@@ -387,7 +387,7 @@ impl Database {
         trigger: &str,
         message: &str,
         pinned: bool,
-        files: &[SnapFile],
+        files: &[SnapFileEntry],
         deleted: &[DeletedFile],
         tree_hashes: &[TreeHash],
     ) -> Result<(i64, u64)> {
@@ -420,7 +420,7 @@ impl Database {
                 "INSERT INTO snapshot_files (snapshot_rowid, path, hash, size, stored, executable, mtime, storage_method)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
-            for (path, hash, size, stored, executable, mtime, storage_method) in files {
+            for SnapFileEntry { path, hash, size, stored, executable, mtime, storage_method } in files {
                 file_stmt.execute(params![
                     rowid,
                     path,
@@ -868,6 +868,15 @@ impl Database {
     }
 }
 // Type aliases to simplify complex tuple signatures used around snapshot creation
-pub type SnapFile = (String, String, u64, bool, bool, Option<i64>, i64); // (path, hash, size, stored, executable, mtime, storage_method)
+#[derive(Debug, Clone)]
+pub struct SnapFileEntry {
+    pub path: String,
+    pub hash: String,
+    pub size: u64,
+    pub stored: bool,
+    pub executable: bool,
+    pub mtime: Option<i64>,
+    pub storage_method: i64,
+}
 pub type DeletedFile = (String, String, u64, bool, i64); // (path, hash, size, stored, storage_method)
 pub type TreeHash = (String, String); // (dir_path, tree_hash)
