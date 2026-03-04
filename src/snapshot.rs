@@ -1,13 +1,14 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::cas;
 use crate::config::Config;
 use crate::db::Database;
 use crate::ignore_rules;
-use crate::db::SnapshotRow;
+// use crate::db::SnapshotRow; // not used directly here
 use crate::ai;
 
 /// File metadata cache for efficient change detection.
@@ -28,29 +29,37 @@ pub fn create_snapshot(
     project_path: &Path,
     trigger: &str,
     message: Option<&str>,
+    config: &Config,
 ) -> Result<Option<u64>> {
-    let config = Config::load(&uhoh_dir.join("config.toml"))?;
     let blob_root = uhoh_dir.join("blobs");
 
     // Walk directory respecting ignore rules
     let walker = ignore_rules::build_walker(project_path);
     let mut current_files: HashMap<String, (PathBuf, std::fs::Metadata)> = HashMap::new();
 
-    for entry in walker {
+    // Pre-count entries to optionally show a progress bar for large scans
+    let mut entries: Vec<ignore::DirEntry> = Vec::new();
+    for entry in walker { if let Ok(e) = entry { entries.push(e); } }
+    let show_pb = entries.len() > 1000;
+    let pb = if show_pb {
+        let pb = ProgressBar::new(entries.len() as u64);
+        pb.set_style(ProgressStyle::default_bar().template("[{elapsed_precise}] {bar:40} {pos}/{len} files").unwrap());
+        Some(pb)
+    } else { None };
+
+    for entry in entries {
         let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!("Error walking directory: {}", e);
-                continue;
-            }
+            e => e,
         };
 
         let path = entry.path();
         if !path.is_file() {
+            if let Some(pb) = &pb { pb.inc(1); }
             continue;
         }
         // Skip the marker file itself
         if path.file_name().map_or(false, |n| n == ".uhoh") {
+            if let Some(pb) = &pb { pb.inc(1); }
             continue;
         }
 
@@ -73,14 +82,16 @@ pub fn create_snapshot(
                 tracing::warn!("Cannot stat {}: {}", path.display(), e);
             }
         }
+        if let Some(pb) = &pb { pb.inc(1); }
     }
+    if let Some(pb) = pb { pb.finish_and_clear(); }
 
     // Load previous snapshot for comparison
     let prev_files = load_previous_snapshot_files(database, project_hash)?;
 
     // Determine changes
     let mut new_files = Vec::new();
-    let mut files_for_manifest: Vec<(String, String, u64, bool, bool)> = Vec::new();
+    let mut files_for_manifest: Vec<(String, String, u64, bool, bool, Option<i64>)> = Vec::new();
     let mut deleted_for_manifest: Vec<(String, String, u64, bool)> = Vec::new();
     let mut has_changes = false;
 
@@ -102,6 +113,7 @@ pub fn create_snapshot(
                     cached.size,
                     cached.stored,
                     cached.executable,
+                    Some(cached.mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
                 ));
                 continue;
             }
@@ -122,7 +134,8 @@ pub fn create_snapshot(
                     has_changes = true;
                     new_files.push(rel_path.clone());
                 }
-                files_for_manifest.push((rel_path.clone(), hash, size, stored, executable));
+                let mtime_i = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                files_for_manifest.push((rel_path.clone(), hash, size, stored, executable, Some(mtime_i)));
                 current_hashes.insert(rel_path.clone(), (files_for_manifest.last().unwrap().1.clone(), stored));
             }
             Err(e) => {
@@ -134,6 +147,7 @@ pub fn create_snapshot(
                     size,
                     false,
                     executable,
+                    Some(mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
                 ));
                 current_hashes.insert(rel_path.clone(), (String::new(), false));
             }
@@ -187,7 +201,7 @@ pub fn create_snapshot(
     let snapshot_id = database.next_snapshot_id(project_hash)?;
     let timestamp = chrono::Utc::now().to_rfc3339();
     let msg = message.unwrap_or("");
-    let pinned = actual_trigger == "emergency-delete";
+    let pinned = false;
 
     let rowid = database.create_snapshot(
         project_hash,
@@ -205,33 +219,22 @@ pub fn create_snapshot(
     // keep last_snapshot_id updated so undo has a clear end.
     if actual_trigger != "pre-restore" {
         if let Ok(Some((op_id, _))) = database.get_active_operation(project_hash) {
-            // Update last_snapshot_id to the most recent snapshot id
-            let last_id = snapshot_id;
-            let _ = database.close_operation_with_last(op_id, last_id); // harmless if already closed
+            let _ = database.update_operation_last_snapshot(op_id, snapshot_id);
         }
     }
 
-    // Fire-and-forget AI summary generation
+    // Fire-and-forget AI summary generation via ai::summary
     if ai::should_run_ai(&config.ai) {
-        let uhoh_dir = uhoh_dir.to_path_buf();
-        let project_hash_string = project_hash.to_string();
-        let blob_root = uhoh_dir.join("blobs");
-        let files_added: Vec<String> = new_files
-            .iter()
-            .filter(|p| !prev_files.contains_key(*p))
-            .cloned()
-            .collect();
-        let files_modified: Vec<String> = new_files
-            .iter()
-            .filter(|p| prev_files.contains_key(*p))
-            .cloned()
-            .collect();
+        let uhoh_dir_cl = uhoh_dir.to_path_buf();
+        let files_added: Vec<String> = new_files.iter().filter(|p| !prev_files.contains_key(*p)).cloned().collect();
+        let files_modified: Vec<String> = new_files.iter().filter(|p| prev_files.contains_key(*p)).cloned().collect();
         let files_deleted: Vec<String> = deleted_for_manifest.iter().map(|(p, _, _, _)| p.clone()).collect();
+        let db_rowid = rowid;
 
-        // Build a compact diff text (limited number of files to keep it small)
+        // Build compact diff text for modified files
+        let blob_root = uhoh_dir.join("blobs");
         let mut diff_chunks = String::new();
-        let max_files = 10usize;
-        for path in files_modified.iter().take(max_files) {
+        for path in files_modified.iter().take(10) {
             if let (Some(prev), Some((curr_hash, curr_stored))) = (prev_files.get(path), current_hashes.get(path)) {
                 if prev.stored && *curr_stored && !prev.hash.is_empty() && !curr_hash.is_empty() {
                     let old = crate::cas::read_blob(&blob_root, &prev.hash).ok().flatten();
@@ -250,64 +253,21 @@ pub fn create_snapshot(
                             }
                         }
                     }
-                } else {
-                    diff_chunks.push_str(&format!("--- a/{}\n+++ b/{}\n(binary or unstored change)\n", path, path));
                 }
             }
         }
 
         std::thread::spawn(move || {
-            // Select model
-            let cfg = match crate::config::Config::load(&uhoh_dir.join("config.toml")) { Ok(c) => c, Err(_) => return };
-            let tiers = if cfg.ai.models.is_empty() { crate::ai::models::default_model_tiers() } else { cfg.ai.models.clone() };
-            // Choose highest tier that fits RAM with 2GB margin
-            let (selected_name, selected_file) = {
-                use sysinfo::System;
-                let mut sys = System::new();
-                sys.refresh_memory();
-                let total = sys.total_memory() / (1024 * 1024 * 1024);
-                let mut chosen: Option<(String,String,u64)> = None;
-                for t in tiers.iter() { if total >= t.min_ram_gb + 2 { chosen = Some((t.name.clone(), t.filename.clone(), t.min_ram_gb)); } }
-                if let Some((n,f,_)) = chosen { (n,f) } else { (tiers[0].name.clone(), tiers[0].filename.clone()) }
-            };
-
-            let model_path = uhoh_dir.join("sidecar").join(&selected_file);
-            if !model_path.exists() { 
-                tracing::warn!("AI model file not found: {}", model_path.display());
-                return; 
-            }
-
-            // Spawn sidecar
-            let sidecar = match crate::ai::sidecar::Sidecar::spawn(&model_path, &uhoh_dir) { Ok(s) => s, Err(e) => { tracing::warn!("AI sidecar spawn failed: {}", e); return; } };
-            let port = sidecar.port();
-
-            // Build blocking client request
-            let files_added_s = files_added.clone();
-            let files_deleted_s = files_deleted.clone();
-            let files_modified_s = files_modified.clone();
-            let prompt = format!(
-                "You are analyzing a code snapshot diff. Describe what changed in 1-2 sentences.\n\nFiles added: {}\nFiles deleted: {}\nFiles modified: {}\n\nDiff:\n{}",
-                files_added_s.join(", "), files_deleted_s.join(", "), files_modified_s.join(", "), diff_chunks
-            );
-
-            let client = match reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(30)).build() { Ok(c) => c, Err(_) => return };
-            let resp = client.post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
-                .json(&serde_json::json!({
-                    "model": selected_name,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 256,
-                    "temperature": 0.3,
-                }))
-                .send();
-            let text = match resp.and_then(|r| r.json::<serde_json::Value>()) {
-                Ok(v) => v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string(),
-                Err(_) => String::new(),
-            };
-
-            if !text.is_empty() {
-                if let Ok(db) = crate::db::Database::open(&uhoh_dir.join("uhoh.db")) {
-                    let _ = db.set_ai_summary(rowid, &text);
+            let cfg = match crate::config::Config::load(&uhoh_dir_cl.join("config.toml")) { Ok(c) => c, Err(_) => return };
+            let files = crate::ai::summary::FileChangeSummary { added: files_added, deleted: files_deleted, modified: files_modified };
+            match crate::ai::summary::generate_summary_blocking(&uhoh_dir_cl, &cfg, &diff_chunks, &files) {
+                Ok(text) if !text.is_empty() => {
+                    if let Ok(db) = crate::db::Database::open(&uhoh_dir_cl.join("uhoh.db")) {
+                        let _ = db.set_ai_summary(db_rowid, &text);
                 }
+            }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("AI summary generation failed: {}", e),
             }
         });
     }
@@ -322,7 +282,50 @@ pub fn create_snapshot(
         actual_trigger,
     );
 
+    // Enforce storage limits after snapshot
+    enforce_storage_limit(database, project_path, project_hash, &config)?;
+
     Ok(Some(snapshot_id))
+}
+
+fn enforce_storage_limit(
+    database: &Database,
+    project_path: &Path,
+    project_hash: &str,
+    config: &Config,
+) -> Result<()> {
+    // Calculate project directory size
+    let mut project_size = 0u64;
+    for entry in ignore::WalkBuilder::new(project_path).build() {
+        if let Ok(e) = entry {
+            if let Ok(meta) = e.metadata() {
+                if meta.is_file() { project_size += meta.len(); }
+            }
+        }
+    }
+    let max_blob_size = std::cmp::max(
+        (project_size as f64 * config.storage.storage_limit_fraction) as u64,
+        config.storage.storage_min_bytes,
+    );
+
+    let blob_size = database.total_blob_size_for_project(project_hash)?;
+    if blob_size <= max_blob_size { return Ok(()); }
+
+    tracing::info!(
+        "Blob storage for {} exceeds limit: {:.1}MB > {:.1}MB, pruning...",
+        &project_hash[..8],
+        blob_size as f64 / 1_048_576.0,
+        max_blob_size as f64 / 1_048_576.0,
+    );
+
+    // Delete oldest unpinned snapshots until under limit (approximate freed space)
+    for snap in database.list_snapshots_oldest_first(project_hash)? {
+        if blob_size <= max_blob_size { break; }
+        if snap.pinned { continue; }
+        let _ = database.delete_snapshot(snap.rowid);
+        // Actual blob GC happens via `uhoh gc` or next scheduled GC
+    }
+    Ok(())
 }
 
 /// Load the previous snapshot's file entries as a HashMap for comparison.
@@ -339,7 +342,10 @@ fn load_previous_snapshot_files(
                 CachedFileState {
                     hash: f.hash,
                     size: f.size,
-                    mtime: SystemTime::UNIX_EPOCH, // We don't persist mtime in DB; full rehash on restart
+                    mtime: f
+                        .mtime
+                        .and_then(|s| std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(s as u64)))
+                        .unwrap_or(SystemTime::UNIX_EPOCH),
                     stored: f.stored,
                     executable: f.executable,
                 },
@@ -365,11 +371,11 @@ fn is_likely_git_operation(project_path: &Path) -> bool {
 /// Compute Merkle-style tree hashes for directories.
 /// Each directory gets a hash of its children's hashes, enabling O(log n) diff.
 fn compute_tree_hashes(
-    files: &[(String, String, u64, bool, bool)],
+    files: &[(String, String, u64, bool, bool, Option<i64>)],
 ) -> Vec<(String, String)> {
     // Group files by directory
     let mut dir_contents: HashMap<String, Vec<&str>> = HashMap::new();
-    for (path, hash, _, _, _) in files {
+    for (path, hash, _, _, _, _) in files {
         let dir = match path.rfind('/') {
             Some(pos) => &path[..pos],
             None => ".",

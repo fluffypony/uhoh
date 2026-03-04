@@ -1,5 +1,5 @@
-use anyhow::{bail, Context, Result};
-use std::io::Read;
+use anyhow::{Context, Result};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Store a blob in the CAS. Uses atomic write (write-to-temp, fsync, rename).
@@ -15,16 +15,22 @@ pub fn store_blob(blob_root: &Path, content: &[u8]) -> Result<String> {
     }
 
     // Atomic write: temp file → fsync → rename
-    let tmp_path = dir.join(format!("{}.tmp.{}", &hash, std::process::id()));
+    let tmp_path = dir.join(format!(
+        ".tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
 
     let data = maybe_compress(content);
-    std::fs::write(&tmp_path, &data)
-        .with_context(|| format!("Failed to write temp blob: {}", tmp_path.display()))?;
-
-    // fsync the file
-    let f = std::fs::File::open(&tmp_path)?;
-    f.sync_all()?;
-    drop(f);
+    {
+        let mut f = create_restricted_file(&tmp_path)
+            .with_context(|| format!("Failed to write temp blob: {}", tmp_path.display()))?;
+        f.write_all(&data)?;
+        f.sync_all()?;
+    }
 
     // Atomic rename
     std::fs::rename(&tmp_path, &blob_path).with_context(|| {
@@ -53,67 +59,76 @@ pub fn store_blob_from_file(
     max_binary_bytes: u64,
     max_text_bytes: u64,
 ) -> Result<(String, u64, bool)> {
-    let mut file = std::fs::File::open(file_path)
-        .with_context(|| format!("Cannot open: {}", file_path.display()))?;
-    let meta = file
-        .metadata()
+    let metadata = std::fs::metadata(file_path)
         .with_context(|| format!("Cannot stat: {}", file_path.display()))?;
-    let size = meta.len();
+    let file_size = metadata.len();
 
-    // Stream the file for hashing
+    let file = std::fs::File::open(file_path)
+        .with_context(|| format!("Cannot open: {}", file_path.display()))?;
+    let mut reader = std::io::BufReader::new(file);
     let mut hasher = blake3::Hasher::new();
-    let mut buf = vec![0u8; 64 * 1024]; // 64KB chunks
-    let mut first_chunk = Vec::new();
-    let mut full_content = Vec::new();
-    let mut total_read = 0u64;
 
+    let mut first_chunk = vec![0u8; 8192.min(file_size as usize)];
+    let first_n = reader.read(&mut first_chunk)?;
+    first_chunk.truncate(first_n);
+    let is_binary = content_inspector::inspect(&first_chunk).is_binary();
+    let max_size = if is_binary { max_binary_bytes } else { max_text_bytes };
+    let should_store = file_size <= max_size;
+
+    hasher.update(&first_chunk);
+
+    let mut tmp_path: Option<PathBuf> = None;
+    let mut tmp_file: Option<std::fs::File> = None;
+
+    if should_store {
+        let prefix_dir = blob_root.join("tmp");
+        std::fs::create_dir_all(&prefix_dir)?;
+        let tp = prefix_dir.join(format!(
+            ".tmp.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut f = create_restricted_file(&tp)?;
+        f.write_all(&first_chunk)?;
+        tmp_file = Some(f);
+        tmp_path = Some(tp);
+    }
+
+    let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
+        let n = reader.read(&mut buf)?;
+        if n == 0 { break; }
         hasher.update(&buf[..n]);
-        if first_chunk.len() < 8192 {
-            let take = std::cmp::min(n, 8192 - first_chunk.len());
-            first_chunk.extend_from_slice(&buf[..take]);
+        if let Some(f) = tmp_file.as_mut() {
+            f.write_all(&buf[..n])?;
         }
-        full_content.extend_from_slice(&buf[..n]);
-        total_read += n as u64;
     }
 
     let hash = hasher.finalize().to_hex().to_string();
 
-    // Determine if binary
-    let is_binary = content_inspector::inspect(&first_chunk).is_binary();
-    let max_size = if is_binary {
-        max_binary_bytes
-    } else {
-        max_text_bytes
-    };
-
-    let should_store = total_read <= max_size;
-
-    if should_store {
+    if let Some(tp) = tmp_path.take() {
+        if let Some(f) = tmp_file.take() {
+            f.sync_all()?;
+        }
         let dir = blob_root.join(&hash[..2]);
         std::fs::create_dir_all(&dir)?;
         let blob_path = dir.join(&hash);
         if !blob_path.exists() {
-            let tmp_path = dir.join(format!("{}.tmp.{}", &hash, std::process::id()));
-            let data = maybe_compress(&full_content);
-            std::fs::write(&tmp_path, &data)?;
-            let f = std::fs::File::open(&tmp_path)?;
-            f.sync_all()?;
-            drop(f);
-            std::fs::rename(&tmp_path, &blob_path)?;
+            std::fs::rename(&tp, &blob_path)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&blob_path, std::fs::Permissions::from_mode(0o600)).ok();
             }
+        } else {
+            let _ = std::fs::remove_file(&tp);
         }
     }
 
-    Ok((hash, size, should_store))
+    Ok((hash, file_size, should_store))
 }
 
 /// Read a blob from the CAS with integrity verification.
@@ -224,6 +239,26 @@ pub fn is_executable(path: &Path) -> bool {
         }
     }
     false
+}
+
+#[cfg(unix)]
+fn create_restricted_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_restricted_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
 }
 
 #[cfg(test)]

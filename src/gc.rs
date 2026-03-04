@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 
-use crate::db.Database;
+use crate::db::Database;
 
 /// Run garbage collection: delete blobs not referenced by any snapshot.
 /// Applies a grace period: blobs younger than 10 minutes are never deleted

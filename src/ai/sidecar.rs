@@ -2,6 +2,9 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+use std::time::Instant;
 
 pub struct Sidecar {
     child: Option<Child>,
@@ -36,7 +39,7 @@ impl Sidecar {
             .spawn()
             .context("Failed to spawn sidecar")?;
 
-        let mut sidecar = Sidecar {
+        let sidecar = Sidecar {
             child: Some(child),
             port,
         };
@@ -106,16 +109,94 @@ fn find_sidecar_binary(uhoh_dir: &Path) -> Result<PathBuf> {
         }
     }
 
-    // Check if llama-server is in PATH
-    if let Ok(output) = Command::new("which").arg("llama-server").output() {
-        if output.status.success() {
-            let path = String::from_utf8(output.stdout)?.trim().to_string();
-            return Ok(PathBuf::from(path));
-        }
-    }
-
     anyhow::bail!(
         "llama-server not found. Install it in {:?} or add to PATH.",
         sidecar_dir
     )
+}
+
+// ===== Persistent global sidecar with idle shutdown =====
+
+struct GlobalSidecar {
+    child: Child,
+    port: u16,
+    last_used: Instant,
+}
+
+static GLOBAL_SIDECAR: Lazy<Mutex<Option<GlobalSidecar>>> = Lazy::new(|| Mutex::new(None));
+
+/// Get or spawn a persistent sidecar and return its port.
+pub fn get_or_spawn_port(model_path: &Path, uhoh_dir: &Path, idle_shutdown_secs: u64) -> Result<u16> {
+    // Fast path: if child alive, update last_used and return
+    {
+        let mut guard = GLOBAL_SIDECAR.lock().unwrap();
+        if let Some(ref mut gs) = *guard {
+            // Try a non-blocking check by waiting with zero timeout
+            if let Ok(opt) = gs.child.try_wait() {
+                if opt.is_none() {
+                    gs.last_used = Instant::now();
+                    return Ok(gs.port);
+                }
+                // else: child exited, reset
+                *guard = None;
+            } else {
+                // assume dead and reset
+                *guard = None;
+            }
+        }
+    }
+
+    // Spawn new sidecar
+    let port = find_available_port()?;
+    let sidecar_binary = find_sidecar_binary(uhoh_dir)?;
+    let log_file = std::fs::File::create(uhoh_dir.join("sidecar.log"))?;
+    let child = Command::new(&sidecar_binary)
+        .args([
+            "--model",
+            &model_path.to_string_lossy(),
+            "--port",
+            &port.to_string(),
+            "--host",
+            "127.0.0.1",
+            "--ctx-size",
+            "8192",
+            "--n-gpu-layers",
+            "999",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log_file))
+        .spawn()
+        .context("Failed to spawn sidecar")?;
+
+    // Store globally and start idle watcher thread
+    {
+        let mut guard = GLOBAL_SIDECAR.lock().unwrap();
+        *guard = Some(GlobalSidecar { child, port, last_used: Instant::now() });
+    }
+
+    let idle = idle_shutdown_secs.max(60);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(30));
+        let mut kill = false;
+        {
+            let guard = GLOBAL_SIDECAR.lock().unwrap();
+            if let Some(ref gs) = *guard {
+                if gs.last_used.elapsed().as_secs() >= idle {
+                    kill = true;
+                }
+            } else {
+                break;
+            }
+        }
+        if kill {
+            let mut guard = GLOBAL_SIDECAR.lock().unwrap();
+            if let Some(mut gs) = guard.take() {
+                let _ = gs.child.kill();
+                let _ = gs.child.wait();
+            }
+            break;
+        }
+    });
+
+    Ok(port)
 }

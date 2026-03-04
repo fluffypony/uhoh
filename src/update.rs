@@ -5,6 +5,21 @@ use std::path::Path;
 /// IMPORTANT: Replace this with your actual public key before release.
 const UPDATE_PUBLIC_KEY: &[u8; 32] = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
 
+#[cfg(not(debug_assertions))]
+const _: () = {
+    // Compile-time assertion: key must not be all zeros in release builds
+    let bytes = *UPDATE_PUBLIC_KEY;
+    let mut i = 0;
+    let mut all_zero = true;
+    while i < 32 {
+        if bytes[i] != 0 { all_zero = false; }
+        i += 1;
+    }
+    if all_zero {
+        panic!("UPDATE_PUBLIC_KEY is still the placeholder! Replace before release.");
+    }
+};
+
 #[derive(serde::Deserialize)]
 struct GithubRelease {
     tag_name: String,
@@ -155,27 +170,26 @@ fn verify_ed25519_signature(data: &[u8], signature_bytes: &[u8]) -> Result<bool>
 }
 
 async fn dns_verify_hash(version: &str, asset: &str) -> Result<String> {
-    use hickory_resolver::config::*;
-    use hickory_resolver::TokioAsyncResolver;
-
-    let resolver = TokioAsyncResolver::tokio(
-        ResolverConfig::default(),
-        ResolverOpts::default(),
-    );
-
-    let query = format!("release-{}.{}.releases.uhoh.it.", asset, version);
-
-    let response = resolver
-        .txt_lookup(&query)
-        .await
-        .context("DNS verification failed — no TXT record found")?;
-
-    let txt = response
-        .iter()
-        .next()
-        .context("Empty TXT record")?;
-
-    Ok(txt.to_string())
+    let query = format!("release-{}.{}.releases.uhoh.it", asset, version);
+    // Use nslookup to retrieve TXT records to avoid heavy DNS client deps/APIs
+    let output = std::process::Command::new("nslookup")
+        .args(["-type=TXT", &query])
+        .output()
+        .context("Failed to invoke nslookup for DNS verification")?;
+    if !output.status.success() {
+        anyhow::bail!("nslookup failed for {}", query);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Find first quoted string as TXT content
+    for line in stdout.lines() {
+        if let Some(start) = line.find('"') {
+            if let Some(end) = line[start + 1..].find('"') {
+                let txt = &line[start + 1..start + 1 + end];
+                return Ok(txt.to_string());
+            }
+        }
+    }
+    anyhow::bail!("No TXT record found for {}", query)
 }
 
 async fn apply_update(uhoh_dir: &Path, binary: &[u8]) -> Result<()> {

@@ -85,8 +85,7 @@ indicatif = "0.17"
 # Semantic versioning for updates
 semver = "1.0"
 
-# Cross-platform file locking
-fs2 = "0.4"
+# Cross-platform file locking (removed)
 
 # Windows path canonicalization
 dunce = "1.0"
@@ -106,11 +105,11 @@ once_cell = "1.0"
 # Optional zstd compression (off by default, per spec preference)
 zstd = { version = "0.13", optional = true }
 
-# Platform helpers
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Windows APIs for process checking
-winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi"] }
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi", "psapi"] }
 
 [features]
 default = []

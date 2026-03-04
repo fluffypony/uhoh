@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -35,7 +35,20 @@ pub fn cmd_restore(
             .map(|f| f.path.clone())
             .collect()
     } else {
-        HashSet::new()
+        // No previous snapshot: treat existing files as potentially tracked
+        {
+            let mut set = HashSet::new();
+            for e in crate::ignore_rules::build_walker(project_path) {
+                if let Ok(ent) = e {
+                    if ent.file_type().map_or(false, |ft| ft.is_file()) {
+                        if let Ok(rel) = ent.path().strip_prefix(project_path) {
+                            set.insert(crate::cas::normalize_path(rel));
+                        }
+                    }
+                }
+            }
+            set
+        }
     };
 
     // Compute changes
@@ -86,14 +99,16 @@ pub fn cmd_restore(
 
     // Create pre-restore snapshot for safety
     tracing::info!("Creating pre-restore snapshot...");
-    snapshot::create_snapshot(
+    let cfg = crate::config::Config::load(&uhoh_dir.join("config.toml"))?;
+    let _ = snapshot::create_snapshot(
         uhoh_dir,
         database,
         &project.hash,
         project_path,
         "pre-restore",
         Some(&format!("Before restore to {}", id_str)),
-    )?;
+        &cfg,
+    );
 
     // Delete files (only those tracked by uhoh, not untracked)
     for path in &to_delete {
@@ -114,6 +129,10 @@ pub fn cmd_restore(
 
     for (path, hash, executable) in &to_restore {
         let full_path = project_path.join(path);
+        if path.contains("..") {
+            tracing::warn!("Skipping suspicious path with '..': {}", path);
+            continue;
+        }
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)?;
         }

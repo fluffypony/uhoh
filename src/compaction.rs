@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 
 use crate::config::CompactionConfig;
 use crate::db::{Database, SnapshotRow};
@@ -13,7 +13,7 @@ pub fn compact_project(
 ) -> Result<u64> {
     let snapshots = database.list_snapshots(project_hash)?;
     let now = Utc::now();
-    let mut deleted_count = 0u64;
+    let mut freed_bytes = 0u64;
 
     // Track occupied buckets for O(1) dominance checking
     let mut buckets_5min: std::collections::HashSet<i64> = std::collections::HashSet::new();
@@ -38,15 +38,16 @@ pub fn compact_project(
             continue;
         }
 
-        let ts = parse_timestamp(&snapshot.timestamp);
+        let ts = parse_timestamp(&snapshot.timestamp)
+            .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
         let age = now.signed_duration_since(ts);
 
         // Emergency-delete snapshots expire after configured hours
         if snapshot.trigger == "emergency-delete"
             && age > Duration::hours(config.emergency_expire_hours as i64)
         {
+            freed_bytes += database.estimate_snapshot_blob_size(snapshot.rowid)?;
             database.delete_snapshot(snapshot.rowid)?;
-            deleted_count += 1;
             continue;
         }
 
@@ -95,12 +96,12 @@ pub fn compact_project(
         };
 
         if dominated {
+            freed_bytes += database.estimate_snapshot_blob_size(snapshot.rowid)?;
             database.delete_snapshot(snapshot.rowid)?;
-            deleted_count += 1;
         }
     }
 
-    Ok(deleted_count)
+    Ok(freed_bytes)
 }
 
 fn register_in_buckets(
@@ -112,15 +113,20 @@ fn register_in_buckets(
     bd: &mut std::collections::HashSet<i64>,
     bw: &mut std::collections::HashSet<i64>,
 ) {
-    let ts = parse_timestamp(&snapshot.timestamp);
+    let ts = parse_timestamp(&snapshot.timestamp)
+        .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
     b5.insert(ts.timestamp() / 300);
     bh.insert(ts.timestamp() / 3600);
     bd.insert(ts.timestamp() / 86400);
     bw.insert(ts.timestamp() / 604800);
 }
 
-fn parse_timestamp(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
+fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
+    match DateTime::parse_from_rfc3339(s) {
+        Ok(dt) => Some(dt.with_timezone(&Utc)),
+        Err(e) => {
+            tracing::warn!("Failed to parse timestamp '{}': {} — snapshot will be treated as purgeable", s, e);
+            None
+        }
+    }
 }

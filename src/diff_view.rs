@@ -7,6 +7,9 @@ use std::path::Path;
 
 use crate::cas;
 use crate::db::{Database, ProjectEntry};
+use syntect::easy::HighlightLines;
+// Style imported implicitly via ranges; suppress unused warnings by not importing it explicitly
+use syntect::util::as_24_bit_terminal_escaped;
 
 // Lazy-load syntect assets (avoid ~100ms hit per invocation)
 static SYNTAX_SET: Lazy<syntect::parsing::SyntaxSet> =
@@ -40,14 +43,14 @@ pub fn cmd_diff(
                 .find_snapshot_by_base58(&project.hash, a)?
                 .context("Snapshot not found")?;
             let f1 = database.get_snapshot_files(s1.rowid)?;
-            let f2 = build_current_file_list(uhoh_dir, Path::new(&project.current_path))?;
+            let f2 = build_current_file_list_readonly(Path::new(&project.current_path))?;
             (f1, f2, a.to_string(), "current".to_string())
         }
         (None, None) => {
             // Diff latest snapshot vs current
             if let Some(rowid) = database.latest_snapshot_rowid(&project.hash)? {
                 let f1 = database.get_snapshot_files(rowid)?;
-                let f2 = build_current_file_list(uhoh_dir, Path::new(&project.current_path))?;
+                let f2 = build_current_file_list_readonly(Path::new(&project.current_path))?;
                 (f1, f2, "latest".to_string(), "current".to_string())
             } else {
                 println!("No snapshots to diff against.");
@@ -93,6 +96,14 @@ pub fn cmd_diff(
         writeln!(stdout, "+++ {}/{}", label2, path)?;
 
         let diff = TextDiff::from_lines(&old_content, &new_content);
+        // Try to detect syntax
+        let syntax = SYNTAX_SET
+            .find_syntax_for_file(path)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+        let theme = &THEME_SET.themes["base16-eighties.dark"];
+        let mut highlighter = HighlightLines::new(syntax, theme);
         for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
             writeln!(stdout, "{}", hunk.header())?;
             for change in hunk.iter_changes() {
@@ -101,7 +112,13 @@ pub fn cmd_diff(
                     ChangeTag::Insert => "+",
                     ChangeTag::Equal => " ",
                 };
-                write!(stdout, "{}{}", sign, change)?;
+                // Apply highlighting per line
+                if let Ok(ranges) = highlighter.highlight_line(change.to_string().as_str(), &SYNTAX_SET) {
+                    let escaped = as_24_bit_terminal_escaped(&ranges, false);
+                    write!(stdout, "{}{}", sign, escaped)?;
+                } else {
+                    write!(stdout, "{}{}", sign, change)?;
+                }
             }
         }
     }
@@ -157,51 +174,39 @@ pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> 
 }
 
 /// Build a file list from the current working directory (for diffing against current state).
-fn build_current_file_list(
-    uhoh_dir: &Path,
+fn build_current_file_list_readonly(
     project_path: &Path,
 ) -> Result<Vec<crate::db::FileEntryRow>> {
-    let blob_root = uhoh_dir.join("blobs");
     let walker = crate::ignore_rules::build_walker(project_path);
-    let config = crate::config::Config::load(&uhoh_dir.join("config.toml"))?;
     let mut entries = Vec::new();
-
     for entry in walker {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let entry = match entry { Ok(e) => e, Err(_) => continue };
         let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if path.file_name().map_or(false, |n| n == ".uhoh") {
-            continue;
-        }
-
-        let rel_path = match path.strip_prefix(project_path) {
-            Ok(r) => cas::normalize_path(r),
-            Err(_) => continue,
-        };
-
-        match cas::store_blob_from_file(
-            &blob_root,
-            path,
-            config.storage.max_binary_blob_bytes,
-            config.storage.max_text_blob_bytes,
-        ) {
-            Ok((hash, size, stored)) => {
-                entries.push(crate::db::FileEntryRow {
-                    path: rel_path,
-                    hash,
-                    size,
-                    stored,
-                    executable: cas::is_executable(path),
-                });
+        if !path.is_file() { continue; }
+        if path.file_name().map_or(false, |n| n == ".uhoh") { continue; }
+        let rel_path = match path.strip_prefix(project_path) { Ok(r) => cas::normalize_path(r), Err(_) => continue };
+        // Hash only, do not store in CAS
+        let (hash, size) = {
+            let mut hasher = blake3::Hasher::new();
+            let mut f = std::fs::File::open(path)?;
+            let mut buf = [0u8; 64 * 1024];
+            let mut total = 0u64;
+            loop {
+                let n = std::io::Read::read(&mut f, &mut buf)?;
+                if n == 0 { break; }
+                hasher.update(&buf[..n]);
+                total += n as u64;
             }
-            Err(_) => continue,
-        }
+            (hasher.finalize().to_hex().to_string(), total)
+        };
+        entries.push(crate::db::FileEntryRow {
+            path: rel_path,
+            hash,
+            size,
+            stored: false,
+            executable: cas::is_executable(path),
+            mtime: None,
+        });
     }
-
     Ok(entries)
 }

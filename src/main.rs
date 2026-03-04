@@ -163,7 +163,8 @@ async fn main() -> Result<()> {
             database.add_project(&project_hash, &canonical.to_string_lossy())?;
             println!("Registered: {}", canonical.display());
 
-            snapshot::create_snapshot(&uhoh, &database, &project_hash, &canonical, "manual", Some("Initial snapshot"))?;
+            let cfg = config::Config::load(&uhoh.join("config.toml"))?;
+            snapshot::create_snapshot(&uhoh, &database, &project_hash, &canonical, "manual", Some("Initial snapshot"), &cfg)?;
             println!("Initial snapshot created.");
         }
 
@@ -178,6 +179,12 @@ async fn main() -> Result<()> {
                     database.find_project_by_path(&cwd)?
                 }
             }.context("Project not found")?;
+            // Attempt to remove marker files
+            let project_path = std::path::Path::new(&project.current_path);
+            let marker_git = project_path.join(".git/.uhoh");
+            let marker_root = project_path.join(".uhoh");
+            if marker_git.exists() { std::fs::remove_file(&marker_git).ok(); }
+            if marker_root.exists() { std::fs::remove_file(&marker_root).ok(); }
             database.remove_project(&project.hash)?;
             println!("Removed: {}", project.current_path);
         }
@@ -216,7 +223,8 @@ async fn main() -> Result<()> {
             let project_path = dunce::canonicalize(std::env::current_dir()?)?;
             let project = database.find_project_by_path(&project_path)?.context("Not registered")?;
             let trigger_str = trigger.unwrap_or_else(|| "manual".to_string());
-            snapshot::create_snapshot(&uhoh, &database, &project.hash, &project_path, &trigger_str, message.as_deref())?;
+            let cfg = config::Config::load(&uhoh.join("config.toml"))?;
+            snapshot::create_snapshot(&uhoh, &database, &project.hash, &project_path, &trigger_str, message.as_deref(), &cfg)?;
             println!("Snapshot created.");
         }
 

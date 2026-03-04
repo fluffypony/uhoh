@@ -35,6 +35,7 @@ pub struct FileEntryRow {
     pub size: u64,
     pub stored: bool,
     pub executable: bool,
+    pub mtime: Option<i64>,
 }
 
 impl Database {
@@ -54,8 +55,18 @@ impl Database {
         Ok(db)
     }
 
+    /// Get a connection guard, recovering from mutex poisoning.
+    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("Database mutex was poisoned, recovering");
+                poisoned.into_inner()
+            })
+    }
+
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version (
@@ -151,13 +162,24 @@ impl Database {
             )?;
         }
 
+        // Schema v2: add mtime to snapshot_files and denormalized file_count on snapshots
+        if version < 2 {
+            conn.execute_batch(
+                "
+                ALTER TABLE snapshot_files ADD COLUMN mtime INTEGER;
+                ALTER TABLE snapshots ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;
+                INSERT OR REPLACE INTO schema_version (version) VALUES (2);
+                ",
+            )?;
+        }
+
         Ok(())
     }
 
     // === Projects ===
 
     pub fn add_project(&self, hash: &str, path: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO projects (hash, current_path, created_at) VALUES (?1, ?2, ?3)",
@@ -167,7 +189,7 @@ impl Database {
     }
 
     pub fn get_project(&self, hash: &str) -> Result<Option<ProjectEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.query_row(
             "SELECT hash, current_path, created_at FROM projects WHERE hash = ?1",
             params![hash],
@@ -184,7 +206,7 @@ impl Database {
     }
 
     pub fn find_project_by_path(&self, path: &Path) -> Result<Option<ProjectEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let path_str = path.to_string_lossy();
         conn.query_row(
             "SELECT hash, current_path, created_at FROM projects WHERE current_path = ?1",
@@ -202,8 +224,22 @@ impl Database {
     }
 
     pub fn find_project_by_hash_prefix(&self, prefix: &str) -> Result<Option<ProjectEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let pattern = format!("{}%", prefix);
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM projects WHERE hash LIKE ?1",
+            params![pattern.clone()],
+            |row| row.get(0),
+        )?;
+
+        if count > 1 {
+            anyhow::bail!(
+                "Ambiguous hash prefix '{}' matches {} projects. Use a longer prefix.",
+                prefix, count
+            );
+        }
+
         conn.query_row(
             "SELECT hash, current_path, created_at FROM projects WHERE hash LIKE ?1 LIMIT 1",
             params![pattern],
@@ -220,10 +256,10 @@ impl Database {
     }
 
     pub fn update_project_path(&self, hash: &str, new_path: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
         let now = chrono::Utc::now().to_rfc3339();
-        // Save old path to history
-        let old_path: Option<String> = conn
+        let old_path: Option<String> = tx
             .query_row(
                 "SELECT current_path FROM projects WHERE hash = ?1",
                 params![hash],
@@ -232,27 +268,28 @@ impl Database {
             .optional()?;
         if let Some(old) = old_path {
             if old != new_path {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO project_history (project_hash, old_path, changed_at) VALUES (?1, ?2, ?3)",
                     params![hash, old, now],
                 )?;
             }
         }
-        conn.execute(
+        tx.execute(
             "UPDATE projects SET current_path = ?1 WHERE hash = ?2",
             params![new_path, hash],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn remove_project(&self, hash: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.execute("DELETE FROM projects WHERE hash = ?1", params![hash])?;
         Ok(())
     }
 
     pub fn list_projects(&self) -> Result<Vec<ProjectEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let mut stmt =
             conn.prepare("SELECT hash, current_path, created_at FROM projects ORDER BY created_at")?;
         let rows = stmt.query_map([], |row| {
@@ -272,16 +309,18 @@ impl Database {
     // === Snapshots ===
 
     pub fn next_snapshot_id(&self, project_hash: &str) -> Result<u64> {
-        let conn = self.conn.lock().unwrap();
-        let id: u64 = conn.query_row(
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let id: u64 = tx.query_row(
             "SELECT next_snapshot_id FROM projects WHERE hash = ?1",
             params![project_hash],
             |row| row.get(0),
         )?;
-        conn.execute(
+        tx.execute(
             "UPDATE projects SET next_snapshot_id = ?1 WHERE hash = ?2",
             params![id + 1, project_hash],
         )?;
+        tx.commit()?;
         Ok(id)
     }
 
@@ -294,12 +333,12 @@ impl Database {
         trigger: &str,
         message: &str,
         pinned: bool,
-        files: &[(String, String, u64, bool, bool)], // (path, hash, size, stored, executable)
+        files: &[(String, String, u64, bool, bool, Option<i64>)], // (path, hash, size, stored, executable, mtime)
         deleted: &[(String, String, u64, bool)],       // (path, hash, size, stored)
         tree_hashes: &[(String, String)],              // (dir_path, tree_hash)
     ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
-        let tx = conn.unchecked_transaction()?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
 
         tx.execute(
             "INSERT INTO snapshots (project_hash, snapshot_id, timestamp, trigger, message, pinned)
@@ -310,17 +349,18 @@ impl Database {
 
         {
             let mut file_stmt = tx.prepare(
-                "INSERT INTO snapshot_files (snapshot_rowid, path, hash, size, stored, executable)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO snapshot_files (snapshot_rowid, path, hash, size, stored, executable, mtime)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
-            for (path, hash, size, stored, executable) in files {
+            for (path, hash, size, stored, executable, mtime) in files {
                 file_stmt.execute(params![
                     rowid,
                     path,
                     hash,
                     size,
                     *stored as i32,
-                    *executable as i32
+                    *executable as i32,
+                    mtime,
                 ])?;
             }
         }
@@ -345,16 +385,24 @@ impl Database {
             }
         }
 
+        // Update denormalized file_count if column exists (schema v2)
+        let _ = tx.execute(
+            "UPDATE snapshots SET file_count = (
+                SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = ?1
+            ) WHERE rowid = ?1",
+            params![rowid],
+        );
+
         tx.commit()?;
         Ok(rowid)
     }
 
     pub fn list_snapshots(&self, project_hash: &str) -> Result<Vec<SnapshotRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
-                    (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid) as file_count
+                    COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
              FROM snapshots s
              WHERE s.project_hash = ?1
              ORDER BY s.timestamp DESC",
@@ -379,7 +427,7 @@ impl Database {
     }
 
     pub fn snapshot_count(&self, project_hash: &str) -> Result<u64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM snapshots WHERE project_hash = ?1",
             params![project_hash],
@@ -395,11 +443,11 @@ impl Database {
     ) -> Result<Option<SnapshotRow>> {
         let snapshot_id = crate::cas::base58_to_id(base58_id)
             .context("Invalid snapshot ID")?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.query_row(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
-                    (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid) as fc
+                    COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as fc
              FROM snapshots s
              WHERE s.project_hash = ?1 AND s.snapshot_id = ?2",
             params![project_hash, snapshot_id],
@@ -421,9 +469,9 @@ impl Database {
     }
 
     pub fn get_snapshot_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT path, hash, size, stored, executable
+            "SELECT path, hash, size, stored, executable, mtime
              FROM snapshot_files WHERE snapshot_rowid = ?1",
         )?;
         let rows = stmt.query_map(params![snapshot_rowid], |row| {
@@ -433,6 +481,7 @@ impl Database {
                 size: row.get::<_, i64>(2)? as u64,
                 stored: row.get::<_, i32>(3)? != 0,
                 executable: row.get::<_, i32>(4)? != 0,
+                mtime: row.get::<_, Option<i64>>(5).ok().flatten(),
             })
         })?;
         let mut entries = Vec::new();
@@ -443,7 +492,7 @@ impl Database {
     }
 
     pub fn get_snapshot_deleted_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT path, hash, size, stored FROM snapshot_deleted WHERE snapshot_rowid = ?1",
         )?;
@@ -454,6 +503,7 @@ impl Database {
                 size: row.get::<_, i64>(2)? as u64,
                 stored: row.get::<_, i32>(3)? != 0,
                 executable: false,
+                mtime: None,
             })
         })?;
         let mut entries = Vec::new();
@@ -465,7 +515,7 @@ impl Database {
 
     /// Get the most recent snapshot rowid for a project
     pub fn latest_snapshot_rowid(&self, project_hash: &str) -> Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.query_row(
             "SELECT rowid FROM snapshots WHERE project_hash = ?1 ORDER BY snapshot_id DESC LIMIT 1",
             params![project_hash],
@@ -482,7 +532,7 @@ impl Database {
         file_path: &str,
     ) -> Result<Vec<(u64, String, String, String)>> {
         // Returns (snapshot_id, timestamp, hash, trigger)
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT s.snapshot_id, s.timestamp, f.hash, s.trigger
              FROM snapshot_files f
@@ -507,7 +557,7 @@ impl Database {
 
     /// All blob hashes referenced by any snapshot
     pub fn all_referenced_blob_hashes(&self) -> Result<std::collections::HashSet<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let mut set = std::collections::HashSet::new();
         let mut stmt = conn.prepare("SELECT DISTINCT hash FROM snapshot_files WHERE stored = 1")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -524,13 +574,13 @@ impl Database {
 
     /// Delete old snapshots (used by compaction)
     pub fn delete_snapshot(&self, rowid: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.execute("DELETE FROM snapshots WHERE rowid = ?1", params![rowid])?;
         Ok(())
     }
 
     pub fn set_ai_summary(&self, snapshot_rowid: i64, summary: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.execute(
             "UPDATE snapshots SET ai_summary = ?1 WHERE rowid = ?2",
             params![summary, snapshot_rowid],
@@ -541,7 +591,7 @@ impl Database {
     // === Operations ===
 
     pub fn create_operation(&self, project_hash: &str, label: &str) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO operations (project_hash, label, started_at) VALUES (?1, ?2, ?3)",
@@ -556,7 +606,7 @@ impl Database {
         first_snapshot_id: u64,
         last_snapshot_id: u64,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE operations SET ended_at = ?1, first_snapshot_id = ?2, last_snapshot_id = ?3
@@ -568,7 +618,7 @@ impl Database {
 
     /// Set the first snapshot id of an operation (typically at operation start)
     pub fn set_operation_first_snapshot(&self, op_id: i64, first_snapshot_id: u64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.execute(
             "UPDATE operations SET first_snapshot_id = ?1 WHERE id = ?2",
             params![first_snapshot_id, op_id],
@@ -576,9 +626,19 @@ impl Database {
         Ok(())
     }
 
+    /// Update the last snapshot id of an operation without closing it.
+    pub fn update_operation_last_snapshot(&self, op_id: i64, last_snapshot_id: u64) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE operations SET last_snapshot_id = ?1 WHERE id = ?2",
+            params![last_snapshot_id, op_id],
+        )?;
+        Ok(())
+    }
+
     /// Set the last snapshot id and close an operation (preserves first_snapshot_id)
     pub fn close_operation_with_last(&self, op_id: i64, last_snapshot_id: u64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE operations SET ended_at = ?1, last_snapshot_id = ?2 WHERE id = ?3",
@@ -588,7 +648,7 @@ impl Database {
     }
 
     pub fn get_active_operation(&self, project_hash: &str) -> Result<Option<(i64, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.query_row(
             "SELECT id, label FROM operations WHERE project_hash = ?1 AND ended_at IS NULL
              ORDER BY id DESC LIMIT 1",
@@ -603,7 +663,7 @@ impl Database {
         &self,
         project_hash: &str,
     ) -> Result<Vec<(i64, String, String, Option<String>, Option<u64>, Option<u64>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, label, started_at, ended_at, first_snapshot_id, last_snapshot_id
              FROM operations WHERE project_hash = ?1 ORDER BY id DESC LIMIT 50",
@@ -629,7 +689,7 @@ impl Database {
         &self,
         project_hash: &str,
     ) -> Result<Option<(i64, String, u64, u64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.query_row(
             "SELECT id, label, first_snapshot_id, last_snapshot_id
              FROM operations
@@ -655,11 +715,11 @@ impl Database {
         project_hash: &str,
         snapshot_id: u64,
     ) -> Result<Option<SnapshotRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         conn.query_row(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
-                    (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid) as fc
+                    COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as fc
              FROM snapshots s
              WHERE s.project_hash = ?1 AND s.snapshot_id < ?2
              ORDER BY s.snapshot_id DESC LIMIT 1",
@@ -679,5 +739,58 @@ impl Database {
         )
         .optional()
         .context("Failed to query preceding snapshot")
+    }
+
+    /// List snapshots oldest-first for pruning
+    pub fn list_snapshots_oldest_first(&self, project_hash: &str) -> Result<Vec<SnapshotRow>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
+                    s.ai_summary,
+                    COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+             FROM snapshots s
+             WHERE s.project_hash = ?1
+             ORDER BY s.snapshot_id ASC",
+        )?;
+        let rows = stmt.query_map(params![project_hash], |row| {
+            Ok(SnapshotRow {
+                rowid: row.get(0)?,
+                snapshot_id: row.get::<_, i64>(1)? as u64,
+                timestamp: row.get(2)?,
+                trigger: row.get(3)?,
+                message: row.get(4)?,
+                pinned: row.get::<_, i32>(5)? != 0,
+                ai_summary: row.get(6)?,
+                file_count: row.get::<_, i64>(7)? as u64,
+            })
+        })?;
+        let mut snapshots = Vec::new();
+        for row in rows { snapshots.push(row?); }
+        Ok(snapshots)
+    }
+
+    /// Total size of stored blobs referenced by a project's snapshots (approximate, counts duplicates)
+    pub fn total_blob_size_for_project(&self, project_hash: &str) -> Result<u64> {
+        let conn = self.conn();
+        let size: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(sf.size), 0)
+             FROM snapshot_files sf
+             INNER JOIN snapshots s ON sf.snapshot_rowid = s.rowid
+             WHERE s.project_hash = ?1 AND sf.stored = 1",
+            params![project_hash],
+            |row| row.get(0),
+        )?;
+        Ok(size as u64)
+    }
+
+    /// Estimate the total size of stored blobs referenced by a single snapshot
+    pub fn estimate_snapshot_blob_size(&self, snapshot_rowid: i64) -> Result<u64> {
+        let conn = self.conn();
+        let size: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(size), 0) FROM snapshot_files WHERE snapshot_rowid = ?1 AND stored = 1",
+            params![snapshot_rowid],
+            |row| row.get(0),
+        )?;
+        Ok(size as u64)
     }
 }

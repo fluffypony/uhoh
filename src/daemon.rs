@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+// use std::sync::Arc; // not used currently
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::snapshot;
 use crate::watcher;
+use notify::{RecursiveMode, Watcher as _};
 
 /// Check if a given PID is an alive uhoh process.
 pub fn is_uhoh_process_alive(pid: u32) -> bool {
@@ -163,7 +164,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
         .map(|p| PathBuf::from(&p.current_path))
         .collect();
 
-    let _watcher_handle = watcher::start_watching(&watch_paths, event_tx.clone())?;
+    let mut watcher_handle = watcher::start_watching(&watch_paths, event_tx.clone())?;
 
     // Per-project state
     let mut project_states: HashMap<String, ProjectDaemonState> = HashMap::new();
@@ -175,19 +176,34 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 last_snapshot: Instant::now() - Duration::from_secs(60),
                 pending_changes: std::collections::HashSet::new(),
                 first_change_at: None,
+                last_change_at: None,
             },
         );
     }
 
-    // Handle graceful shutdown
+    // Handle graceful shutdown (SIGINT + SIGTERM)
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        shutdown_tx.send(()).await.ok();
+    tokio::spawn({
+        let shutdown_tx = shutdown_tx.clone();
+        async move {
+            tokio::signal::ctrl_c().await.ok();
+            let _ = shutdown_tx.send(()).await;
+        }
     });
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        let shutdown_tx2 = shutdown_tx.clone();
+        tokio::spawn(async move {
+            sigterm.recv().await;
+            let _ = shutdown_tx2.send(()).await;
+        });
+    }
 
     // Main event loop
     let mut tick_interval = tokio::time::interval(Duration::from_secs(60));
+    let mut update_check_interval = tokio::time::interval(Duration::from_secs(config.update.check_interval_hours * 3600));
     let mut debounce_interval = tokio::time::interval(Duration::from_millis(500));
 
     tracing::info!("Daemon running, watching {} projects", projects.len());
@@ -207,10 +223,27 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
             }
             _ = tick_interval.tick() => {
                 // Periodic tasks: check for moved folders, expire emergency snapshots
-                check_moved_folders(database, &project_states);
+                check_moved_folders(database, &mut watcher_handle, &mut project_states);
+                // Discover newly added projects and watch them
+                check_for_new_projects(database, &mut watcher_handle, &mut project_states);
+                let mut total_freed = 0u64;
                 for project in &projects {
-                    crate::compaction::compact_project(database, &project.hash, &config.compaction).ok();
+                    if let Ok(freed) = crate::compaction::compact_project(database, &project.hash, &config.compaction) {
+                        total_freed = total_freed.saturating_add(freed);
+                    }
                 }
+                if total_freed > 100 * 1024 * 1024 {
+                    tracing::info!("Compaction estimated freed {:.1} MB; triggering GC", total_freed as f64 / 1_048_576.0);
+                    let _ = crate::gc::run_gc(&uhoh_dir, database);
+                }
+            }
+            _ = update_check_interval.tick() => {
+                let uhoh_dir_clone = uhoh_dir.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::update::check_and_apply_update(&uhoh_dir_clone).await {
+                        tracing::debug!("Update check failed: {}", e);
+                    }
+                });
             }
             _ = shutdown_rx.recv() => {
                 tracing::info!("Shutdown signal received");
@@ -229,7 +262,9 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
 pub enum WatchEvent {
     FileChanged(PathBuf),
     FileDeleted(PathBuf),
-    Rescan(PathBuf), // Watcher overflow — need full walk
+    Rescan(PathBuf), // Targeted rescan marker
+    Overflow,        // Global overflow — rescan all projects
+    WatcherDied,     // Bridge thread ended
 }
 
 struct ProjectDaemonState {
@@ -237,6 +272,7 @@ struct ProjectDaemonState {
     last_snapshot: Instant,
     pending_changes: std::collections::HashSet<PathBuf>,
     first_change_at: Option<Instant>,
+    last_change_at: Option<Instant>,
 }
 
 fn handle_watch_event(
@@ -244,17 +280,34 @@ fn handle_watch_event(
     event: &WatchEvent,
     _config: &Config,
 ) {
+    // Global overflow: mark all projects to rescan
+    if let WatchEvent::Overflow = event {
+        let now = Instant::now();
+        for (project_path, state) in states.iter_mut() {
+            state.pending_changes.insert(PathBuf::from(project_path));
+            if state.first_change_at.is_none() { state.first_change_at = Some(now); }
+            state.last_change_at = Some(now);
+        }
+        return;
+    }
+
+    if let WatchEvent::WatcherDied = event {
+        tracing::warn!("Watcher bridge thread terminated; attempting to continue on next tick");
+        return;
+    }
+
     let path = match event {
         WatchEvent::FileChanged(p) | WatchEvent::FileDeleted(p) | WatchEvent::Rescan(p) => p,
+        _ => return,
     };
 
     // Find which project this path belongs to
     for (project_path, state) in states.iter_mut() {
         if path.starts_with(project_path) {
             state.pending_changes.insert(path.clone());
-            if state.first_change_at.is_none() {
-                state.first_change_at = Some(Instant::now());
-            }
+            let now = Instant::now();
+            if state.first_change_at.is_none() { state.first_change_at = Some(now); }
+            state.last_change_at = Some(now);
             break;
         }
     }
@@ -262,7 +315,7 @@ fn handle_watch_event(
 
 async fn process_pending_snapshots(
     uhoh_dir: &Path,
-    database: &Database,
+    _database: &Database,
     states: &mut HashMap<String, ProjectDaemonState>,
     config: &Config,
 ) {
@@ -279,7 +332,8 @@ async fn process_pending_snapshots(
         };
 
         // Check debounce: quiet period elapsed OR max ceiling reached
-        let since_last_change = now.duration_since(first_change);
+        let last_change = state.last_change_at.unwrap_or(first_change);
+        let since_last_change = now.duration_since(last_change);
         let since_last_snapshot = now.duration_since(state.last_snapshot);
 
         let quiet_elapsed = since_last_change >= Duration::from_secs(config.watch.debounce_quiet_secs);
@@ -287,41 +341,49 @@ async fn process_pending_snapshots(
         let min_interval = since_last_snapshot >= Duration::from_secs(config.watch.min_snapshot_interval_secs);
 
         if (quiet_elapsed || max_ceiling) && min_interval {
-            // Create snapshot (catch panics per-project for isolation)
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Create snapshot in blocking task to avoid blocking runtime
+            let uhoh_dir_buf = uhoh_dir.to_path_buf();
+            let db_path = uhoh_dir_buf.join("uhoh.db");
+            let project_hash = state.hash.clone();
+            let proj_path = Path::new(project_path).to_path_buf();
+            let result = tokio::task::spawn_blocking(move || {
+                let database = crate::db::Database::open(&db_path)?;
                 snapshot::create_snapshot(
-                    uhoh_dir,
-                    database,
-                    &state.hash,
-                    Path::new(project_path),
+                    &uhoh_dir_buf,
+                    &database,
+                    &project_hash,
+                    &proj_path,
                     "auto",
                     None,
+                    &crate::config::Config::load(&uhoh_dir_buf.join("config.toml")).unwrap_or_default(),
                 )
-            }));
+            }).await;
 
-            match result {
-                Ok(Ok(Some(_id))) => {
+            match result.unwrap_or_else(|_| Ok(None)) {
+                Ok(Some(_id)) => {
                     state.last_snapshot = now;
                     tracing::debug!("Auto-snapshot for {}", &state.hash[..12]);
                 }
-                Ok(Ok(None)) => {
+                Ok(None) => {
                     // No changes detected
                 }
-                Ok(Err(e)) => {
-                    tracing::error!("Snapshot error for {}: {}", project_path, e);
-                }
-                Err(_) => {
-                    tracing::error!("Snapshot panic for {} (isolated)", project_path);
+                Err(e) => {
+                    tracing::error!("Snapshot error for {}: {:?}", project_path, e);
                 }
             }
 
             state.pending_changes.clear();
             state.first_change_at = None;
+            state.last_change_at = None;
         }
     }
 }
 
-fn check_moved_folders(database: &Database, _states: &HashMap<String, ProjectDaemonState>) {
+fn check_moved_folders(
+    database: &Database,
+    watcher: &mut notify::RecommendedWatcher,
+    states: &mut HashMap<String, ProjectDaemonState>,
+) {
     if let Ok(projects) = database.list_projects() {
         for project in &projects {
             let path = Path::new(&project.current_path);
@@ -343,6 +405,13 @@ fn check_moved_folders(database: &Database, _states: &HashMap<String, ProjectDae
                 for (hash, new_path) in found {
                     if hash == project.hash {
                         if new_path.to_string_lossy() != project.current_path {
+                            // Update watcher: unwatch old, watch new
+                            let _ = watcher.unwatch(Path::new(&project.current_path));
+                            let _ = watcher.watch(&new_path, RecursiveMode::Recursive);
+                            // Update in-memory state key
+                            if let Some(state) = states.remove(&project.current_path) {
+                                states.insert(new_path.to_string_lossy().to_string(), ProjectDaemonState { last_change_at: None, ..state });
+                            }
                             let _ = database.update_project_path(&project.hash, &new_path.to_string_lossy());
                             tracing::info!("Relocated project {} -> {}", &project.hash[..12], new_path.display());
                         }
@@ -379,4 +448,35 @@ fn check_inotify_limit() {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn check_inotify_limit() {}
+
+fn check_for_new_projects(
+    database: &Database,
+    watcher: &mut notify::RecommendedWatcher,
+    states: &mut HashMap<String, ProjectDaemonState>,
+) {
+    if let Ok(projects) = database.list_projects() {
+        for p in projects {
+            let key = p.current_path.clone();
+            if !states.contains_key(&key) {
+                let path = PathBuf::from(&p.current_path);
+                if path.exists() {
+                    if watcher.watch(&path, RecursiveMode::Recursive).is_ok() {
+                        states.insert(
+                            key,
+                            ProjectDaemonState {
+                                hash: p.hash,
+                                last_snapshot: Instant::now() - Duration::from_secs(60),
+                                pending_changes: std::collections::HashSet::new(),
+                                first_change_at: None,
+                                last_change_at: None,
+                            },
+                        );
+                        tracing::info!("Started watching new project: {}", path.display());
+                    }
+                }
+            }
+        }
+    }
+}

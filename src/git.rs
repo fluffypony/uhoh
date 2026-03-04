@@ -61,14 +61,17 @@ pub fn cmd_gitstash(
         tree_entries.push((file.path.clone(), git_hash));
     }
 
-    // Step 2: Build tree object using index plumbing for correct nested directories
-    //  - clear index
+    // Step 2: Build tree object using temporary index to avoid corrupting user's index
+    let git_dir = project_path.join(".git");
+    let tmp_index = git_dir.join("index.uhoh-tmp");
+    std::env::set_var("GIT_INDEX_FILE", &tmp_index);
     run_git(project_path, &["read-tree", "--empty"])?;
-    //  - add every blob via update-index --add --cacheinfo
+    // Build a lookup for executable flag from DB
+    let mut exec_map = std::collections::HashSet::new();
+    let snap_files = database.get_snapshot_files(snap.rowid)?;
+    for f in &snap_files { if f.executable { exec_map.insert(f.path.as_str()); } }
     for (path, blob_hash) in &tree_entries {
-        // detect mode: keep 100755 for executable files stored in snapshot
-        // We don't have per-file executable flag here; best effort: default 100644.
-        let mode = "100644";
+        let mode = if exec_map.contains(path.as_str()) { "100755" } else { "100644" };
         let args = ["update-index", "--add", "--cacheinfo", mode, blob_hash.as_str(), path.as_str()];
         run_git(project_path, &args)?;
     }
@@ -100,10 +103,11 @@ pub fn cmd_gitstash(
         .to_string();
 
     // Step 5: Store as a stash entry
-    run_git(
-        project_path,
-        &["stash", "store", "-m", &msg, &stash_commit],
-    )?;
+    run_git(project_path, &["stash", "store", "-m", &msg, &stash_commit])?;
+
+    // Clean up temp index
+    std::env::remove_var("GIT_INDEX_FILE");
+    let _ = std::fs::remove_file(&tmp_index);
 
     println!(
         "Snapshot {} stashed as git stash entry. Use `git stash pop` to apply.",
@@ -131,9 +135,10 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
 
     let uhoh_hook_content = format!(
         r#"
-# uhoh pre-commit hook — snapshot before every commit
+# BEGIN uhoh pre-commit hook
 "{}" commit --trigger pre-commit "Pre-commit snapshot" 2>/dev/null || true
-#",
+# END uhoh pre-commit hook
+"#,
         exe_str
     );
 
@@ -172,19 +177,21 @@ pub fn remove_hook(project_path: &Path) -> Result<()> {
     }
 
     let content = std::fs::read_to_string(&hook_path)?;
-    if content.contains("uhoh pre-commit hook") {
-        // Remove uhoh lines
-        let filtered: Vec<&str> = content
-            .lines()
-            .filter(|line| !line.contains("uhoh"))
-            .collect();
-        if filtered.len() <= 1 {
-            // Only shebang left
+    if content.contains("# BEGIN uhoh pre-commit hook") {
+        let mut new_content = String::new();
+        let mut in_block = false;
+        for line in content.lines() {
+            if line.contains("# BEGIN uhoh pre-commit hook") { in_block = true; continue; }
+            if line.contains("# END uhoh pre-commit hook") { in_block = false; continue; }
+            if !in_block { new_content.push_str(line); new_content.push('\n'); }
+        }
+        let trimmed = new_content.trim();
+        if trimmed == "#!/bin/sh" || trimmed.is_empty() {
             std::fs::remove_file(&hook_path)?;
             println!("Pre-commit hook removed.");
         } else {
-            std::fs::write(&hook_path, filtered.join("\n"))?;
-            println!("Removed uhoh hook (other hooks preserved).");
+            std::fs::write(&hook_path, new_content)?;
+            println!("Removed uhoh hook block.");
         }
     } else {
         println!("No uhoh hook found in pre-commit.");

@@ -44,8 +44,8 @@ pub fn start_watching(
                             event.paths.first().map(|p| WatchEvent::FileChanged(p.clone()))
                         }
                         EventKind::Other => {
-                            // Rescan event (watcher overflow)
-                            event.paths.first().map(|p| WatchEvent::Rescan(p.clone()))
+                            // Treat as overflow; rescan all
+                            Some(WatchEvent::Overflow)
                         }
                         _ => None,
                     };
@@ -57,13 +57,13 @@ pub fn start_watching(
                 }
                 Err(e) => {
                     tracing::warn!("Watch error: {}", e);
-                    // On error, trigger a rescan
-                    tx_clone
-                        .blocking_send(WatchEvent::Rescan(PathBuf::from(".")))
-                        .ok();
+                    // On error, treat as overflow (global rescan)
+                    let _ = tx_clone.blocking_send(WatchEvent::Overflow);
                 }
             }
         }
+        // Notify daemon that watcher died
+        let _ = tx_clone.blocking_send(WatchEvent::WatcherDied);
     });
 
     Ok(watcher)

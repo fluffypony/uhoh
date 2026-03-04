@@ -1,5 +1,74 @@
 use anyhow::Result;
 
+#[derive(Debug, Clone)]
+pub struct FileChangeSummary {
+    pub added: Vec<String>,
+    pub deleted: Vec<String>,
+    pub modified: Vec<String>,
+}
+
+/// Blocking generator that spawns the sidecar if needed and queries it for a short summary.
+pub fn generate_summary_blocking(
+    uhoh_dir: &std::path::Path,
+    config: &crate::config::Config,
+    diff_text: &str,
+    files: &FileChangeSummary,
+) -> Result<String> {
+    // Truncate diff to configured max context (rough 4 chars/token)
+    let max_chars = config.ai.max_context_tokens.saturating_mul(4);
+    let truncated = if diff_text.len() > max_chars { &diff_text[..max_chars] } else { diff_text };
+
+    // Choose a model tier from config or defaults
+    let tiers = if config.ai.models.is_empty() {
+        crate::ai::models::default_model_tiers()
+    } else {
+        config.ai.models.clone()
+    };
+    // Simple RAM-based selection with 2GB margin
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let total = sys.total_memory() / (1024 * 1024 * 1024);
+    let mut selected = tiers.first().cloned();
+    for t in tiers {
+        if total >= t.min_ram_gb + 2 { selected = Some(t); }
+    }
+    let model = selected.expect("no AI model tiers available");
+
+    // Ensure model is available locally
+    let model_path = match crate::ai::models::ensure_model_downloaded(uhoh_dir, &model) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Cannot download model {}: {}", model.name, e);
+            return Ok(String::new());
+        }
+    };
+
+    // Spawn or reuse sidecar
+    let port = crate::ai::sidecar::get_or_spawn_port(&model_path, uhoh_dir, config.ai.idle_shutdown_secs)?;
+
+    // Build prompt
+    let prompt = format!(
+        "You are analyzing a code snapshot diff. Describe what changed in 1-2 sentences.\n\nFiles added: {}\nFiles deleted: {}\nFiles modified: {}\n\nDiff (possibly truncated):\n{}",
+        files.added.join(", "), files.deleted.join(", "), files.modified.join(", "), truncated
+    );
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+    let resp: serde_json::Value = client
+        .post(format!("http://127.0.0.1:{}/v1/chat/completions", port))
+        .json(&serde_json::json!({
+            "model": model.name,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 256,
+            "temperature": 0.3,
+        }))
+        .send()?
+        .json()?;
+
+    Ok(resp["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string())
+}
+
 /// Generate an AI summary for a snapshot diff.
 /// This is fire-and-forget: failures are logged but never block snapshot creation.
 pub async fn generate_summary(

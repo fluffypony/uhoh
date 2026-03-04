@@ -214,7 +214,7 @@ impl Default for AiConfig {
         Self {
             enabled: false,
             skip_on_battery: default_skip_on_battery(),
-            max_context_tokens: default_max_context_tokens(),
+            max_context_tokens: 200_000,
             idle_shutdown_secs: default_idle_shutdown_secs(),
             min_available_memory_gb: default_min_available_memory_gb(),
             models: Vec::new(),
