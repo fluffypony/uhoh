@@ -445,5 +445,37 @@ fn run_doctor(uhoh_dir: &std::path::Path, database: &db::Database, fix: bool, re
         println!("Removed {} orphaned blobs", orphans.len());
     }
 
+    // 4) Hash verification for referenced blobs (detect on-disk corruption)
+    let mut corrupted = Vec::new();
+    for h in &referenced {
+        let p = blob_root.join(&h[..h.len().min(2)]).join(h);
+        if !p.exists() { continue; }
+        match std::fs::read(&p) {
+            Ok(bytes) => {
+                let actual = blake3::hash(&bytes).to_hex().to_string();
+                if actual != *h {
+                    corrupted.push((h.clone(), p.clone()));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read blob {}: {}", &h[..h.len().min(12)], e);
+            }
+        }
+    }
+    println!("Corrupted blobs (hash mismatch): {}", corrupted.len());
+    for (h, _) in corrupted.iter().take(10) {
+        println!("  corrupt {}...", &h[..h.len().min(12)]);
+    }
+    if fix && !corrupted.is_empty() {
+        let quarantine = uhoh_dir.join("quarantine");
+        std::fs::create_dir_all(&quarantine).ok();
+        let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+        for (h, p) in &corrupted {
+            let target = quarantine.join(format!("corrupt-{}-{}.blob", &h[..h.len().min(12)], ts));
+            let _ = std::fs::rename(p, target);
+        }
+        println!("Moved {} corrupted blobs to {}", corrupted.len(), quarantine.display());
+    }
+
     Ok(())
 }
