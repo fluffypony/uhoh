@@ -64,6 +64,21 @@ pub fn validate_profile_path(path: &std::path::Path) -> Result<()> {
     if !canonical.starts_with(&home) {
         anyhow::bail!("Profile path must be inside the user home directory");
     }
+
+    let forbidden = [
+        home.join(".ssh"),
+        home.join(".gnupg"),
+        home.join(".aws"),
+        home.join("Library/Application Support"),
+    ];
+    for forbidden_path in forbidden {
+        if canonical.starts_with(&forbidden_path) {
+            anyhow::bail!(
+                "Profile path points to a sensitive directory: {}",
+                forbidden_path.display()
+            );
+        }
+    }
     Ok(())
 }
 

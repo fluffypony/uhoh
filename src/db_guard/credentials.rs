@@ -8,11 +8,18 @@ pub struct CredentialMaterial {
 
 pub fn scrub_dsn(dsn: &str) -> String {
     if let Some((scheme, rest)) = dsn.split_once("://") {
-        let rest = rest.split('@').last().unwrap_or(rest);
-        format!("{scheme}://{rest}")
-    } else {
-        dsn.to_string()
+        let mut tail = rest.to_string();
+        if let Some((userinfo, host_and_path)) = rest.split_once('@') {
+            if let Some((user, _password)) = userinfo.split_once(':') {
+                tail = format!("{user}@{host_and_path}");
+            }
+        }
+        if let Some((base, _)) = tail.split_once("?password=") {
+            return format!("{scheme}://{base}");
+        }
+        return format!("{scheme}://{tail}");
     }
+    dsn.to_string()
 }
 
 pub fn ensure_guard_dir(uhoh_dir: &std::path::Path) -> Result<std::path::PathBuf> {

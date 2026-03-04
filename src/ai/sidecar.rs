@@ -45,6 +45,10 @@ pub(crate) static GLOBAL_SIDECAR: Lazy<Mutex<Option<GlobalSidecar>>> =
     Lazy::new(|| Mutex::new(None));
 static SIDECAR_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 
+pub fn sidecar_running() -> bool {
+    GLOBAL_SIDECAR.lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
 /// Get or spawn a persistent sidecar and return its port.
 pub fn get_or_spawn_port(
     model_path: &Path,

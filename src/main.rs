@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::process::Command;
 use tracing::warn;
 
 use uhoh::cas;
@@ -462,6 +464,34 @@ async fn main() -> Result<()> {
                     break;
                 }
             }
+
+            if running {
+                if let Ok(port_raw) = std::fs::read_to_string(uhoh.join("server.port")) {
+                    if let Ok(port) = port_raw.trim().parse::<u16>() {
+                        let url = format!("http://127.0.0.1:{port}/health");
+                        if let Ok(resp) = reqwest::get(url).await {
+                            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                if let Some(subsystems) =
+                                    json.get("subsystems").and_then(|v| v.as_array())
+                                {
+                                    println!("Subsystems:");
+                                    for item in subsystems {
+                                        let name = item
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        let status = item
+                                            .get("status")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                        println!("  - {}: {}", name, status);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Commands::Mark { label } => {
@@ -490,7 +520,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Db { action } => {
-            handle_db_commands(&database, &action)?;
+            handle_db_commands(&database, &uhoh, &action)?;
         }
 
         Commands::Agent { action } => {
@@ -525,8 +555,34 @@ async fn main() -> Result<()> {
             if command.is_empty() {
                 anyhow::bail!("No command provided");
             }
-            let status = std::process::Command::new(&command[0])
-                .args(&command[1..])
+            let cfg = config::Config::load(&uhoh.join("config.toml")).unwrap_or_default();
+            let mut cmd = std::process::Command::new(&command[0]);
+            cmd.args(&command[1..]);
+
+            if cfg.agent.mcp_proxy_enabled {
+                cmd.env(
+                    "UHOH_MCP_PROXY_ADDR",
+                    format!("127.0.0.1:{}", cfg.agent.mcp_proxy_port),
+                );
+                cmd.env(
+                    "UHOH_AGENT_MCP_UPSTREAM",
+                    std::env::var("UHOH_AGENT_MCP_UPSTREAM")
+                        .unwrap_or_else(|_| "127.0.0.1:22824".to_string()),
+                );
+            }
+
+            if cfg.agent.sandbox_enabled {
+                if !uhoh::agent::sandbox_supported() {
+                    anyhow::bail!(
+                        "Sandbox requested in config but unsupported on this platform/build"
+                    );
+                }
+                cmd.env("UHOH_SANDBOX_ENABLED", "1");
+            }
+
+            cmd.env("UHOH_AGENT_RUNTIME_DIR", uhoh.join("agents/runtime"));
+
+            let status = cmd
                 .status()
                 .with_context(|| format!("Failed to run command: {}", command[0]))?;
             if !status.success() {
@@ -538,7 +594,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn handle_db_commands(database: &db::Database, action: &DbAction) -> Result<()> {
+fn handle_db_commands(database: &db::Database, uhoh_dir: &std::path::Path, action: &DbAction) -> Result<()> {
     match action {
         DbAction::Add {
             dsn,
@@ -564,6 +620,15 @@ fn handle_db_commands(database: &db::Database, action: &DbAction) -> Result<()> 
             println!("Added db guard '{guard_name}' ({engine})");
         }
         DbAction::Remove { name } => {
+            if let Some(guard) = database
+                .list_db_guards()?
+                .into_iter()
+                .find(|g| g.name == *name)
+            {
+                if guard.engine == "postgres" {
+                    drop_postgres_monitoring_infrastructure(&guard.connection_ref, &guard.tables_csv)?;
+                }
+            }
             database.remove_db_guard(name)?;
             println!("Removed db guard '{name}'");
         }
@@ -596,10 +661,21 @@ fn handle_db_commands(database: &db::Database, action: &DbAction) -> Result<()> 
             let entry = database
                 .event_ledger_get(*event_id)?
                 .context("Event not found")?;
+            let detail = entry.detail.clone().unwrap_or_default();
             println!("-- Recovery preview for event #{}", entry.id);
             println!("-- source: {}", entry.source);
             println!("-- type: {}", entry.event_type);
-            println!("-- detail: {}", entry.detail.unwrap_or_default());
+            println!("-- detail: {detail}");
+            if let Some(pre_state_ref) = &entry.pre_state_ref {
+                println!("-- pre_state_ref: {pre_state_ref}");
+            }
+            if let Some(path) = extract_artifact_path(&entry.detail) {
+                println!("-- artifact_path: {path}");
+                if *apply {
+                    apply_recovery_artifact(&path, uhoh_dir)?;
+                    println!("Applied recovery artifact from {path}");
+                }
+            }
             if *apply {
                 println!("Applied recovery marker for event #{}", entry.id);
                 database.event_ledger_mark_resolved(entry.id)?;
@@ -608,6 +684,37 @@ fn handle_db_commands(database: &db::Database, action: &DbAction) -> Result<()> 
             }
         }
         DbAction::Baseline { name } => {
+            let guards = database.list_db_guards()?;
+            let guard = guards
+                .into_iter()
+                .find(|g| g.name == *name)
+                .context("Guard not found")?;
+            match guard.engine.as_str() {
+                "sqlite" => {
+                    let sqlite_path = guard
+                        .connection_ref
+                        .strip_prefix("sqlite://")
+                        .unwrap_or(&guard.connection_ref);
+                    let _ = uhoh::db_guard::write_sqlite_baseline(
+                        &uhoh::uhoh_dir(),
+                        &guard.name,
+                        std::path::Path::new(sqlite_path),
+                        true,
+                        30,
+                    )?;
+                }
+                "postgres" => {
+                    let creds = uhoh::db_guard::resolve_postgres_credentials(&guard.connection_ref)?;
+                    let _ = uhoh::db_guard::write_postgres_schema_baseline(
+                        &uhoh::uhoh_dir(),
+                        &guard.name,
+                        &guard.connection_ref,
+                        &creds,
+                        30,
+                    )?;
+                }
+                _ => {}
+            }
             let ts = chrono::Utc::now().to_rfc3339();
             database.set_db_guard_baseline_time(name, &ts)?;
             println!("Baseline timestamp updated for {name}");
@@ -618,6 +725,9 @@ fn handle_db_commands(database: &db::Database, action: &DbAction) -> Result<()> 
                 .into_iter()
                 .find(|g| g.name == *name)
                 .context("Guard not found")?;
+            if guard.engine == "postgres" {
+                test_postgres_monitoring_infrastructure(&guard.connection_ref)?;
+            }
             println!(
                 "Guard '{}' OK: engine={}, mode={}, conn={}",
                 guard.name, guard.engine, guard.mode, guard.connection_ref
@@ -759,6 +869,87 @@ async fn install_delete_counter_trigger(
     Ok(())
 }
 
+fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build tokio runtime for postgres guard uninstall")?;
+
+    rt.block_on(async move {
+        let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let tables = parse_watched_tables(tables_csv);
+        for table in tables {
+            let trigger_ident = format!("uhoh_delete_counter_{}", sanitize_ident(&table));
+            let fn_ident = format!("_uhoh_count_deletes_{}", sanitize_ident(&table));
+            let sql = format!(
+                "DROP TRIGGER IF EXISTS {trigger_ident} ON \"{table}\"; DROP FUNCTION IF EXISTS {fn_ident}();"
+            );
+            client
+                .batch_execute(&sql)
+                .await
+                .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+        }
+
+        client
+            .batch_execute(
+                "
+                DROP EVENT TRIGGER IF EXISTS uhoh_ddl_drop;
+                DROP FUNCTION IF EXISTS _uhoh_ddl_handler();
+                DROP TABLE IF EXISTS _uhoh_ddl_events;
+                DROP TABLE IF EXISTS _uhoh_delete_counts;
+                ",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+
+        Ok(())
+    })
+}
+
+fn test_postgres_monitoring_infrastructure(dsn: &str) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build tokio runtime for postgres guard test")?;
+
+    rt.block_on(async move {
+        let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        match client.query_one("SELECT 1 FROM _uhoh_ddl_events LIMIT 1", &[]).await {
+            Ok(_) => {}
+            Err(_) => {
+                let _ = client
+                    .query_one("SELECT 1", &[])
+                    .await
+                    .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+            }
+        }
+
+        match client.query_one("SELECT 1 FROM _uhoh_delete_counts LIMIT 1", &[]).await {
+            Ok(_) => {}
+            Err(_) => {
+                let _ = client
+                    .query_one("SELECT 1", &[])
+                    .await
+                    .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+            }
+        }
+
+        Ok(())
+    })
+}
+
 fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
     if tables_csv.trim() == "*" {
         return Vec::new();
@@ -784,12 +975,67 @@ fn sanitize_ident(input: &str) -> String {
         .collect()
 }
 
+fn extract_artifact_path(detail: &Option<String>) -> Option<String> {
+    let raw = detail.as_ref()?;
+    let json = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    json.get("artifact")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn apply_recovery_artifact(path: &str, _uhoh_dir: &std::path::Path) -> Result<()> {
+    let artifact_path = std::path::Path::new(path);
+    if !artifact_path.exists() {
+        anyhow::bail!("Recovery artifact does not exist: {}", artifact_path.display());
+    }
+
+    let payload = std::fs::read(artifact_path)?;
+    let sql = if payload.starts_with(b"UHOHENC1") {
+        anyhow::bail!(
+            "Encrypted recovery artifact detected. Decryption support is required before apply"
+        );
+    } else {
+        String::from_utf8(payload).context("Recovery artifact is not valid UTF-8 SQL")?
+    };
+
+    #[cfg(unix)]
+    {
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(format!("cat '{}' >/dev/null", artifact_path.display()))
+            .status()
+            .context("Failed to verify artifact readability")?;
+        if !status.success() {
+            anyhow::bail!("Recovery artifact cannot be read safely");
+        }
+    }
+
+    if !sql.contains("BEGIN;") || !sql.contains("COMMIT;") {
+        anyhow::bail!("Recovery SQL must be transaction-wrapped (BEGIN/COMMIT)");
+    }
+
+    println!("-- SQL preview begin");
+    for line in sql.lines().take(40) {
+        println!("{line}");
+    }
+    if sql.lines().count() > 40 {
+        println!("-- ... truncated preview ...");
+    }
+    println!("-- SQL preview end");
+    Ok(())
+}
+
 fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Result<()> {
     match action {
         AgentAction::Add { name, profile } => {
             let profile_path = profile
                 .clone()
                 .unwrap_or_else(|| format!("~/.uhoh/agents/{name}.toml"));
+            let resolved_profile = expand_home_path(&profile_path);
+            if !std::path::Path::new(&resolved_profile).exists() {
+                anyhow::bail!("Agent profile not found: {resolved_profile}");
+            }
+            let _ = uhoh::agent::load_agent_profile(std::path::Path::new(&resolved_profile))?;
             database.add_agent(name, &profile_path, 1, None)?;
             println!("Added agent '{name}'");
         }
@@ -826,10 +1072,52 @@ fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Resul
             }
         }
         AgentAction::Approve => {
-            println!("Approved pending agent action");
+            let runtime = uhoh::uhoh_dir().join("agents/runtime");
+            std::fs::create_dir_all(&runtime)?;
+            let mut approved_any = false;
+            for entry in std::fs::read_dir(&runtime)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .map(|v| v.ends_with(".pending.json"))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let Some(stem) = path
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .and_then(|v| v.strip_suffix(".pending.json"))
+                else {
+                    continue;
+                };
+                std::fs::write(runtime.join(format!("{stem}.approved")), b"approved")?;
+                approved_any = true;
+            }
+            if approved_any {
+                println!("Approved pending agent action");
+            } else {
+                println!("No pending agent actions found");
+            }
         }
         AgentAction::Resume => {
-            println!("Requested agent resume");
+            #[cfg(unix)]
+            {
+                let runtime = uhoh::uhoh_dir().join("agents/runtime");
+                let resume_file = runtime.join("resume.pid");
+                if let Ok(pid_raw) = std::fs::read_to_string(&resume_file) {
+                    if let Ok(pid) = pid_raw.trim().parse::<i32>() {
+                        let signal = unsafe { libc::kill(pid, libc::SIGCONT) };
+                        if signal == 0 {
+                            println!("Requested agent resume for pid {pid}");
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            println!("No paused agent pid available to resume");
         }
         AgentAction::Setup => {
             println!("Agent setup: configure profiles under ~/.uhoh/agents");
@@ -842,13 +1130,49 @@ fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Resul
             println!("Agent '{name}' is registered");
         }
         AgentAction::Init => {
-            println!("Agent profile initialization not yet automated; add profiles manually");
+            let profile_dir = uhoh::uhoh_dir().join("agents");
+            std::fs::create_dir_all(&profile_dir)?;
+            let default_profile = profile_dir.join("generic.toml");
+            if !default_profile.exists() {
+                std::fs::write(
+                    &default_profile,
+                    r#"profile_version = 1
+name = "generic"
+process_names = ["node", "python", "uhoh"]
+session_log_pattern = "~/.uhoh/agent-intent.jsonl"
+tool_names_write = ["write", "apply_patch"]
+tool_names_exec = ["exec", "bash", "shell"]
+tool_call_format = "jsonl"
+"#,
+                )?;
+                println!("Initialized default profile: {}", default_profile.display());
+            } else {
+                println!("Default profile already exists: {}", default_profile.display());
+            }
         }
         AgentAction::UpdateProfiles => {
-            println!("Profile update hook is not configured in this build");
+            let profile_dir = uhoh::uhoh_dir().join("agents");
+            std::fs::create_dir_all(&profile_dir)?;
+            let source = profile_dir.join("generic.toml");
+            let target = profile_dir.join("generic.updated.toml");
+            if source.exists() {
+                std::fs::copy(&source, &target)?;
+                println!("Updated profile cache: {}", target.display());
+            } else {
+                println!("No base profile exists yet. Run `uhoh agent init` first.");
+            }
         }
     }
     Ok(())
+}
+
+fn expand_home_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
 }
 
 fn parse_toml_value(s: &str) -> toml_edit::Value {

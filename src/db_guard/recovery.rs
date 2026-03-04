@@ -167,7 +167,19 @@ fn postgres_schema_dump(connection_ref: &str, creds: &CredentialMaterial) -> Res
         let err = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("pg_dump failed: {}", err.trim());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let dump = String::from_utf8_lossy(&output.stdout).to_string();
+    Ok(wrap_in_transaction(&dump))
+}
+
+fn wrap_in_transaction(sql: &str) -> String {
+    let trimmed = sql.trim();
+    let has_begin = trimmed.lines().any(|line| line.trim().eq_ignore_ascii_case("BEGIN;"));
+    let has_commit = trimmed.lines().any(|line| line.trim().eq_ignore_ascii_case("COMMIT;"));
+    if has_begin && has_commit {
+        format!("{trimmed}\n")
+    } else {
+        format!("BEGIN;\n{trimmed}\nCOMMIT;\n")
+    }
 }
 
 fn maybe_encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {

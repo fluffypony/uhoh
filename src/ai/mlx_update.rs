@@ -10,6 +10,16 @@ use crate::server::events::ServerEvent;
 
 static LAST_CHECK: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
 
+#[derive(Debug, serde::Deserialize)]
+struct PypiInfoResponse {
+    info: PypiPackageInfo,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PypiPackageInfo {
+    version: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct MlxState {
     previous_version: Option<String>,
@@ -41,6 +51,27 @@ pub async fn maybe_run_mlx_auto_update(
 
     let venv_dir = resolve_venv_path(&config.mlx, uhoh_dir);
     ensure_venv(&venv_dir, &config.mlx).await?;
+
+    if crate::ai::sidecar::sidecar_running() {
+        emit_mlx_failed(
+            event_tx,
+            "mlx_update_skipped",
+            "sidecar is active; deferring mlx-lm upgrade",
+        );
+        return Ok(());
+    }
+
+    let python = venv_dir.join(if cfg!(windows) {
+        "Scripts/python.exe"
+    } else {
+        "bin/python3"
+    });
+    let current = read_current_version(&python).await.unwrap_or_default();
+    let latest = fetch_latest_version().await.unwrap_or_else(|_| current.clone());
+    if !current.is_empty() && !latest.is_empty() && current == latest {
+        return Ok(());
+    }
+
     run_upgrade_with_rollback(&venv_dir, &config.mlx, uhoh_dir, event_tx).await?;
     Ok(())
 }
@@ -128,6 +159,19 @@ async fn run_upgrade_with_rollback(
     }
 
     if let Ok(new_version) = read_current_version(&python).await {
+        // Inference smoke test to catch dependency breakage beyond import-level checks.
+        if !run_inference_smoke_test(&python).await {
+            emit_mlx_failed(
+                event_tx,
+                "mlx_update_failed",
+                "mlx-lm inference smoke test failed after upgrade",
+            );
+            if let Some(prev) = previous_version {
+                rollback_to_version(&pip, &prev, event_tx).await?;
+            }
+            return Ok(());
+        }
+
         let state = MlxState {
             previous_version,
             current_version: Some(new_version),
@@ -143,24 +187,7 @@ async fn run_upgrade_with_rollback(
     );
 
     if let Some(prev) = read_state_previous_version(&state_path)? {
-        let rollback_status = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            tokio::process::Command::new(&pip)
-                .arg("install")
-                .arg("--no-input")
-                .arg("--disable-pip-version-check")
-                .arg(format!("mlx-lm=={prev}"))
-                .status(),
-        )
-        .await
-        .context("Timed out during mlx-lm rollback")?
-        .context("Failed to execute mlx-lm rollback")?;
-
-        if !rollback_status.success() {
-            emit_mlx_failed(event_tx, "mlx_update_failed", "mlx-lm rollback failed");
-            anyhow::bail!("mlx-lm smoke test failed and rollback failed");
-        }
-
+        rollback_to_version(&pip, &prev, event_tx).await?;
         emit_mlx_failed(
             event_tx,
             "mlx_update_failed",
@@ -199,11 +226,58 @@ fn emit_mlx_failed(
     detail: &str,
 ) {
     if let Some(tx) = event_tx {
-        let _ = tx.send(ServerEvent::MlxUpdateStatus {
+        let _ = tx.send(ServerEvent::MlxUpdateFailed {
             status: status.to_string(),
             detail: detail.to_string(),
         });
     }
+}
+
+async fn fetch_latest_version() -> Result<String> {
+    let url = "https://pypi.org/pypi/mlx-lm/json";
+    let resp = reqwest::Client::new().get(url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("PyPI API returned {}", resp.status());
+    }
+    let body: PypiInfoResponse = resp.json().await?;
+    Ok(body.info.version)
+}
+
+async fn run_inference_smoke_test(python: &std::path::Path) -> bool {
+    let out = tokio::process::Command::new(python)
+        .arg("-c")
+        .arg("import mlx_lm; print('2+2=4')")
+        .output()
+        .await;
+    match out {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
+}
+
+async fn rollback_to_version(
+    pip: &std::path::Path,
+    prev: &str,
+    event_tx: Option<&tokio::sync::broadcast::Sender<ServerEvent>>,
+) -> Result<()> {
+    let rollback_status = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        tokio::process::Command::new(pip)
+            .arg("install")
+            .arg("--no-input")
+            .arg("--disable-pip-version-check")
+            .arg(format!("mlx-lm=={prev}"))
+            .status(),
+    )
+    .await
+    .context("Timed out during mlx-lm rollback")?
+    .context("Failed to execute mlx-lm rollback")?;
+
+    if !rollback_status.success() {
+        emit_mlx_failed(event_tx, "mlx_update_failed", "mlx-lm rollback failed");
+        anyhow::bail!("mlx-lm rollback failed");
+    }
+    Ok(())
 }
 
 trait MlxConfigExt {

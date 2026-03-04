@@ -5,6 +5,10 @@ mod profiles;
 mod sandbox;
 mod undo;
 
+pub use profiles::load_agent_profile;
+pub use sandbox::sandbox_supported;
+pub use undo::resolve_event;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;

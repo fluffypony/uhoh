@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -86,7 +86,10 @@ fn handle_connection(
                 .map(|m| m == "tools/call")
                 .unwrap_or(false)
             {
-                intercept_tool_call(&json, uhoh_dir, ledger, config, &mut upstream)?;
+                if intercept_tool_call(&json, uhoh_dir, ledger, config)? {
+                    // Pause mode: hold and do not forward this call.
+                    continue;
+                }
             }
         }
 
@@ -110,8 +113,7 @@ fn intercept_tool_call(
     uhoh_dir: &Path,
     ledger: &crate::event_ledger::EventLedger,
     config: &crate::config::Config,
-    upstream: &mut TcpStream,
-) -> Result<()> {
+) -> Result<bool> {
     let tool = call
         .pointer("/params/name")
         .and_then(|v| v.as_str())
@@ -146,11 +148,16 @@ fn intercept_tool_call(
 
     let is_dangerous = is_dangerous_tool_call(tool, path.as_deref(), &config.agent.dangerous_patterns);
     if is_dangerous {
+        let approval_id = format!(
+            "approval-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
         let mut danger = new_event("agent", "dangerous_agent_action", "critical");
         danger.path = path.clone();
         danger.pre_state_ref = pre_state_ref.clone();
         danger.detail = Some(
             serde_json::json!({
+                "approval_id": approval_id,
                 "tool": tool,
                 "args": args,
                 "on_dangerous_change": config.agent.on_dangerous_change,
@@ -160,9 +167,35 @@ fn intercept_tool_call(
         let _ = ledger.append(danger);
 
         if config.agent.on_dangerous_change.eq_ignore_ascii_case("pause") {
-            let pause_ms = std::time::Duration::from_millis(500);
-            std::thread::sleep(pause_ms);
-            let _ = upstream;
+            write_pending_approval(
+                uhoh_dir,
+                &approval_id,
+                tool,
+                path.as_deref(),
+                &args,
+                config.agent.pause_timeout_seconds,
+            )?;
+
+            let approved = wait_for_approval(
+                uhoh_dir,
+                &approval_id,
+                config.agent.pause_timeout_seconds,
+                ledger,
+            )?;
+            if !approved {
+                let mut timeout_event = new_event("agent", "dangerous_action_timeout", "warn");
+                timeout_event.path = path.clone();
+                timeout_event.detail = Some(
+                    serde_json::json!({
+                        "approval_id": approval_id,
+                        "tool": tool,
+                        "timeout_seconds": config.agent.pause_timeout_seconds,
+                        "action": "auto_resumed",
+                    })
+                    .to_string(),
+                );
+                let _ = ledger.append(timeout_event);
+            }
         }
     }
 
@@ -177,7 +210,7 @@ fn intercept_tool_call(
         .to_string(),
     );
     let _ = ledger.append(event);
-    Ok(())
+    Ok(false)
 }
 
 fn is_dangerous_tool_call(tool: &str, path: Option<&str>, patterns: &[String]) -> bool {
@@ -191,4 +224,86 @@ fn is_dangerous_tool_call(tool: &str, path: Option<&str>, patterns: &[String]) -
 
 fn resolve_upstream_addr() -> String {
     std::env::var("UHOH_AGENT_MCP_UPSTREAM").unwrap_or_else(|_| "127.0.0.1:22824".to_string())
+}
+
+#[derive(serde::Serialize)]
+struct PendingApproval {
+    approval_id: String,
+    created_at: String,
+    tool: String,
+    path: Option<String>,
+    timeout_seconds: u64,
+    args: serde_json::Value,
+}
+
+fn runtime_dir(uhoh_dir: &Path) -> PathBuf {
+    uhoh_dir.join("agents").join("runtime")
+}
+
+fn pending_approval_path(uhoh_dir: &Path, approval_id: &str) -> PathBuf {
+    runtime_dir(uhoh_dir).join(format!("{approval_id}.pending.json"))
+}
+
+fn approved_path(uhoh_dir: &Path, approval_id: &str) -> PathBuf {
+    runtime_dir(uhoh_dir).join(format!("{approval_id}.approved"))
+}
+
+fn write_pending_approval(
+    uhoh_dir: &Path,
+    approval_id: &str,
+    tool: &str,
+    path: Option<&str>,
+    args: &serde_json::Value,
+    timeout_seconds: u64,
+) -> Result<()> {
+    let runtime = runtime_dir(uhoh_dir);
+    std::fs::create_dir_all(&runtime)
+        .with_context(|| format!("Failed to create runtime dir: {}", runtime.display()))?;
+
+    let pending = PendingApproval {
+        approval_id: approval_id.to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        tool: tool.to_string(),
+        path: path.map(str::to_string),
+        timeout_seconds,
+        args: args.clone(),
+    };
+    let serialized = serde_json::to_vec_pretty(&pending)?;
+    std::fs::write(pending_approval_path(uhoh_dir, approval_id), serialized)?;
+    Ok(())
+}
+
+fn wait_for_approval(
+    uhoh_dir: &Path,
+    approval_id: &str,
+    timeout_seconds: u64,
+    ledger: &crate::event_ledger::EventLedger,
+) -> Result<bool> {
+    let pending = pending_approval_path(uhoh_dir, approval_id);
+    let approved = approved_path(uhoh_dir, approval_id);
+    let runtime = runtime_dir(uhoh_dir);
+    let timeout = std::time::Duration::from_secs(timeout_seconds.max(1));
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if approved.exists() {
+            let mut event = new_event("agent", "dangerous_action_approved", "info");
+            event.detail = Some(
+                serde_json::json!({
+                    "approval_id": approval_id,
+                })
+                .to_string(),
+            );
+            let _ = ledger.append(event);
+            let _ = std::fs::remove_file(&approved);
+            let _ = std::fs::remove_file(&pending);
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = std::fs::create_dir_all(&runtime);
+            let _ = std::fs::write(runtime.join("resume.pid"), std::process::id().to_string());
+            let _ = std::fs::remove_file(&pending);
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
 }

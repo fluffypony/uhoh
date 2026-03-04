@@ -37,7 +37,7 @@ struct SubsystemRunner {
     name: String,
     subsystem: Arc<Mutex<Box<dyn Subsystem>>>,
     task: Option<JoinHandle<Result<()>>>,
-    restart_count: u32,
+    restart_times: Vec<std::time::Instant>,
 }
 
 pub struct SubsystemManager {
@@ -62,7 +62,7 @@ impl SubsystemManager {
             name: subsystem.name().to_string(),
             subsystem: Arc::new(Mutex::new(subsystem)),
             task: None,
-            restart_count: 0,
+            restart_times: Vec::new(),
         });
     }
 
@@ -70,11 +70,13 @@ impl SubsystemManager {
         self.shutdown.clone()
     }
 
-    pub fn health_snapshot(&self) -> Vec<(String, SubsystemHealth)> {
-        self.runners
-            .iter()
-            .map(|r| (r.name.clone(), SubsystemHealth::Healthy))
-            .collect()
+    pub async fn health_snapshot(&self) -> Vec<(String, SubsystemHealth)> {
+        let mut out = Vec::with_capacity(self.runners.len());
+        for runner in &self.runners {
+            let subsystem = runner.subsystem.lock().await;
+            out.push((runner.name.clone(), subsystem.health_check()));
+        }
+        out
     }
 
     pub async fn start_all(&mut self, ctx: SubsystemContext) {
@@ -108,12 +110,17 @@ impl SubsystemManager {
                 }
             }
 
-            runner.restart_count = runner.restart_count.saturating_add(1);
-            if runner.restart_count > self.max_restarts {
+            let now = std::time::Instant::now();
+            runner
+                .restart_times
+                .retain(|t| now.duration_since(*t) <= self._restart_window);
+            runner.restart_times.push(now);
+            if runner.restart_times.len() as u32 > self.max_restarts {
                 tracing::error!(
-                    "Subsystem '{}' exceeded restart threshold ({}), leaving disabled",
+                    "Subsystem '{}' exceeded restart threshold ({} in {:?}), leaving disabled",
                     runner.name,
-                    self.max_restarts
+                    self.max_restarts,
+                    self._restart_window
                 );
                 continue;
             }
@@ -148,25 +155,4 @@ fn start_runner_task(
         let mut guard = subsystem.lock().await;
         guard.run(shutdown, ctx).await
     }));
-}
-
-struct NoopSubsystem;
-
-#[async_trait]
-impl Subsystem for NoopSubsystem {
-    fn name(&self) -> &str {
-        "noop"
-    }
-
-    async fn run(&mut self, _shutdown: CancellationToken, _ctx: SubsystemContext) -> Result<()> {
-        Ok(())
-    }
-
-    async fn shutdown(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    fn health_check(&self) -> SubsystemHealth {
-        SubsystemHealth::Healthy
-    }
 }

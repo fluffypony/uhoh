@@ -15,10 +15,15 @@ use crate::subsystem::{Subsystem, SubsystemContext, SubsystemHealth};
 
 pub use credentials::scrub_dsn;
 pub use credentials::scrub_error_message;
+pub use credentials::ensure_guard_dir;
+pub use credentials::resolve_postgres_credentials;
+pub use recovery::write_postgres_schema_baseline;
+pub use recovery::write_sqlite_baseline;
 
 pub struct DbGuardSubsystem {
     healthy: bool,
     sqlite_versions: HashMap<String, i64>,
+    mysql_states: HashMap<String, mysql::MysqlGuardState>,
 }
 
 impl DbGuardSubsystem {
@@ -26,6 +31,7 @@ impl DbGuardSubsystem {
         Self {
             healthy: true,
             sqlite_versions: HashMap::new(),
+            mysql_states: HashMap::new(),
         }
     }
 }
@@ -87,7 +93,11 @@ impl DbGuardSubsystem {
                     postgres::tick_postgres_guard(ctx, guard)?;
                 }
                 "mysql" => {
-                    mysql::tick_mysql_guard(ctx, guard)?;
+                    let state = self
+                        .mysql_states
+                        .entry(guard.name.clone())
+                        .or_default();
+                    mysql::tick_mysql_guard(ctx, guard, state)?;
                 }
                 _ => {}
             }
