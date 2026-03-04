@@ -221,8 +221,8 @@ async fn main() -> Result<()> {
                     // Show files with storage info
                     let files = database.get_snapshot_files(s.rowid)?;
                     for f in files.iter().take(10) {
-                        let method = if f.stored { "stored" } else { "none" };
-                        println!("       {:>8}  {:>6}  {}", f.size, method, f.path);
+                        let method = match f.storage_method { 0 => "none", 1 => "copy", 2 => "reflink", 3 => "hardlink", _ => "none" };
+                        println!("       {:>8}  {:>7}  {}", f.size, method, f.path);
                     }
                     if files.len() > 10 { println!("       ... and {} more", files.len() - 10); }
                 }

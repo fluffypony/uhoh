@@ -233,16 +233,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: &Database) -> Result<()> 
                 // Discover newly added projects and watch them
                 check_for_new_projects(database, &mut watcher_handle, &mut project_states);
                 // Attempt to recover watcher if it died earlier
-                if let Some(paths) = {
-                    // Collect paths if watcher appears unhealthy (dummy heuristic: none)
-                    Some(project_states.values().map(|s| Path::new(&s.hash).to_path_buf()).collect::<Vec<_>>())
-                } {
-                    // No direct health API; watcher::start_watching will reinit
-                    if let Ok(new_watcher) = watcher::start_watching(&paths, event_tx.clone()) {
-                        watcher_handle = new_watcher;
-                        tracing::info!("File watcher recovered");
-                    }
-                }
+                // Attempt watcher recovery only when we get WatcherDied events; here keep lightweight
                 // If an update has been applied (trigger file present), exit gracefully so service manager can restart
                 if update_trigger.exists() {
                     tracing::info!("Update ready trigger detected; stopping daemon for restart");

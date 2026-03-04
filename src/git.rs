@@ -83,10 +83,26 @@ pub fn cmd_gitstash(
     let mut exec_map = std::collections::HashSet::new();
     let snap_files = database.get_snapshot_files(snap.rowid)?;
     for f in &snap_files { if f.executable { exec_map.insert(f.path.as_str()); } }
-    for (path, blob_hash) in &tree_entries {
-        let mode = if exec_map.contains(path.as_str()) { "100755" } else { "100644" };
-        let args = ["update-index", "--add", "--cacheinfo", mode, blob_hash.as_str(), path.as_str()];
-        run_git_with_index(project_path, &tmp_index, &args)?;
+
+    // Use a single git update-index --index-info process and stream entries to stdin
+    let mut upd = Command::new("git")
+        .current_dir(project_path)
+        .env("GIT_INDEX_FILE", &tmp_index)
+        .args(["update-index", "--index-info"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn git update-index --index-info")?;
+    if let Some(mut sin) = upd.stdin.take() {
+        use std::io::Write as _;
+        for (path, blob_hash) in &tree_entries {
+            let mode = if exec_map.contains(path.as_str()) { "100755" } else { "100644" };
+            // Format: "<mode> <hash>\t<path>\n"
+            writeln!(sin, "{} {}\t{}", mode, blob_hash, path)?;
+        }
+    }
+    let status = upd.wait()?;
+    if !status.success() {
+        bail!("git update-index --index-info failed with status {}", status);
     }
     //  - write-tree
     let tree_hash = run_git_output_with_index(project_path, &tmp_index, &["write-tree"])?.trim().to_string();

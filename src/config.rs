@@ -158,7 +158,7 @@ fn default_storage_limit_fraction() -> f64 { 0.15 }
 fn default_storage_min_bytes() -> u64 { 524_288_000 } // 500MB floor
 fn default_compress_level() -> i32 { 3 }
 fn default_skip_on_battery() -> bool { true }
-fn default_max_context_tokens() -> usize { 8000 }
+fn default_max_context_tokens() -> usize { 200_000 }
 fn default_idle_shutdown_secs() -> u64 { 300 }
 fn default_min_available_memory_gb() -> u64 { 4 }
 fn default_auto_update() -> bool { true }

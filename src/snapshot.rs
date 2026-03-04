@@ -19,6 +19,7 @@ pub struct CachedFileState {
     pub mtime: SystemTime,
     pub stored: bool,
     pub executable: bool,
+    pub storage_method: i64,
 }
 
 /// Create a snapshot for a project. Returns the snapshot ID if one was created.
@@ -93,8 +94,8 @@ pub fn create_snapshot(
 
     // Determine changes
     let mut new_files = Vec::new();
-    let mut files_for_manifest: Vec<(String, String, u64, bool, bool, Option<i64>)> = Vec::new();
-    let mut deleted_for_manifest: Vec<(String, String, u64, bool)> = Vec::new();
+    let mut files_for_manifest: Vec<(String, String, u64, bool, bool, Option<i64>, i64)> = Vec::new();
+    let mut deleted_for_manifest: Vec<(String, String, u64, bool, i64)> = Vec::new();
     let mut has_changes = false;
 
     // Track current path -> (hash, stored) for diff building
@@ -137,7 +138,7 @@ pub fn create_snapshot(
                 }
                 let mtime_i = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
                 let stored = method.is_recoverable();
-                files_for_manifest.push((rel_path.clone(), hash, size, stored, executable, Some(mtime_i)));
+                files_for_manifest.push((rel_path.clone(), hash, size, stored, executable, Some(mtime_i), method.to_db()));
                 current_hashes.insert(rel_path.clone(), (files_for_manifest.last().unwrap().1.clone(), stored));
             }
             Err(e) => {
@@ -150,6 +151,7 @@ pub fn create_snapshot(
                     false,
                     executable,
                     Some(mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64),
+                    cas::StorageMethod::None.to_db(),
                 ));
                 current_hashes.insert(rel_path.clone(), (String::new(), false));
             }
@@ -166,6 +168,7 @@ pub fn create_snapshot(
                 cached.hash.clone(),
                 cached.size,
                 cached.stored,
+                cas::StorageMethod::from_db(cached.storage_method).to_db(),
             ));
         }
     }
@@ -366,6 +369,7 @@ fn load_previous_snapshot_files(
                         .unwrap_or(SystemTime::UNIX_EPOCH),
                     stored: f.stored,
                     executable: f.executable,
+                    storage_method: f.storage_method,
                 },
             );
         }

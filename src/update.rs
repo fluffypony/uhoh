@@ -175,17 +175,19 @@ fn verify_ed25519_signature(data: &[u8], signature_bytes: &[u8]) -> Result<bool>
 }
 
 async fn dns_verify_hash(version: &str, asset: &str) -> Result<String> {
-    use hickory_resolver::config::ResolverConfig;
-    use hickory_resolver::name_server::TokioConnectionProvider;
-    use hickory_resolver::Resolver;
+    use hickory_resolver::TokioAsyncResolver;
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 
     let query = format!("release-{}.{}.releases.uhoh.it.", asset, version);
-    let resolver = Resolver::builder_with_config(ResolverConfig::default(), TokioConnectionProvider::default())
-        .build();
-    let response = resolver.txt_lookup(query.clone())
+    let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+    let response = resolver
+        .txt_lookup(query.clone())
         .await
         .with_context(|| format!("DNS TXT lookup failed for {}", query))?;
-    let txt = response.iter().next().ok_or_else(|| anyhow::anyhow!("Empty TXT record for {}", query))?;
+    let txt = response
+        .iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Empty TXT record for {}", query))?;
     Ok(txt.to_string())
 }
 

@@ -36,6 +36,7 @@ pub struct FileEntryRow {
     pub stored: bool,
     pub executable: bool,
     pub mtime: Option<i64>,
+    pub storage_method: i64,
 }
 
 impl Database {
@@ -177,11 +178,11 @@ impl Database {
         // Schema v2: add mtime to snapshot_files and denormalized file_count on snapshots
         if version < 2 {
             conn.execute_batch(
-                "
-                ALTER TABLE snapshot_files ADD COLUMN mtime INTEGER;
-                ALTER TABLE snapshots ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;
-                INSERT OR REPLACE INTO schema_version (version) VALUES (2);
-                ",
+                "BEGIN TRANSACTION;\n
+                ALTER TABLE snapshot_files ADD COLUMN mtime INTEGER;\n
+                ALTER TABLE snapshots ADD COLUMN file_count INTEGER NOT NULL DEFAULT 0;\n
+                INSERT OR REPLACE INTO schema_version (version) VALUES (2);\n
+                COMMIT;",
             )?;
         }
 
@@ -359,8 +360,8 @@ impl Database {
         trigger: &str,
         message: &str,
         pinned: bool,
-        files: &[(String, String, u64, bool, bool, Option<i64>)], // (path, hash, size, stored, executable, mtime)
-        deleted: &[(String, String, u64, bool)],       // (path, hash, size, stored)
+        files: &[(String, String, u64, bool, bool, Option<i64>, i64)], // (path, hash, size, stored, executable, mtime, storage_method)
+        deleted: &[(String, String, u64, bool, i64)],       // (path, hash, size, stored, storage_method)
         tree_hashes: &[(String, String)],              // (dir_path, tree_hash)
     ) -> Result<i64> {
         let mut conn = self.conn();
@@ -389,10 +390,10 @@ impl Database {
 
         {
             let mut file_stmt = tx.prepare(
-                "INSERT INTO snapshot_files (snapshot_rowid, path, hash, size, stored, executable, mtime)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO snapshot_files (snapshot_rowid, path, hash, size, stored, executable, mtime, storage_method)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
-            for (path, hash, size, stored, executable, mtime) in files {
+            for (path, hash, size, stored, executable, mtime, storage_method) in files {
                 file_stmt.execute(params![
                     rowid,
                     path,
@@ -401,17 +402,18 @@ impl Database {
                     *stored as i32,
                     *executable as i32,
                     mtime,
+                    storage_method,
                 ])?;
             }
         }
 
         {
             let mut del_stmt = tx.prepare(
-                "INSERT INTO snapshot_deleted (snapshot_rowid, path, hash, size, stored)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO snapshot_deleted (snapshot_rowid, path, hash, size, stored, storage_method)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
-            for (path, hash, size, stored) in deleted {
-                del_stmt.execute(params![rowid, path, hash, size, *stored as i32])?;
+            for (path, hash, size, stored, storage_method) in deleted {
+                del_stmt.execute(params![rowid, path, hash, size, *stored as i32, storage_method])?;
             }
         }
 
@@ -511,7 +513,7 @@ impl Database {
     pub fn get_snapshot_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT path, hash, size, stored, executable, mtime
+            "SELECT path, hash, size, stored, executable, mtime, storage_method
              FROM snapshot_files WHERE snapshot_rowid = ?1",
         )?;
         let rows = stmt.query_map(params![snapshot_rowid], |row| {
@@ -522,6 +524,7 @@ impl Database {
                 stored: row.get::<_, i32>(3)? != 0,
                 executable: row.get::<_, i32>(4)? != 0,
                 mtime: row.get::<_, Option<i64>>(5).ok().flatten(),
+                storage_method: row.get::<_, i64>(6).unwrap_or(1),
             })
         })?;
         let mut entries = Vec::new();
@@ -534,7 +537,7 @@ impl Database {
     pub fn get_snapshot_deleted_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT path, hash, size, stored FROM snapshot_deleted WHERE snapshot_rowid = ?1",
+            "SELECT path, hash, size, stored, storage_method FROM snapshot_deleted WHERE snapshot_rowid = ?1",
         )?;
         let rows = stmt.query_map(params![snapshot_rowid], |row| {
             Ok(FileEntryRow {
@@ -544,6 +547,7 @@ impl Database {
                 stored: row.get::<_, i32>(3)? != 0,
                 executable: false,
                 mtime: None,
+                storage_method: row.get::<_, i64>(4).unwrap_or(1),
             })
         })?;
         let mut entries = Vec::new();

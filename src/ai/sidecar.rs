@@ -15,7 +15,6 @@ enum Backend {
 pub struct Sidecar {
     child: Option<Child>,
     port: u16,
-    // backend removed — not used by callers
 }
 
 impl Sidecar {

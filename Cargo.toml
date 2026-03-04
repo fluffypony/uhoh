@@ -50,7 +50,7 @@ syntect = { version = "5.2", default-features = false, features = ["default-fanc
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }
 
 # DNS resolution (supplementary update verification)
-hickory-resolver = { version = "0.25" }
+hickory-resolver = { version = "0.25", features = ["tokio-runtime"] }
 
 # Battery detection
 battery = "0.7"
@@ -107,7 +107,7 @@ once_cell = "1.0"
 zstd = { version = "0.13", optional = true }
 
 # Reflink (copy-on-write) support for tiered blob storage
-reflink-copy = "0.1"
+reflink-copy = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
