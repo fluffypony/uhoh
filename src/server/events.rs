@@ -26,6 +26,22 @@ pub enum ServerEvent {
         old_version: Option<String>,
         new_version: String,
     },
+    MlxUpdateStatus {
+        status: String,
+        detail: String,
+    },
+    DbGuardAlert {
+        guard_name: String,
+        event_type: String,
+        severity: String,
+        detail: String,
+    },
+    AgentAlert {
+        agent_name: String,
+        event_type: String,
+        severity: String,
+        detail: String,
+    },
     ProjectAdded {
         project_hash: String,
         path: String,
@@ -33,4 +49,71 @@ pub enum ServerEvent {
     ProjectRemoved {
         project_hash: String,
     },
+}
+
+impl ServerEvent {
+    pub fn kind(&self) -> String {
+        match self {
+            ServerEvent::SnapshotCreated { .. } => "snapshot_created".to_string(),
+            ServerEvent::SnapshotRestored { .. } => "snapshot_restored".to_string(),
+            ServerEvent::AiSummaryCompleted { .. } => "ai_summary_completed".to_string(),
+            ServerEvent::SidecarUpdated { .. } => "sidecar_updated".to_string(),
+            ServerEvent::MlxUpdateStatus { .. } => "mlx_update_status".to_string(),
+            ServerEvent::DbGuardAlert { event_type, .. } => event_type.clone(),
+            ServerEvent::AgentAlert { event_type, .. } => event_type.clone(),
+            ServerEvent::ProjectAdded { .. } => "project_added".to_string(),
+            ServerEvent::ProjectRemoved { .. } => "project_removed".to_string(),
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        match self {
+            ServerEvent::SnapshotCreated {
+                project_hash,
+                snapshot_id,
+                ..
+            } => {
+                format!("Snapshot {snapshot_id} created for {project_hash}")
+            }
+            ServerEvent::SnapshotRestored {
+                project_hash,
+                snapshot_id,
+                ..
+            } => {
+                format!("Snapshot {snapshot_id} restored for {project_hash}")
+            }
+            ServerEvent::AiSummaryCompleted { snapshot_id, .. } => {
+                format!("AI summary completed for snapshot {snapshot_id}")
+            }
+            ServerEvent::SidecarUpdated {
+                old_version,
+                new_version,
+            } => {
+                format!("Sidecar updated: {:?} -> {}", old_version, new_version)
+            }
+            ServerEvent::MlxUpdateStatus { status, detail } => {
+                format!("MLX update {status}: {detail}")
+            }
+            ServerEvent::DbGuardAlert {
+                guard_name,
+                event_type,
+                severity,
+                ..
+            } => {
+                format!("DB guard {guard_name}: {event_type} ({severity})")
+            }
+            ServerEvent::AgentAlert {
+                agent_name,
+                event_type,
+                severity,
+                ..
+            } => {
+                format!("Agent {agent_name}: {event_type} ({severity})")
+            }
+            ServerEvent::ProjectAdded { path, .. } => format!("Project added: {path}"),
+            ServerEvent::ProjectRemoved { project_hash } => {
+                format!("Project removed: {project_hash}")
+            }
+        }
+    }
 }

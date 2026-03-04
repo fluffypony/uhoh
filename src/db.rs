@@ -52,6 +52,63 @@ pub struct SearchResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct EventLedgerEntry {
+    pub id: i64,
+    pub ts: String,
+    pub source: String,
+    pub event_type: String,
+    pub severity: String,
+    pub project_hash: Option<String>,
+    pub agent_name: Option<String>,
+    pub guard_name: Option<String>,
+    pub path: Option<String>,
+    pub detail: Option<String>,
+    pub pre_state_ref: Option<String>,
+    pub post_state_ref: Option<String>,
+    pub causal_parent: Option<i64>,
+    pub resolved: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewEventLedgerEntry {
+    pub source: String,
+    pub event_type: String,
+    pub severity: String,
+    pub project_hash: Option<String>,
+    pub agent_name: Option<String>,
+    pub guard_name: Option<String>,
+    pub path: Option<String>,
+    pub detail: Option<String>,
+    pub pre_state_ref: Option<String>,
+    pub post_state_ref: Option<String>,
+    pub causal_parent: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DbGuardEntry {
+    pub id: i64,
+    pub name: String,
+    pub engine: String,
+    pub connection_ref: String,
+    pub tables_csv: String,
+    pub mode: String,
+    pub created_at: String,
+    pub last_baseline_at: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentEntry {
+    pub id: i64,
+    pub name: String,
+    pub profile_path: String,
+    pub profile_version: i64,
+    pub data_dir: Option<String>,
+    pub registered_at: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct FileEntryRow {
     pub path: String,
     pub hash: String,
@@ -270,6 +327,65 @@ impl Database {
                     file_paths
                 );
                 PRAGMA user_version = 6;
+                ",
+            )?;
+        }
+
+        if version < 7 {
+            conn.execute_batch(
+                "
+                BEGIN;
+
+                CREATE TABLE IF NOT EXISTS event_ledger (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    severity TEXT NOT NULL DEFAULT 'info',
+                    project_hash TEXT,
+                    agent_name TEXT,
+                    guard_name TEXT,
+                    path TEXT,
+                    detail TEXT,
+                    pre_state_ref TEXT,
+                    post_state_ref TEXT,
+                    causal_parent INTEGER REFERENCES event_ledger(id),
+                    resolved INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_event_ledger_ts ON event_ledger(ts);
+                CREATE INDEX IF NOT EXISTS idx_event_ledger_source ON event_ledger(source);
+                CREATE INDEX IF NOT EXISTS idx_event_ledger_agent ON event_ledger(agent_name);
+                CREATE INDEX IF NOT EXISTS idx_event_ledger_guard ON event_ledger(guard_name);
+                CREATE INDEX IF NOT EXISTS idx_event_ledger_path ON event_ledger(path);
+                CREATE INDEX IF NOT EXISTS idx_event_ledger_causal ON event_ledger(causal_parent);
+                CREATE INDEX IF NOT EXISTS idx_event_ledger_severity ON event_ledger(severity);
+
+                CREATE TABLE IF NOT EXISTS db_guards (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    engine TEXT NOT NULL,
+                    connection_ref TEXT NOT NULL,
+                    tables_csv TEXT NOT NULL,
+                    mode TEXT NOT NULL DEFAULT 'triggers',
+                    created_at TEXT NOT NULL,
+                    last_baseline_at TEXT,
+                    active INTEGER NOT NULL DEFAULT 1
+                );
+
+                CREATE TABLE IF NOT EXISTS agents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    profile_path TEXT NOT NULL,
+                    profile_version INTEGER NOT NULL DEFAULT 1,
+                    data_dir TEXT,
+                    registered_at TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1
+                );
+
+                PRAGMA user_version = 7;
+
+                COMMIT;
                 ",
             )?;
         }
@@ -983,10 +1099,7 @@ impl Database {
         let conn = self.conn();
 
         // conservative query normalization for FTS parser safety
-        let safe = query
-            .replace(['"', '*', ':'], " ")
-            .trim()
-            .to_string();
+        let safe = query.replace(['"', '*', ':'], " ").trim().to_string();
         if safe.is_empty() {
             return Ok(Vec::new());
         }
@@ -1362,6 +1475,450 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(size as u64)
+    }
+
+    pub fn insert_event_ledger(&self, event: &NewEventLedgerEntry) -> Result<i64> {
+        let conn = self.conn();
+        let ts = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO event_ledger (
+                ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0)",
+            params![
+                ts,
+                event.source,
+                event.event_type,
+                event.severity,
+                event.project_hash,
+                event.agent_name,
+                event.guard_name,
+                event.path,
+                event.detail,
+                event.pre_state_ref,
+                event.post_state_ref,
+                event.causal_parent,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn event_ledger_recent(
+        &self,
+        source: Option<&str>,
+        guard_name: Option<&str>,
+        agent_name: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<EventLedgerEntry>> {
+        let conn = self.conn();
+        let mut out = Vec::new();
+        let cap = limit.max(1) as i64;
+        match (source, guard_name, agent_name) {
+            (Some(src), Some(guard), Some(agent)) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
+                     FROM event_ledger
+                     WHERE source = ?1 AND guard_name = ?2 AND agent_name = ?3
+                     ORDER BY id DESC LIMIT ?4",
+                )?;
+                let rows = stmt.query_map(params![src, guard, agent, cap], |row| {
+                    Ok(EventLedgerEntry {
+                        id: row.get(0)?,
+                        ts: row.get(1)?,
+                        source: row.get(2)?,
+                        event_type: row.get(3)?,
+                        severity: row.get(4)?,
+                        project_hash: row.get(5)?,
+                        agent_name: row.get(6)?,
+                        guard_name: row.get(7)?,
+                        path: row.get(8)?,
+                        detail: row.get(9)?,
+                        pre_state_ref: row.get(10)?,
+                        post_state_ref: row.get(11)?,
+                        causal_parent: row.get(12)?,
+                        resolved: row.get::<_, i32>(13)? != 0,
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            (Some(src), Some(guard), None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
+                     FROM event_ledger
+                     WHERE source = ?1 AND guard_name = ?2
+                     ORDER BY id DESC LIMIT ?3",
+                )?;
+                let rows = stmt.query_map(params![src, guard, cap], |row| {
+                    Ok(EventLedgerEntry {
+                        id: row.get(0)?,
+                        ts: row.get(1)?,
+                        source: row.get(2)?,
+                        event_type: row.get(3)?,
+                        severity: row.get(4)?,
+                        project_hash: row.get(5)?,
+                        agent_name: row.get(6)?,
+                        guard_name: row.get(7)?,
+                        path: row.get(8)?,
+                        detail: row.get(9)?,
+                        pre_state_ref: row.get(10)?,
+                        post_state_ref: row.get(11)?,
+                        causal_parent: row.get(12)?,
+                        resolved: row.get::<_, i32>(13)? != 0,
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            (Some(src), None, Some(agent)) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
+                     FROM event_ledger
+                     WHERE source = ?1 AND agent_name = ?2
+                     ORDER BY id DESC LIMIT ?3",
+                )?;
+                let rows = stmt.query_map(params![src, agent, cap], |row| {
+                    Ok(EventLedgerEntry {
+                        id: row.get(0)?,
+                        ts: row.get(1)?,
+                        source: row.get(2)?,
+                        event_type: row.get(3)?,
+                        severity: row.get(4)?,
+                        project_hash: row.get(5)?,
+                        agent_name: row.get(6)?,
+                        guard_name: row.get(7)?,
+                        path: row.get(8)?,
+                        detail: row.get(9)?,
+                        pre_state_ref: row.get(10)?,
+                        post_state_ref: row.get(11)?,
+                        causal_parent: row.get(12)?,
+                        resolved: row.get::<_, i32>(13)? != 0,
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            (None, Some(guard), Some(agent)) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
+                     FROM event_ledger
+                     WHERE guard_name = ?1 AND agent_name = ?2
+                     ORDER BY id DESC LIMIT ?3",
+                )?;
+                let rows = stmt.query_map(params![guard, agent, cap], |row| {
+                    Ok(EventLedgerEntry {
+                        id: row.get(0)?,
+                        ts: row.get(1)?,
+                        source: row.get(2)?,
+                        event_type: row.get(3)?,
+                        severity: row.get(4)?,
+                        project_hash: row.get(5)?,
+                        agent_name: row.get(6)?,
+                        guard_name: row.get(7)?,
+                        path: row.get(8)?,
+                        detail: row.get(9)?,
+                        pre_state_ref: row.get(10)?,
+                        post_state_ref: row.get(11)?,
+                        causal_parent: row.get(12)?,
+                        resolved: row.get::<_, i32>(13)? != 0,
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            (Some(src), None, None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
+                     FROM event_ledger
+                     WHERE source = ?1
+                     ORDER BY id DESC LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(params![src, cap], |row| {
+                    Ok(EventLedgerEntry {
+                        id: row.get(0)?,
+                        ts: row.get(1)?,
+                        source: row.get(2)?,
+                        event_type: row.get(3)?,
+                        severity: row.get(4)?,
+                        project_hash: row.get(5)?,
+                        agent_name: row.get(6)?,
+                        guard_name: row.get(7)?,
+                        path: row.get(8)?,
+                        detail: row.get(9)?,
+                        pre_state_ref: row.get(10)?,
+                        post_state_ref: row.get(11)?,
+                        causal_parent: row.get(12)?,
+                        resolved: row.get::<_, i32>(13)? != 0,
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            (None, Some(guard), None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
+                     FROM event_ledger
+                     WHERE guard_name = ?1
+                     ORDER BY id DESC LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(params![guard, cap], |row| {
+                    Ok(EventLedgerEntry {
+                        id: row.get(0)?,
+                        ts: row.get(1)?,
+                        source: row.get(2)?,
+                        event_type: row.get(3)?,
+                        severity: row.get(4)?,
+                        project_hash: row.get(5)?,
+                        agent_name: row.get(6)?,
+                        guard_name: row.get(7)?,
+                        path: row.get(8)?,
+                        detail: row.get(9)?,
+                        pre_state_ref: row.get(10)?,
+                        post_state_ref: row.get(11)?,
+                        causal_parent: row.get(12)?,
+                        resolved: row.get::<_, i32>(13)? != 0,
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            (None, None, Some(agent)) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
+                     FROM event_ledger
+                     WHERE agent_name = ?1
+                     ORDER BY id DESC LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(params![agent, cap], |row| {
+                    Ok(EventLedgerEntry {
+                        id: row.get(0)?,
+                        ts: row.get(1)?,
+                        source: row.get(2)?,
+                        event_type: row.get(3)?,
+                        severity: row.get(4)?,
+                        project_hash: row.get(5)?,
+                        agent_name: row.get(6)?,
+                        guard_name: row.get(7)?,
+                        path: row.get(8)?,
+                        detail: row.get(9)?,
+                        pre_state_ref: row.get(10)?,
+                        post_state_ref: row.get(11)?,
+                        causal_parent: row.get(12)?,
+                        resolved: row.get::<_, i32>(13)? != 0,
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            (None, None, None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                            path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
+                     FROM event_ledger
+                     ORDER BY id DESC LIMIT ?1",
+                )?;
+                let rows = stmt.query_map(params![cap], |row| {
+                    Ok(EventLedgerEntry {
+                        id: row.get(0)?,
+                        ts: row.get(1)?,
+                        source: row.get(2)?,
+                        event_type: row.get(3)?,
+                        severity: row.get(4)?,
+                        project_hash: row.get(5)?,
+                        agent_name: row.get(6)?,
+                        guard_name: row.get(7)?,
+                        path: row.get(8)?,
+                        detail: row.get(9)?,
+                        pre_state_ref: row.get(10)?,
+                        post_state_ref: row.get(11)?,
+                        causal_parent: row.get(12)?,
+                        resolved: row.get::<_, i32>(13)? != 0,
+                    })
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn event_ledger_get(&self, id: i64) -> Result<Option<EventLedgerEntry>> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
+                    path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
+             FROM event_ledger WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(EventLedgerEntry {
+                    id: row.get(0)?,
+                    ts: row.get(1)?,
+                    source: row.get(2)?,
+                    event_type: row.get(3)?,
+                    severity: row.get(4)?,
+                    project_hash: row.get(5)?,
+                    agent_name: row.get(6)?,
+                    guard_name: row.get(7)?,
+                    path: row.get(8)?,
+                    detail: row.get(9)?,
+                    pre_state_ref: row.get(10)?,
+                    post_state_ref: row.get(11)?,
+                    causal_parent: row.get(12)?,
+                    resolved: row.get::<_, i32>(13)? != 0,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to fetch ledger event")
+    }
+
+    pub fn event_ledger_trace(&self, id: i64) -> Result<Vec<EventLedgerEntry>> {
+        let mut chain = Vec::new();
+        let mut current = Some(id);
+        let mut guard = 0usize;
+        while let Some(cid) = current {
+            if guard > 1024 {
+                break;
+            }
+            if let Some(entry) = self.event_ledger_get(cid)? {
+                current = entry.causal_parent;
+                chain.push(entry);
+            } else {
+                break;
+            }
+            guard += 1;
+        }
+        Ok(chain)
+    }
+
+    pub fn event_ledger_mark_resolved(&self, id: i64) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE event_ledger SET resolved = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_db_guard(
+        &self,
+        name: &str,
+        engine: &str,
+        connection_ref: &str,
+        tables_csv: &str,
+        mode: &str,
+    ) -> Result<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO db_guards (name, engine, connection_ref, tables_csv, mode, created_at, active)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+            params![name, engine, connection_ref, tables_csv, mode, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_db_guards(&self) -> Result<Vec<DbGuardEntry>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, engine, connection_ref, tables_csv, mode, created_at, last_baseline_at, active
+             FROM db_guards ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(DbGuardEntry {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                engine: row.get(2)?,
+                connection_ref: row.get(3)?,
+                tables_csv: row.get(4)?,
+                mode: row.get(5)?,
+                created_at: row.get(6)?,
+                last_baseline_at: row.get(7)?,
+                active: row.get::<_, i32>(8)? != 0,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn remove_db_guard(&self, name: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM db_guards WHERE name = ?1", params![name])?;
+        Ok(())
+    }
+
+    pub fn set_db_guard_baseline_time(&self, name: &str, ts: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE db_guards SET last_baseline_at = ?1 WHERE name = ?2",
+            params![ts, name],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_agent(
+        &self,
+        name: &str,
+        profile_path: &str,
+        profile_version: i64,
+        data_dir: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO agents (name, profile_path, profile_version, data_dir, registered_at, active)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            params![name, profile_path, profile_version, data_dir, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_agents(&self) -> Result<Vec<AgentEntry>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, profile_path, profile_version, data_dir, registered_at, active
+             FROM agents ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AgentEntry {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                profile_path: row.get(2)?,
+                profile_version: row.get(3)?,
+                data_dir: row.get(4)?,
+                registered_at: row.get(5)?,
+                active: row.get::<_, i32>(6)? != 0,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn remove_agent(&self, name: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM agents WHERE name = ?1", params![name])?;
+        Ok(())
     }
 }
 // Type aliases to simplify complex tuple signatures used around snapshot creation

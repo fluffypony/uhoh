@@ -38,6 +38,18 @@ pub struct Config {
     #[serde(default)]
     /// Sidecar updater policy for llama.cpp artifacts.
     pub sidecar_update: SidecarUpdateConfig,
+
+    #[serde(default)]
+    /// Unified notification sinks for high-signal events.
+    pub notifications: NotificationsConfig,
+
+    #[serde(default)]
+    /// Emergency database guard settings.
+    pub db_guard: DbGuardConfig,
+
+    #[serde(default)]
+    /// Agent monitoring and interception settings.
+    pub agent: AgentConfig,
 }
 
 fn default_schema_version() -> u32 {
@@ -150,6 +162,24 @@ pub struct AiConfig {
     #[serde(default)]
     /// Requires daemon restart to take effect.
     pub models: Vec<ModelTierConfig>,
+
+    #[serde(default)]
+    /// MLX package update policy and runtime environment.
+    pub mlx: MlxConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MlxConfig {
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+    #[serde(default = "default_mlx_check_interval_hours")]
+    pub check_interval_hours: u64,
+    #[serde(default)]
+    pub python_path: String,
+    #[serde(default = "default_mlx_venv_path")]
+    pub venv_path: String,
+    #[serde(default)]
+    pub max_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +246,62 @@ pub struct SidecarUpdateConfig {
     /// GitHub repository slug for release metadata.
     #[serde(default = "default_llama_repo")]
     pub llama_repo: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationsConfig {
+    #[serde(default = "default_true")]
+    pub desktop: bool,
+    #[serde(default)]
+    pub webhook_url: String,
+    #[serde(default = "default_webhook_events")]
+    pub webhook_events: Vec<String>,
+    #[serde(default = "default_notifications_cooldown")]
+    pub cooldown_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbGuardConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_db_mass_delete_row_threshold")]
+    pub mass_delete_row_threshold: u64,
+    #[serde(default = "default_db_mass_delete_pct_threshold")]
+    pub mass_delete_pct_threshold: f64,
+    #[serde(default = "default_db_baseline_interval_hours")]
+    pub baseline_interval_hours: u64,
+    #[serde(default = "default_db_recovery_retention_days")]
+    pub recovery_retention_days: u64,
+    #[serde(default = "default_db_max_baseline_size_mb")]
+    pub max_baseline_size_mb: u64,
+    #[serde(default = "default_db_max_recovery_file_mb")]
+    pub max_recovery_file_mb: u64,
+    #[serde(default = "default_true")]
+    pub encrypt_recovery: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub mcp_proxy_enabled: bool,
+    #[serde(default = "default_agent_proxy_port")]
+    pub mcp_proxy_port: u16,
+    #[serde(default = "default_true")]
+    pub intercept_enabled: bool,
+    #[serde(default)]
+    pub audit_enabled: bool,
+    #[serde(default = "default_agent_audit_scope")]
+    pub audit_scope: String,
+    #[serde(default)]
+    pub sandbox_enabled: bool,
+    #[serde(default = "default_agent_on_dangerous_change")]
+    pub on_dangerous_change: String,
+    #[serde(default = "default_agent_pause_timeout")]
+    pub pause_timeout_seconds: u64,
+    #[serde(default = "default_agent_dangerous_patterns")]
+    pub dangerous_patterns: Vec<String>,
 }
 
 // === Default functions ===
@@ -303,6 +389,64 @@ fn default_sidecar_check_hours() -> u64 {
 fn default_llama_repo() -> String {
     "ggml-org/llama.cpp".to_string()
 }
+fn default_mlx_check_interval_hours() -> u64 {
+    12
+}
+fn default_mlx_venv_path() -> String {
+    "~/.uhoh/venv/mlx".to_string()
+}
+fn default_webhook_events() -> Vec<String> {
+    vec![
+        "mass_delete".to_string(),
+        "drop_table".to_string(),
+        "drop_column".to_string(),
+        "truncate".to_string(),
+        "dangerous_agent_action".to_string(),
+        "mlx_update_failed".to_string(),
+    ]
+}
+fn default_notifications_cooldown() -> u64 {
+    60
+}
+fn default_db_mass_delete_row_threshold() -> u64 {
+    100
+}
+fn default_db_mass_delete_pct_threshold() -> f64 {
+    0.05
+}
+fn default_db_baseline_interval_hours() -> u64 {
+    6
+}
+fn default_db_recovery_retention_days() -> u64 {
+    30
+}
+fn default_db_max_baseline_size_mb() -> u64 {
+    500
+}
+fn default_db_max_recovery_file_mb() -> u64 {
+    500
+}
+fn default_agent_proxy_port() -> u16 {
+    22823
+}
+fn default_agent_audit_scope() -> String {
+    "project".to_string()
+}
+fn default_agent_on_dangerous_change() -> String {
+    "none".to_string()
+}
+fn default_agent_pause_timeout() -> u64 {
+    300
+}
+fn default_agent_dangerous_patterns() -> Vec<String> {
+    vec![
+        "self_modify_personality".to_string(),
+        "new_tool_permission".to_string(),
+        "model_downgrade".to_string(),
+        "mass_file_delete".to_string(),
+        "config_change".to_string(),
+    ]
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -315,6 +459,9 @@ impl Default for Config {
             update: UpdateConfig::default(),
             server: ServerConfig::default(),
             sidecar_update: SidecarUpdateConfig::default(),
+            notifications: NotificationsConfig::default(),
+            db_guard: DbGuardConfig::default(),
+            agent: AgentConfig::default(),
         }
     }
 }
@@ -367,6 +514,19 @@ impl Default for AiConfig {
             idle_shutdown_secs: default_idle_shutdown_secs(),
             min_available_memory_gb: default_min_available_memory_gb(),
             models: Vec::new(),
+            mlx: MlxConfig::default(),
+        }
+    }
+}
+
+impl Default for MlxConfig {
+    fn default() -> Self {
+        Self {
+            auto_update: true,
+            check_interval_hours: default_mlx_check_interval_hours(),
+            python_path: String::new(),
+            venv_path: default_mlx_venv_path(),
+            max_version: None,
         }
     }
 }
@@ -404,6 +564,49 @@ impl Default for SidecarUpdateConfig {
     }
 }
 
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            desktop: true,
+            webhook_url: String::new(),
+            webhook_events: default_webhook_events(),
+            cooldown_seconds: default_notifications_cooldown(),
+        }
+    }
+}
+
+impl Default for DbGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mass_delete_row_threshold: default_db_mass_delete_row_threshold(),
+            mass_delete_pct_threshold: default_db_mass_delete_pct_threshold(),
+            baseline_interval_hours: default_db_baseline_interval_hours(),
+            recovery_retention_days: default_db_recovery_retention_days(),
+            max_baseline_size_mb: default_db_max_baseline_size_mb(),
+            max_recovery_file_mb: default_db_max_recovery_file_mb(),
+            encrypt_recovery: true,
+        }
+    }
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mcp_proxy_enabled: true,
+            mcp_proxy_port: default_agent_proxy_port(),
+            intercept_enabled: true,
+            audit_enabled: false,
+            audit_scope: default_agent_audit_scope(),
+            sandbox_enabled: false,
+            on_dangerous_change: default_agent_on_dangerous_change(),
+            pause_timeout_seconds: default_agent_pause_timeout(),
+            dangerous_patterns: default_agent_dangerous_patterns(),
+        }
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         if path.exists() {
@@ -437,6 +640,23 @@ impl Config {
             }
             if config.sidecar_update.check_interval_hours == 0 {
                 anyhow::bail!("sidecar_update.check_interval_hours must be > 0");
+            }
+            if config.notifications.cooldown_seconds == 0 {
+                anyhow::bail!("notifications.cooldown_seconds must be > 0");
+            }
+            if !(0.0..=1.0).contains(&config.db_guard.mass_delete_pct_threshold)
+                || config.db_guard.mass_delete_pct_threshold <= 0.0
+            {
+                anyhow::bail!("db_guard.mass_delete_pct_threshold must be in (0.0, 1.0]");
+            }
+            if config.db_guard.mass_delete_row_threshold == 0 {
+                anyhow::bail!("db_guard.mass_delete_row_threshold must be > 0");
+            }
+            if config.agent.mcp_proxy_port == 0 {
+                anyhow::bail!("agent.mcp_proxy_port must be > 0");
+            }
+            if config.ai.mlx.check_interval_hours == 0 {
+                anyhow::bail!("ai.mlx.check_interval_hours must be > 0");
             }
             Ok(config)
         } else {

@@ -7,6 +7,7 @@ pub mod ws;
 use anyhow::Result;
 use axum::{
     extract::Extension,
+    extract::State,
     middleware,
     routing::{get, post},
     Router,
@@ -15,9 +16,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio::sync::Mutex;
 
 use crate::config::ServerConfig;
 use crate::db::Database;
+use crate::subsystem::{SubsystemHealth, SubsystemManager};
 use auth::{auth_middleware, host_validation_middleware, AuthToken};
 use events::ServerEvent;
 
@@ -29,6 +32,7 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<ServerEvent>,
     pub restore_in_progress: Arc<std::sync::atomic::AtomicBool>,
     pub restore_locks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
 }
 
 pub async fn start_server(
@@ -38,6 +42,7 @@ pub async fn start_server(
     uhoh_dir: PathBuf,
     event_tx: broadcast::Sender<ServerEvent>,
     restore_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    subsystem_manager: Arc<Mutex<SubsystemManager>>,
 ) -> Result<tokio::task::JoinHandle<()>> {
     let auth_token = auth::generate_token();
     auth::write_token_file(&uhoh_dir, &auth_token)?;
@@ -49,6 +54,7 @@ pub async fn start_server(
         event_tx,
         restore_in_progress,
         restore_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+        subsystem_manager,
     };
 
     let mut app = Router::new();
@@ -127,11 +133,26 @@ pub async fn start_server(
     Ok(handle)
 }
 
-async fn health_check() -> axum::Json<serde_json::Value> {
+async fn health_check(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+    let manager = state.subsystem_manager.lock().await;
+    let subsystems = manager
+        .health_snapshot()
+        .into_iter()
+        .map(|(name, health)| {
+            let status = match health {
+                SubsystemHealth::Healthy => "healthy".to_string(),
+                SubsystemHealth::Degraded(msg) => format!("degraded:{msg}"),
+                SubsystemHealth::Failed(msg) => format!("failed:{msg}"),
+            };
+            serde_json::json!({"name": name, "status": status})
+        })
+        .collect::<Vec<_>>();
+
     axum::Json(serde_json::json!({
         "status": "ok",
         "service": "uhoh",
         "version": env!("CARGO_PKG_VERSION"),
+        "subsystems": subsystems,
     }))
 }
 

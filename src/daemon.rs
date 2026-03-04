@@ -6,10 +6,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::event_ledger::EventLedger;
+use crate::notifications::NotificationPipeline;
 use crate::snapshot;
+use crate::subsystem::{SubsystemContext, SubsystemManager};
 use crate::watcher;
 use notify::{RecursiveMode, Watcher as _};
 // already imported above
@@ -109,8 +113,27 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let config_path = uhoh_dir.join("config.toml");
     let mut config = Config::load(&config_path)?;
 
-    let (server_event_tx, _) = broadcast::channel::<crate::server::events::ServerEvent>(256);
+    let (server_event_tx, _) = broadcast::channel::<crate::server::events::ServerEvent>(4096);
     let restore_in_progress = Arc::new(AtomicBool::new(false));
+
+    let event_ledger = EventLedger::new(database.clone());
+    let mut subsystem_manager_inner = SubsystemManager::new(5, Duration::from_secs(600));
+    subsystem_manager_inner.register(Box::new(crate::db_guard::DbGuardSubsystem::new()));
+    subsystem_manager_inner.register(Box::new(crate::agent::AgentSubsystem::new()));
+    let subsystem_manager = Arc::new(Mutex::new(subsystem_manager_inner));
+
+    {
+        let ctx = SubsystemContext {
+            database: database.clone(),
+            event_ledger: event_ledger.clone(),
+            config: config.clone(),
+            uhoh_dir: uhoh_dir.clone(),
+        };
+        subsystem_manager.lock().await.start_all(ctx).await;
+    }
+
+    let notifications = NotificationPipeline::new(config.notifications.clone());
+    notifications.spawn(server_event_tx.clone());
 
     let server_handle = if config.server.enabled {
         Some(
@@ -121,6 +144,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 uhoh_dir.clone(),
                 server_event_tx.clone(),
                 restore_in_progress.clone(),
+                subsystem_manager.clone(),
             )
             .await?,
         )
@@ -612,6 +636,23 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                         }
                     }
                 }
+
+                if let Err(e) = crate::ai::mlx_update::maybe_run_mlx_auto_update(&config.ai, &uhoh_dir).await {
+                    let _ = server_event_tx.send(crate::server::events::ServerEvent::MlxUpdateStatus {
+                        status: "failed".to_string(),
+                        detail: e.to_string(),
+                    });
+                }
+
+                {
+                    let ctx = SubsystemContext {
+                        database: database.clone(),
+                        event_ledger: event_ledger.clone(),
+                        config: config.clone(),
+                        uhoh_dir: uhoh_dir.clone(),
+                    };
+                    subsystem_manager.lock().await.tick_restart(ctx).await;
+                }
             }
             _ = update_check_interval.tick() => {
                 let uhoh_dir_clone = uhoh_dir.clone();
@@ -628,6 +669,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 if let Some(handle) = &server_handle {
                     handle.abort();
                 }
+                subsystem_manager.lock().await.shutdown_all().await;
                 break;
             }
         }
@@ -875,7 +917,9 @@ async fn process_ai_summary_queue(
                     continue;
                 }
             };
-            let prev = database.snapshot_before(&project_hash, this.snapshot_id).unwrap_or_default();
+            let prev = database
+                .snapshot_before(&project_hash, this.snapshot_id)
+                .unwrap_or_default();
             let this_files = match database.get_snapshot_files(this.rowid) {
                 Ok(v) => v,
                 Err(_) => {
@@ -1117,12 +1161,12 @@ fn check_for_new_projects(
                     continue;
                 } else {
                     e.insert(ProjectDaemonState {
-                            hash: p.hash.clone(),
-                            last_snapshot: Instant::now() - Duration::from_secs(60),
-                            pending_changes: std::collections::HashSet::new(),
-                            first_change_at: None,
-                            last_change_at: None,
-                        });
+                        hash: p.hash.clone(),
+                        last_snapshot: Instant::now() - Duration::from_secs(60),
+                        pending_changes: std::collections::HashSet::new(),
+                        first_change_at: None,
+                        last_change_at: None,
+                    });
                     let _ = event_tx.send(crate::server::events::ServerEvent::ProjectAdded {
                         project_hash: p.hash.clone(),
                         path: p.current_path.clone(),
