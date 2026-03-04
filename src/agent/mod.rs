@@ -1,4 +1,6 @@
 mod audit;
+#[cfg(target_os = "linux")]
+mod fanotify;
 mod intercept;
 mod mcp_proxy;
 mod profiles;
@@ -112,6 +114,12 @@ impl AgentSubsystem {
                 let agents_cl = agents.to_vec();
                 let failures = self.background_failures.clone();
                 std::thread::spawn(move || {
+                    #[cfg(target_os = "linux")]
+                    {
+                        if let Err(err) = fanotify::run_permission_monitor(&ctx_cl, &agents_cl) {
+                            tracing::debug!("fanotify monitor unavailable: {err}");
+                        }
+                    }
                     if let Err(err) = intercept::run_session_tailers(&ctx_cl, &agents_cl) {
                         failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!("session tailer thread failed: {err}");

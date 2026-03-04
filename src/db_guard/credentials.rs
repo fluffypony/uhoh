@@ -6,6 +6,9 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+const KEYRING_SERVICE: &str = "uhoh-db-guard";
+const KEYRING_TIMEOUT_SECS: u64 = 3;
+
 const CRED_MAGIC: &[u8; 8] = b"UHOHCRED";
 const CRED_VERSION: u8 = 1;
 const CRED_KDF_ARGON2ID: u8 = 0;
@@ -26,6 +29,37 @@ struct EncEntry {
 pub struct CredentialMaterial {
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+trait CredentialBackend {
+    fn load(&self, key: &str) -> Result<Option<CredentialMaterial>>;
+    fn store(&self, key: &str, value: &CredentialMaterial) -> Result<()>;
+}
+
+#[derive(Default)]
+struct EncryptedFileBackend;
+
+impl CredentialBackend for EncryptedFileBackend {
+    fn load(&self, key: &str) -> Result<Option<CredentialMaterial>> {
+        resolve_encrypted_credentials(key)
+    }
+
+    fn store(&self, key: &str, value: &CredentialMaterial) -> Result<()> {
+        store_encrypted_credential(key, value)
+    }
+}
+
+#[derive(Default)]
+struct KeyringBackend;
+
+impl CredentialBackend for KeyringBackend {
+    fn load(&self, key: &str) -> Result<Option<CredentialMaterial>> {
+        load_keyring_credential(key)
+    }
+
+    fn store(&self, key: &str, value: &CredentialMaterial) -> Result<()> {
+        store_keyring_credential(key, value)
+    }
 }
 
 pub fn scrub_dsn(dsn: &str) -> String {
@@ -56,7 +90,35 @@ pub fn ensure_guard_dir(uhoh_dir: &std::path::Path) -> Result<std::path::PathBuf
 }
 
 pub fn resolve_postgres_credentials(connection_ref: &str) -> Result<CredentialMaterial> {
-    if let Some(material) = resolve_encrypted_credentials(connection_ref)? {
+    if let Some(material) = EncryptedFileBackend.load(connection_ref)? {
+        return Ok(material);
+    }
+
+    if let Some(material) = resolve_pgpass(connection_ref)? {
+        return Ok(material);
+    }
+
+    if let Ok(master) = std::env::var("UHOH_MASTER_KEY") {
+        if !master.trim().is_empty() {
+            return Ok(CredentialMaterial {
+                username: None,
+                password: Some(master),
+            });
+        }
+    }
+
+    Ok(CredentialMaterial {
+        username: None,
+        password: None,
+    })
+}
+
+pub fn resolve_postgres_credentials_cli(connection_ref: &str) -> Result<CredentialMaterial> {
+    if let Some(material) = EncryptedFileBackend.load(connection_ref)? {
+        return Ok(material);
+    }
+
+    if let Some(material) = KeyringBackend.load(connection_ref)? {
         return Ok(material);
     }
 
@@ -117,6 +179,75 @@ pub fn store_encrypted_credential(connection_ref: &str, cred: &CredentialMateria
     std::fs::rename(&tmp, &path)?;
     set_mode_600(&path)?;
     Ok(())
+}
+
+pub fn store_postgres_credentials_cli(
+    connection_ref: &str,
+    cred: &CredentialMaterial,
+) -> Result<()> {
+    let _ = EncryptedFileBackend.store(connection_ref, cred);
+    let _ = KeyringBackend.store(connection_ref, cred);
+    Ok(())
+}
+
+fn load_keyring_credential(key: &str) -> Result<Option<CredentialMaterial>> {
+    let key_owned = key.to_string();
+    run_with_timeout(KEYRING_TIMEOUT_SECS, move || {
+        #[cfg(feature = "keyring")]
+        {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, &key_owned)?;
+            match entry.get_password() {
+                Ok(raw) => {
+                    let material: CredentialMaterial = serde_json::from_str(&raw)
+                        .context("Keyring credential payload is invalid JSON")?;
+                    Ok(Some(material))
+                }
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(err) => Err(anyhow::anyhow!("Keyring read failed: {err}")),
+            }
+        }
+        #[cfg(not(feature = "keyring"))]
+        {
+            let _ = key_owned;
+            Ok(None)
+        }
+    })
+    .unwrap_or_else(|_| Ok(None))
+}
+
+fn store_keyring_credential(key: &str, value: &CredentialMaterial) -> Result<()> {
+    let key_owned = key.to_string();
+    let payload = serde_json::to_string(value)?;
+    run_with_timeout(KEYRING_TIMEOUT_SECS, move || {
+        #[cfg(feature = "keyring")]
+        {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, &key_owned)?;
+            entry.set_password(&payload)?;
+            Ok(())
+        }
+        #[cfg(not(feature = "keyring"))]
+        {
+            let _ = (key_owned, payload);
+            Ok(())
+        }
+    })
+    .unwrap_or(Ok(()))
+}
+
+fn run_with_timeout<T, F>(
+    timeout_secs: u64,
+    f: F,
+) -> std::result::Result<T, std::sync::mpsc::RecvTimeoutError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = f();
+        let _ = tx.send(out);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
 }
 
 fn encrypt_credentials_map(

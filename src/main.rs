@@ -793,7 +793,7 @@ fn handle_db_commands(
             database.add_db_guard(&guard_name, engine, &connection_ref, &tables_csv, mode)?;
             if let Some(creds) = extract_dsn_credentials(dsn) {
                 if let Err(err) =
-                    uhoh::db_guard::store_encrypted_credential(&connection_ref, &creds)
+                    uhoh::db_guard::store_postgres_credentials_cli(&connection_ref, &creds)
                 {
                     tracing::warn!(
                         "Failed to persist encrypted credential for guard {}: {}",
@@ -893,7 +893,7 @@ fn handle_db_commands(
                 }
                 "postgres" => {
                     let creds =
-                        uhoh::db_guard::resolve_postgres_credentials(&guard.connection_ref)?;
+                        uhoh::db_guard::resolve_postgres_credentials_cli(&guard.connection_ref)?;
                     let _ = uhoh::db_guard::write_postgres_schema_baseline(
                         &uhoh::uhoh_dir(),
                         &guard.name,

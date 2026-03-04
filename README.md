@@ -297,6 +297,10 @@ Database guard is designed for emergency detection and recovery prep. It is not 
 
 `agent` settings are intentionally layered: MCP proxy first, session-log fallback second, and OS-level audit as opt-in only.
 
+Credential resolution is mode-aware. Daemon paths resolve from env + encrypted credentials file + engine-native fallbacks. Interactive CLI flows additionally attempt OS keyring lookup with a hard timeout before those fallbacks.
+
+Build with `--features keyring` to enable OS keychain integration for CLI credential resolution and storage.
+
 ### Update settings
 
 - `update.auto_check` (default true): enable periodic update checks by the daemon. Restart required.

@@ -15,9 +15,11 @@ use crate::subsystem::{Subsystem, SubsystemContext, SubsystemHealth};
 
 pub use credentials::ensure_guard_dir;
 pub use credentials::resolve_postgres_credentials;
+pub use credentials::resolve_postgres_credentials_cli;
 pub use credentials::scrub_dsn;
 pub use credentials::scrub_error_message;
 pub use credentials::store_encrypted_credential;
+pub use credentials::store_postgres_credentials_cli;
 pub use credentials::CredentialMaterial;
 pub use recovery::decrypt_recovery_payload;
 pub use recovery::write_postgres_schema_baseline;
