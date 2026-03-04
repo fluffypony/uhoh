@@ -1,4 +1,5 @@
 use axum::{
+    extract::State,
     extract::Request,
     http::{HeaderMap, StatusCode},
     middleware::Next,
@@ -64,6 +65,25 @@ pub async fn auth_middleware(headers: HeaderMap, request: Request, next: Next) -
             StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({
                 "error": "Bearer token required for mutating operations. Token is in ~/.uhoh/server.token"
+            })),
+        )
+            .into_response();
+    }
+
+    next.run(request).await
+}
+
+pub async fn host_validation_middleware(
+    State(expected_port): State<u16>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !validate_host(&headers, expected_port) {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "Invalid Host header"
             })),
         )
             .into_response();

@@ -395,7 +395,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
 
                 // Periodic tasks: check for moved folders and watcher registration.
                 check_moved_folders(&db_projects, &*database, &mut watcher_handle, &mut project_states);
-                check_for_new_projects(&db_projects, &mut watcher_handle, &mut project_states);
+                check_for_new_projects(&db_projects, &mut watcher_handle, &mut project_states, &server_event_tx);
 
                 // Remove watchers and state for projects removed from DB
                 use std::collections::HashSet;
@@ -407,6 +407,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     }
                 }
                 for key in to_remove {
+                    if let Some(state) = project_states.get(&key) {
+                        let _ = server_event_tx.send(crate::server::events::ServerEvent::ProjectRemoved {
+                            project_hash: state.hash.clone(),
+                        });
+                    }
                     let _ = watcher_handle.unwatch(std::path::Path::new(&key));
                     project_states.remove(&key);
                     tracing::info!("Stopped watching removed project: {}", key);
@@ -973,6 +978,7 @@ fn check_for_new_projects(
     projects: &[crate::db::ProjectEntry],
     watcher: &mut notify::RecommendedWatcher,
     states: &mut HashMap<String, ProjectDaemonState>,
+    event_tx: &broadcast::Sender<crate::server::events::ServerEvent>,
 ) {
     for p in projects {
         let key = p.current_path.clone();
@@ -996,6 +1002,10 @@ fn check_for_new_projects(
                             last_change_at: None,
                         },
                     );
+                    let _ = event_tx.send(crate::server::events::ServerEvent::ProjectAdded {
+                        project_hash: p.hash.clone(),
+                        path: p.current_path.clone(),
+                    });
                     tracing::info!("Started watching new project: {}", path.display());
                 }
             }

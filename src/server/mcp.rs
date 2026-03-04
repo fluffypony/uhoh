@@ -110,20 +110,9 @@ fn tool_definitions() -> Value {
 
 pub async fn handle_mcp(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
-    if !super::auth::validate_host(&headers, state.config.server.port) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(JsonRpcResponse::error(
-                request.id,
-                -32600,
-                "Invalid Host header".to_string(),
-            )),
-        );
-    }
-
     if request.jsonrpc != "2.0" {
         return (
             StatusCode::BAD_REQUEST,
@@ -290,9 +279,28 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
     let db = state.database.clone();
     let path = args.get("path").and_then(|v| v.as_str()).map(str::to_string);
     let hash = args.get("project_hash").and_then(|v| v.as_str()).map(str::to_string);
+    let path_for_lock = path.clone();
+    let hash_for_lock = hash.clone();
     let uhoh_dir = state.uhoh_dir.clone();
     let restore_in_progress = state.restore_in_progress.clone();
+    let restore_locks = state.restore_locks.clone();
     let event_tx = state.event_tx.clone();
+
+    if !dry_run {
+        let lock_key = path
+            .clone()
+            .or(hash.clone())
+            .unwrap_or_else(|| "default".to_string());
+        let mut locks = restore_locks.lock().await;
+        if locks.contains(&lock_key) {
+            return JsonRpcResponse::error(
+                id,
+                -32000,
+                "Restore already in progress for this project".to_string(),
+            );
+        }
+        locks.insert(lock_key);
+    }
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
         let project = resolve::resolve_project(&db, path.as_deref().or(hash.as_deref()), None)?;
@@ -312,7 +320,12 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
             }));
         }
 
-        restore_in_progress.store(true, std::sync::atomic::Ordering::SeqCst);
+        loop {
+            if !restore_in_progress.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         let restore_result = crate::restore::cmd_restore(
             &uhoh_dir,
             &db,
@@ -337,6 +350,15 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
         }))
     })
     .await;
+
+    if !dry_run {
+        let lock_key = path_for_lock
+            .clone()
+            .or(hash_for_lock.clone())
+            .unwrap_or_else(|| "default".to_string());
+        let mut locks = restore_locks.lock().await;
+        locks.remove(&lock_key);
+    }
 
     match result {
         Ok(Ok(value)) => JsonRpcResponse::success(id, value),

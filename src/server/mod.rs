@@ -18,7 +18,7 @@ use tokio::sync::broadcast;
 
 use crate::config::ServerConfig;
 use crate::db::Database;
-use auth::{auth_middleware, AuthToken};
+use auth::{auth_middleware, host_validation_middleware, AuthToken};
 use events::ServerEvent;
 
 #[derive(Clone)]
@@ -28,6 +28,7 @@ pub struct AppState {
     pub config: crate::config::Config,
     pub event_tx: broadcast::Sender<ServerEvent>,
     pub restore_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    pub restore_locks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 pub async fn start_server(
@@ -47,6 +48,7 @@ pub async fn start_server(
         config: full_config,
         event_tx,
         restore_in_progress,
+        restore_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
     };
 
     let mut app = Router::new();
@@ -72,6 +74,8 @@ pub async fn start_server(
     if config.ui_enabled {
         app = app.fallback(get(serve_ui));
     }
+
+    app = app.route_layer(middleware::from_fn_with_state(config.port, host_validation_middleware));
 
     if config.require_auth {
         app = app

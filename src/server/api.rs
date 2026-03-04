@@ -377,12 +377,38 @@ pub async fn restore_snapshot(
     let db = state.database.clone();
     let uhoh_dir = state.uhoh_dir.clone();
     let restore_in_progress = state.restore_in_progress.clone();
+    let restore_locks = state.restore_locks.clone();
     let event_tx = state.event_tx.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-        let project = resolve::resolve_project(&db, Some(&hash), None)?;
-        if !dry_run {
-            restore_in_progress.store(true, std::sync::atomic::Ordering::SeqCst);
+    let restore_key = hash.clone();
+    let hash_for_unlock = hash.clone();
+
+    if !dry_run {
+        let mut locks = restore_locks.lock().await;
+        if locks.contains(&restore_key) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "Restore already in progress for this project" })),
+            )
+                .into_response();
         }
+        locks.insert(restore_key.clone());
+    }
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        if !dry_run {
+            let guard_key = format!("api:{}", restore_key);
+            loop {
+                if !restore_in_progress.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if guard_key.is_empty() {
+                    break;
+                }
+            }
+        }
+
+        let project = resolve::resolve_project(&db, Some(&hash), None)?;
         let restore_result = crate::restore::cmd_restore(&uhoh_dir, &db, &project, &snap_id, dry_run, true);
         if !dry_run {
             restore_in_progress.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -405,6 +431,12 @@ pub async fn restore_snapshot(
         }))
     })
     .await;
+
+    if !dry_run {
+        let mut locks = restore_locks.lock().await;
+        locks.remove(&hash_for_unlock);
+    }
+
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
