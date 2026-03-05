@@ -683,6 +683,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     &server_event_tx,
                     &event_ledger,
                     &restore_in_progress,
+                    &mut was_restoring,
                 ).await;
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
@@ -988,17 +989,31 @@ async fn process_pending_snapshots(
     event_tx: &broadcast::Sender<crate::server::events::ServerEvent>,
     event_ledger: &EventLedger,
     restore_in_progress: &AtomicBool,
+    was_restoring_snapshot: &mut bool,
 ) {
     let now = Instant::now();
+
+    // Detect restore completion here too (not just in watcher handler), so that
+    // if restore starts and ends between watcher events, grace period still fires.
+    let currently_restoring = restore_in_progress.load(std::sync::atomic::Ordering::SeqCst);
+    if *was_restoring_snapshot && !currently_restoring {
+        for state in states.values_mut() {
+            state.restore_completed_at = Some(now);
+            state.deleted_paths.clear();
+        }
+        tracing::debug!("Restore completed (detected in snapshot processor), grace period started");
+    }
+    *was_restoring_snapshot = currently_restoring;
 
     // Process multiple projects concurrently with a concurrency cap
     let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
     let concurrency = std::cmp::max(1, (logical / 2).max(1));
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
     let mut join: tokio::task::JoinSet<(
-        String,
-        Vec<PathBuf>,
+        String,           // project_path key
+        Vec<PathBuf>,     // drained changes for requeue
         anyhow::Result<Option<SnapshotResult>>,
+        bool,             // was_emergency_spawn: true if dispatched as emergency
     )> = tokio::task::JoinSet::new();
 
     // Collect emergency snapshots to spawn (we can't borrow states mutably while iterating)
@@ -1268,7 +1283,7 @@ async fn process_pending_snapshots(
                     }
                 };
                 drop(permit);
-                (project_path_key, changed_for_requeue, task_result)
+                (project_path_key, changed_for_requeue, task_result, false)
             });
         }
     }
@@ -1315,21 +1330,22 @@ async fn process_pending_snapshots(
                 }
             };
             drop(permit);
-            (project_path_key, changed_for_requeue, task_result)
+            (project_path_key, changed_for_requeue, task_result, true)
         });
     }
 
     while let Some(result) = join.join_next().await {
         match result {
-            Ok((project_path, _drained, Ok(Some(SnapshotResult::Created(id))))) => {
+            Ok((project_path, _drained, Ok(Some(SnapshotResult::Created(id))), was_emergency_spawn)) => {
                 if let Some(state) = states.get_mut(&project_path) {
                     state.last_snapshot = Instant::now();
                     if let Ok(Some(rowid)) = database.latest_snapshot_rowid(&state.hash) {
                         if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
                             // Check for dynamic trigger upgrade (safety net in snapshot.rs).
-                            // When snapshot.rs upgrades auto→emergency, emit the same events
-                            // as daemon-side detection so webhooks/notifications fire.
-                            if row.trigger == "emergency" {
+                            // Only emit events for dynamic upgrades (auto→emergency in snapshot.rs),
+                            // NOT for daemon-triggered emergencies (which already emitted events
+                            // before spawning). was_emergency_spawn distinguishes the two cases.
+                            if row.trigger == "emergency" && !was_emergency_spawn {
                                 state.last_emergency_at = Some(Instant::now());
 
                                 // Pin predecessor for recovery (the snapshot before this one)
@@ -1407,14 +1423,14 @@ async fn process_pending_snapshots(
                     state.overflow_occurred = false;
                 }
             }
-            Ok((project_path, _drained, Ok(Some(SnapshotResult::NoChanges)))) => {
+            Ok((project_path, _drained, Ok(Some(SnapshotResult::NoChanges)), _)) => {
                 if let Some(state) = states.get_mut(&project_path) {
                     state.last_snapshot = Instant::now();
                     state.deleted_paths.clear();
                     state.overflow_occurred = false;
                 }
             }
-            Ok((project_path, drained, Ok(None))) | Ok((project_path, drained, Err(_))) => {
+            Ok((project_path, drained, Ok(None), _)) | Ok((project_path, drained, Err(_), _)) => {
                 if let Some(state) = states.get_mut(&project_path) {
                     for p in drained {
                         state.pending_changes.insert(p);
