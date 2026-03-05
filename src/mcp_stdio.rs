@@ -99,6 +99,18 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
                                 },
                                 "required": ["snapshot_id"]
                             }
+                        },
+                        {
+                            "name": "uhoh_pre_notify",
+                            "description": "Notify uhoh before an agent action for audit logging.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "agent": { "type": "string" },
+                                    "action": { "type": "string" },
+                                    "path": { "type": "string" }
+                                }
+                            }
                         }
                     ]
                 })),
@@ -374,29 +386,7 @@ fn handle_stdio_tool_call(
             event.agent_name = Some(agent.to_string());
             event.path = path.map(|p| p.to_string());
             event.detail = Some(format!("action={action}"));
-            let fallback_event = event.clone();
-            let event_id = match Database::open(&crate::uhoh_dir().join("uhoh.db")) {
-                Ok(db) => {
-                    let ledger = crate::event_ledger::EventLedger::new(std::sync::Arc::new(db));
-                    if let Err(err) = ledger.flush() {
-                        tracing::error!(
-                            "failed to flush event ledger before STDIO pre_notify append: {err}"
-                        );
-                    }
-                    match ledger.append(event) {
-                        Ok(id) => Some(id),
-                        Err(err) => {
-                            tracing::error!("failed to append pre_notify event via ledger: {err}");
-                            None
-                        }
-                    }
-                }
-                Err(err) => {
-                    tracing::error!("failed to reopen database for pre_notify append: {err}");
-                    None
-                }
-            }
-            .or_else(|| match database.insert_event_ledger(&fallback_event) {
+            let event_id = match database.insert_event_ledger(&event) {
                 Ok(id) => Some(id),
                 Err(err) => {
                     tracing::error!("failed to append pre_notify event: {err}");

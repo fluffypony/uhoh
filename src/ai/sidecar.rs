@@ -60,17 +60,6 @@ pub fn sidecar_running() -> bool {
 }
 
 /// Get or spawn a persistent sidecar and return its port.
-pub fn get_or_spawn_port(
-    model_path: &Path,
-    uhoh_dir: &Path,
-    idle_shutdown_secs: u64,
-) -> Result<u16> {
-    // Callers should prefer get_or_spawn_port_with_ctx to align with configured context;
-    // this legacy variant uses a reasonable default.
-    get_or_spawn_port_with_ctx(model_path, uhoh_dir, idle_shutdown_secs, 8192)
-}
-
-/// Variant that allows passing a desired context size cap.
 pub fn get_or_spawn_port_with_ctx(
     model_path: &Path,
     uhoh_dir: &Path,
@@ -98,25 +87,44 @@ pub fn get_or_spawn_port_with_ctx(
 
     // Spawn new sidecar
     let backend = detect_backend(uhoh_dir)?;
-    // Try up to 5 attempts: choose a high random-ish port and let backend bind it
+    // Use OS-assigned ephemeral port to avoid TOCTOU race
     let (child, port) = {
         let mut last_err: Option<anyhow::Error> = None;
         let mut out: Option<(Child, u16)> = None;
-        for i in 0..5 {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            let guess = 30000 + (((now + i as u64 * 179) % 30000) as u16);
-            match spawn_backend(&backend, model_path, uhoh_dir, guess, ctx_tokens) {
+        for _ in 0..5 {
+            // Bind to port 0 to get an OS-assigned ephemeral port, then release
+            let ephemeral_port = match std::net::TcpListener::bind("127.0.0.1:0") {
+                Ok(listener) => {
+                    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+                    drop(listener);
+                    port
+                }
+                Err(_) => {
+                    last_err = Some(anyhow::anyhow!("Failed to bind ephemeral port"));
+                    continue;
+                }
+            };
+            if ephemeral_port == 0 {
+                last_err = Some(anyhow::anyhow!("OS returned port 0"));
+                continue;
+            }
+            match spawn_backend(&backend, model_path, uhoh_dir, ephemeral_port, ctx_tokens) {
                 Ok((mut child, bound_port)) => {
-                    if wait_for_ready_blocking(bound_port, Duration::from_secs(30)).is_ok() {
-                        out = Some((child, bound_port));
-                        break;
-                    } else {
-                        last_err = Some(anyhow::anyhow!("sidecar not ready on port {bound_port}"));
-                        let _ = child.kill();
-                        let _ = child.wait();
+                    // Scale timeout based on model file size
+                    let model_size_gb = std::fs::metadata(model_path)
+                        .map(|m| m.len() / (1024 * 1024 * 1024))
+                        .unwrap_or(0);
+                    let timeout = Duration::from_secs(30 + model_size_gb);
+                    match wait_for_ready_blocking(bound_port, timeout, &mut child) {
+                        Ok(()) => {
+                            out = Some((child, bound_port));
+                            break;
+                        }
+                        Err(e) => {
+                            last_err = Some(e);
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
                     }
                 }
                 Err(e) => {
@@ -186,14 +194,19 @@ pub fn shutdown_global_sidecar() {
     }
 }
 
-fn wait_for_ready_blocking(port: u16, max_wait: Duration) -> Result<()> {
+fn wait_for_ready_blocking(port: u16, max_wait: Duration, child: &mut Child) -> Result<()> {
     let mut delay = Duration::from_millis(100);
     let start = std::time::Instant::now();
     loop {
         if start.elapsed() > max_wait {
             anyhow::bail!("Sidecar did not become ready within {max_wait:?}");
         }
-        let url = format!("http://127.0.0.1:{port}/health");
+        // Check if child process has already exited
+        if let Ok(Some(exit_status)) = child.try_wait() {
+            anyhow::bail!("Sidecar exited early with status: {exit_status}");
+        }
+        // Use /v1/models which both llama-server and mlx_lm.server support
+        let url = format!("http://127.0.0.1:{port}/v1/models");
         if let Ok(resp) = reqwest::blocking::get(&url) {
             if resp.status().is_success() {
                 return Ok(());
@@ -286,6 +299,8 @@ fn spawn_backend(
                 "mlx_lm.server",
                 "--model",
                 &model_id,
+                "--host",
+                "127.0.0.1",
                 "--port",
                 &port.to_string(),
             ]);

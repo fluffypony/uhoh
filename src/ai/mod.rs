@@ -34,8 +34,8 @@ pub fn should_run_ai_with(config: &AiConfig, sys: &sysinfo::System) -> bool {
     if config.skip_on_battery && !on_ac_power() {
         return false;
     }
-    let available_gb = sys.available_memory() / (1024 * 1024 * 1024);
-    available_gb >= config.min_available_memory_gb
+    let available_mb = sys.available_memory() / (1024 * 1024);
+    available_mb >= config.min_available_memory_gb * 1024
 }
 
 /// Check if on AC power. Defaults to true (assume AC) on any error.
@@ -61,7 +61,6 @@ fn memory_available(min_gb: u64) -> bool {
     use sysinfo::System;
     let mut sys = System::new();
     sys.refresh_memory();
-    let available_bytes = sys.available_memory();
-    let available_gb = available_bytes / (1024 * 1024 * 1024);
-    available_gb >= min_gb
+    let available_mb = sys.available_memory() / (1024 * 1024);
+    available_mb >= min_gb * 1024
 }
