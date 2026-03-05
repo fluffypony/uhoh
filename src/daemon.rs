@@ -592,7 +592,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     loop {
         tokio::select! {
             Some(event) = event_rx.recv() => {
-                let currently_restoring = restore_in_progress.load(std::sync::atomic::Ordering::SeqCst);
+                let currently_restoring = restore_in_progress.load(std::sync::atomic::Ordering::SeqCst)
+                    || restore_marker_active(&uhoh_dir);
                 // Detect restore completion (true → false transition)
                 if was_restoring && !currently_restoring {
                     let now = Instant::now();
@@ -811,6 +812,29 @@ struct TickOutcome {
 }
 
 const MAX_DELETED_PATHS: usize = 100_000;
+const RESTORE_IN_PROGRESS_FILE: &str = ".restore-in-progress";
+
+fn restore_marker_active(uhoh_dir: &Path) -> bool {
+    let marker_path = uhoh_dir.join(RESTORE_IN_PROGRESS_FILE);
+    if !marker_path.exists() {
+        return false;
+    }
+
+    // If marker is stale (originating process died), remove it and treat as inactive.
+    if let Ok(text) = std::fs::read_to_string(&marker_path) {
+        if let Some(pid_line) = text.lines().find(|l| l.starts_with("pid=")) {
+            if let Ok(pid) = pid_line.trim_start_matches("pid=").trim().parse::<u32>() {
+                let start = crate::platform::read_process_start_ticks(pid);
+                if !crate::platform::is_uhoh_process_alive_with_start(pid, start) {
+                    let _ = std::fs::remove_file(&marker_path);
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
+}
 
 fn handle_watch_event(
     states: &mut HashMap<String, ProjectDaemonState>,
@@ -995,7 +1019,8 @@ async fn process_pending_snapshots(
 
     // Detect restore completion here too (not just in watcher handler), so that
     // if restore starts and ends between watcher events, grace period still fires.
-    let currently_restoring = restore_in_progress.load(std::sync::atomic::Ordering::SeqCst);
+    let currently_restoring = restore_in_progress.load(std::sync::atomic::Ordering::SeqCst)
+        || restore_marker_active(uhoh_dir);
     if *was_restoring_snapshot && !currently_restoring {
         for state in states.values_mut() {
             state.restore_completed_at = Some(now);
@@ -1025,8 +1050,8 @@ async fn process_pending_snapshots(
         }
 
         // ===== EMERGENCY EVALUATION (before normal debounce) =====
-        let is_restoring =
-            restore_in_progress.load(std::sync::atomic::Ordering::SeqCst);
+        let is_restoring = restore_in_progress.load(std::sync::atomic::Ordering::SeqCst)
+            || restore_marker_active(uhoh_dir);
 
         // Post-restore grace period: suppress emergency detection for a short
         // window after restore completes to avoid false alarms from delayed

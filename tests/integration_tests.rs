@@ -573,3 +573,55 @@ fn test_fast_path_directory_deletion_fallback() {
     assert!(paths.contains(&"Cargo.toml"), "Cargo.toml should survive");
     assert!(!paths.iter().any(|p| p.starts_with("src/")), "src/* should be deleted");
 }
+
+/// Non-daemon restore should create and remove marker file used by daemon
+/// emergency suppression fallback.
+#[test]
+fn test_restore_sets_and_clears_restore_marker_file() {
+    let tmp = TempDir::new().unwrap();
+    let uhoh_dir = tmp.path().join(".uhoh");
+    std::fs::create_dir_all(uhoh_dir.join("blobs")).unwrap();
+    let db = uhoh::db::Database::open(&uhoh_dir.join("test.db")).unwrap();
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    std::fs::write(project_dir.join("keep.txt"), "v1").unwrap();
+    db.add_project("restmark", project_dir.to_str().unwrap()).unwrap();
+    let cfg = uhoh::config::Config::default();
+
+    // Initial snapshot
+    let snap = uhoh::snapshot::create_snapshot(
+        &uhoh_dir,
+        &db,
+        "restmark",
+        &project_dir,
+        "manual",
+        Some("baseline"),
+        &cfg,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let snap_id = uhoh::cas::id_to_base58(snap);
+
+    // Modify file then restore
+    std::fs::write(project_dir.join("keep.txt"), "v2").unwrap();
+    let project = uhoh::resolve::resolve_project(&db, Some("restmark"), None).unwrap();
+    let outcome = uhoh::restore::cmd_restore(
+        &uhoh_dir,
+        &db,
+        &project,
+        &snap_id,
+        None,
+        false,
+        true,
+    )
+    .unwrap();
+    assert!(outcome.applied);
+
+    let marker = uhoh_dir.join(".restore-in-progress");
+    assert!(
+        !marker.exists(),
+        "restore marker file should be cleaned up after restore"
+    );
+}

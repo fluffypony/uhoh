@@ -1,11 +1,36 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cas;
 use crate::db::{Database, ProjectEntry};
 use crate::snapshot;
+
+const RESTORE_IN_PROGRESS_FILE: &str = ".restore-in-progress";
+
+struct RestoreSignalGuard {
+    path: PathBuf,
+}
+
+impl RestoreSignalGuard {
+    fn install(uhoh_dir: &Path, project_hash: &str) -> Result<Self> {
+        let path = uhoh_dir.join(RESTORE_IN_PROGRESS_FILE);
+        let payload = format!(
+            "project_hash={project_hash}\npid={}\n",
+            std::process::id()
+        );
+        std::fs::write(&path, payload)
+            .with_context(|| format!("Failed to write restore marker: {}", path.display()))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for RestoreSignalGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RestoreOutcome {
@@ -216,6 +241,11 @@ pub fn cmd_restore(
     let mut to_restore: Vec<(std::path::PathBuf, String, bool, bool)> = Vec::new(); // (path, hash, executable, is_symlink)
 
     let mut cleanup_staging: Option<std::path::PathBuf> = None;
+    let _restore_signal = if dry_run {
+        None
+    } else {
+        Some(RestoreSignalGuard::install(uhoh_dir, &project.hash)?)
+    };
 
     let result = (|| -> Result<RestoreOutcome> {
         // Files to delete: in current manifest but not in target manifest
