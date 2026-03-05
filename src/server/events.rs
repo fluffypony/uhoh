@@ -60,6 +60,8 @@ pub enum ServerEvent {
         ratio: f64,
         threshold: f64,
         min_files: usize,
+        cooldown_suppressed: bool,
+        cooldown_remaining_secs: Option<u64>,
     },
 }
 
@@ -137,14 +139,27 @@ impl ServerEvent {
                 deleted_count,
                 baseline_count,
                 ratio,
+                cooldown_suppressed,
+                cooldown_remaining_secs,
                 ..
             } => {
-                format!(
-                    "Emergency: mass delete detected — {}/{} files ({:.1}%)",
-                    deleted_count,
-                    baseline_count,
-                    ratio * 100.0
-                )
+                if *cooldown_suppressed {
+                    let remaining = cooldown_remaining_secs.unwrap_or(0);
+                    format!(
+                        "Emergency threshold exceeded but cooldown active — {}/{} files ({:.1}%), {}s remaining",
+                        deleted_count,
+                        baseline_count,
+                        ratio * 100.0,
+                        remaining
+                    )
+                } else {
+                    format!(
+                        "Emergency: mass delete detected — {}/{} files ({:.1}%)",
+                        deleted_count,
+                        baseline_count,
+                        ratio * 100.0
+                    )
+                }
             }
         }
     }

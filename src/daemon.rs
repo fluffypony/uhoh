@@ -1155,6 +1155,8 @@ async fn process_pending_snapshots(
                             ratio,
                             threshold: config.watch.emergency_delete_threshold,
                             min_files: config.watch.emergency_delete_min_files,
+                            cooldown_suppressed: false,
+                            cooldown_remaining_secs: None,
                         },
                     );
 
@@ -1211,6 +1213,21 @@ async fn process_pending_snapshots(
                     ledger_event.project_hash = Some(state.hash.clone());
                     ledger_event.detail = Some(detail.to_string());
                     let _ = event_ledger.append(ledger_event);
+
+                    // Broadcast suppressed event too, so observability consumers can
+                    // see cooldown behavior in real time.
+                    let _ = event_tx.send(
+                        crate::server::events::ServerEvent::EmergencyDeleteDetected {
+                            project_hash: state.hash.clone(),
+                            deleted_count: verified_deleted_count,
+                            baseline_count,
+                            ratio,
+                            threshold: config.watch.emergency_delete_threshold,
+                            min_files: config.watch.emergency_delete_min_files,
+                            cooldown_suppressed: true,
+                            cooldown_remaining_secs: Some(cooldown_remaining_secs),
+                        },
+                    );
 
                     // Don't clear deleted_paths on cooldown — let them accumulate
                     // Normal debounce proceeds below
@@ -1406,6 +1423,8 @@ async fn process_pending_snapshots(
                                         ratio,
                                         threshold: config.watch.emergency_delete_threshold,
                                         min_files: config.watch.emergency_delete_min_files,
+                                        cooldown_suppressed: false,
+                                        cooldown_remaining_secs: None,
                                     },
                                 );
 
