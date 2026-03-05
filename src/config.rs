@@ -72,19 +72,26 @@ pub struct WatchConfig {
     /// Requires daemon restart to take effect.
     pub max_debounce_secs: u64,
 
-    /// Fraction of tracked files deleted to trigger emergency snapshot
+    /// Fraction of tracked files (from previous snapshot manifest) deleted to
+    /// trigger emergency snapshot.
+    /// Both this threshold and `emergency_delete_min_files` must be met.
+    /// Range: (0.0, 1.0].
     #[serde(default = "default_emergency_delete_threshold")]
     /// Requires daemon restart to take effect.
     pub emergency_delete_threshold: f64,
 
-    /// Minimum number of deleted files to trigger emergency (avoids small-project false positives)
+    /// Minimum absolute deleted-file count required to trigger emergency
+    /// (avoids small-project false positives).
+    /// Must be > 0.
     #[serde(default = "default_emergency_delete_min_files")]
     /// Requires daemon restart to take effect.
     pub emergency_delete_min_files: usize,
 
     /// Cooldown in seconds between emergency snapshots per project.
     /// Prevents snapshot spam during sustained delete bursts.
+    /// Must be > 0.
     #[serde(default = "default_emergency_cooldown_secs")]
+    /// Requires daemon restart to take effect.
     pub emergency_cooldown_secs: u64,
 }
 

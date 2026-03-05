@@ -26,42 +26,21 @@ pub fn compact_project(
     // retained emergency snapshot. This ensures the pre-deletion state survives
     // as long as the emergency snapshot does.
     let mut protected_predecessors: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    // Also track emergency snapshots that have expired so we can unpin their predecessors.
-    let mut expired_emergency_predecessor_rowids: Vec<i64> = Vec::new();
 
-    // First pass: identify protected predecessors and expired emergency predecessors.
-    // Snapshots are newest-first, so the predecessor of snapshot[i] is snapshot[i+1].
-    for i in 0..snapshots.len() {
-        let snapshot = &snapshots[i];
+    // First pass: identify protected predecessors.
+    for snapshot in &snapshots {
         if snapshot.trigger == "emergency" {
             let ts = parse_timestamp(&snapshot.timestamp)
                 .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
             let age = now.signed_duration_since(ts);
             if age < emergency_retention {
                 // Emergency still within retention: protect its predecessor
-                if let Some(pred) = snapshots.get(i + 1) {
+                if let Ok(Some(pred)) =
+                    database.snapshot_before(project_hash, snapshot.snapshot_id)
+                {
                     protected_predecessors.insert(pred.rowid);
                 }
-            } else {
-                // Emergency expired: if predecessor is pinned, consider unpinning
-                if let Some(pred) = snapshots.get(i + 1) {
-                    if pred.pinned {
-                        expired_emergency_predecessor_rowids.push(pred.rowid);
-                    }
-                }
             }
-        }
-    }
-
-    // Unpin predecessors of expired emergency snapshots, unless they're protected
-    // by another retained emergency snapshot or are the predecessor of a non-expired one.
-    for rowid in expired_emergency_predecessor_rowids {
-        if !protected_predecessors.contains(&rowid) {
-            let _ = database.pin_snapshot(rowid, false);
-            tracing::debug!(
-                "Unpinned predecessor snapshot (rowid={}) — associated emergency snapshot expired",
-                rowid
-            );
         }
     }
 

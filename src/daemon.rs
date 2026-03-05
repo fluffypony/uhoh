@@ -858,7 +858,7 @@ fn handle_watch_event(
             if is_delete && state.deleted_paths.len() < MAX_DELETED_PATHS {
                 if let Some(ref manifest) = state.cached_prev_manifest {
                     if let Ok(rel) = path.strip_prefix(project_path) {
-                        let rel_path = rel.to_string_lossy().to_string();
+                        let rel_path = crate::cas::encode_relpath(rel);
                         if manifest.contains(&rel_path) {
                             // Direct file match
                             state.deleted_paths.insert(path.clone());
@@ -1042,11 +1042,9 @@ async fn process_pending_snapshots(
             // Mark restore-in-progress so we can detect the transition
             state.restore_completed_at = None;
         } else if in_grace_period {
-            // Restore just finished; discard stale deletion events
+            // Restore just finished; discard stale deletion events only.
+            // Keep pending_changes so legitimate post-restore edits still snapshot normally.
             state.deleted_paths.clear();
-            state.pending_changes.clear();
-            state.first_change_at = None;
-            state.last_change_at = None;
         } else if !state.deleted_paths.is_empty() {
             let hint_count = state.deleted_paths.len();
 
@@ -1348,10 +1346,13 @@ async fn process_pending_snapshots(
                             if row.trigger == "emergency" && !was_emergency_spawn {
                                 state.last_emergency_at = Some(Instant::now());
 
+                                let predecessor = database
+                                    .snapshot_before(&state.hash, id)
+                                    .ok()
+                                    .flatten();
+
                                 // Pin predecessor for recovery (the snapshot before this one)
-                                if let Ok(Some(pred)) =
-                                    database.snapshot_before(&state.hash, id)
-                                {
+                                if let Some(pred) = predecessor.as_ref() {
                                     let _ = database.pin_snapshot(pred.rowid, true);
                                     tracing::info!(
                                         "Pinned predecessor snapshot (rowid={}) via dynamic upgrade",
@@ -1359,9 +1360,19 @@ async fn process_pending_snapshots(
                                     );
                                 }
 
-                                // Parse deleted count from message for event payload
-                                let (del_count, bl_count, ratio) =
-                                    parse_emergency_message(&row.message);
+                                // Derive event payload metrics from persisted snapshot data.
+                                // Fallback to parsing message only if deleted rows query fails.
+                                let del_count = database
+                                    .get_snapshot_deleted_files(row.rowid)
+                                    .map(|v| v.len())
+                                    .unwrap_or_else(|_| {
+                                        let (d, _, _) = parse_emergency_message(&row.message);
+                                        d
+                                    });
+                                let baseline_from_predecessor = predecessor.as_ref().map(|p| p.file_count);
+                                let baseline_from_row = row.file_count.saturating_add(del_count as u64);
+                                let bl_count = baseline_from_predecessor.unwrap_or(baseline_from_row);
+                                let ratio = crate::emergency::deletion_ratio(del_count, bl_count);
                                 let _ = event_tx.send(
                                     crate::server::events::ServerEvent::EmergencyDeleteDetected {
                                         project_hash: state.hash.clone(),

@@ -260,6 +260,7 @@ Some settings are hot-reloaded by the daemon on its periodic tick without a rest
 - `watch.max_debounce_secs` (default 30): if changes keep arriving, force a snapshot after this many seconds from the first change. Restart required.
 - `watch.emergency_delete_threshold` (default 0.30): fraction of tracked files whose deletion triggers an emergency snapshot. Restart required.
 - `watch.emergency_delete_min_files` (default 5): minimum file count for the emergency threshold to apply. Restart required.
+- `watch.emergency_cooldown_secs` (default 120): per-project cooldown between emergency snapshots to avoid alert or snapshot spam during sustained delete bursts. Restart required.
 
 ### Storage settings
 
