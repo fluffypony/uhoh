@@ -547,6 +547,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 cached_prev_file_count: cached_count,
                 cached_prev_manifest: cached_manifest,
                 overflow_occurred: false,
+                restore_completed_at: None,
             },
         );
     }
@@ -587,10 +588,23 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
 
     tracing::info!("Daemon running, watching {} projects", projects.len());
 
+    let mut was_restoring = false;
     loop {
         tokio::select! {
             Some(event) = event_rx.recv() => {
-                if restore_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+                let currently_restoring = restore_in_progress.load(std::sync::atomic::Ordering::SeqCst);
+                // Detect restore completion (true → false transition)
+                if was_restoring && !currently_restoring {
+                    let now = Instant::now();
+                    for state in project_states.values_mut() {
+                        state.restore_completed_at = Some(now);
+                        state.deleted_paths.clear();
+                    }
+                    tracing::debug!("Restore completed, grace period started for all projects");
+                }
+                was_restoring = currently_restoring;
+
+                if currently_restoring {
                     tracing::debug!("Skipping watcher event during restore operation");
                     continue;
                 }
@@ -782,6 +796,10 @@ struct ProjectDaemonState {
     cached_prev_manifest: Option<std::collections::BTreeSet<String>>,
     /// Set when a watcher Overflow event occurs; suppresses emergency detection.
     overflow_occurred: bool,
+    /// Timestamp when the most recent restore completed for this project.
+    /// Used to implement a grace period after restore during which
+    /// emergency detection is suppressed (prevents post-restore event storm).
+    restore_completed_at: Option<Instant>,
 }
 
 struct TickOutcome {
@@ -984,7 +1002,7 @@ async fn process_pending_snapshots(
     )> = tokio::task::JoinSet::new();
 
     // Collect emergency snapshots to spawn (we can't borrow states mutably while iterating)
-    let mut emergency_spawns: Vec<(String, String, PathBuf, String)> = Vec::new();
+    let mut emergency_spawns: Vec<(String, String, PathBuf, String, Vec<PathBuf>)> = Vec::new();
 
     for (project_path, state) in states.iter_mut() {
         if state.pending_changes.is_empty() && state.deleted_paths.is_empty() {
@@ -995,8 +1013,25 @@ async fn process_pending_snapshots(
         let is_restoring =
             restore_in_progress.load(std::sync::atomic::Ordering::SeqCst);
 
+        // Post-restore grace period: suppress emergency detection for a short
+        // window after restore completes to avoid false alarms from delayed
+        // watcher events generated during the restore itself.
+        const POST_RESTORE_GRACE_SECS: u64 = 10;
+        let in_grace_period = state
+            .restore_completed_at
+            .map(|t| t.elapsed() < Duration::from_secs(POST_RESTORE_GRACE_SECS))
+            .unwrap_or(false);
+
         if is_restoring {
             state.deleted_paths.clear();
+            // Mark restore-in-progress so we can detect the transition
+            state.restore_completed_at = None;
+        } else if in_grace_period {
+            // Restore just finished; discard stale deletion events
+            state.deleted_paths.clear();
+            state.pending_changes.clear();
+            state.first_change_at = None;
+            state.last_change_at = None;
         } else if !state.deleted_paths.is_empty() {
             let hint_count = state.deleted_paths.len();
 
@@ -1085,20 +1120,22 @@ async fn process_pending_snapshots(
                         },
                     );
 
-                    // Clear state before spawning task
-                    state.pending_changes.drain();
+                    // Drain pending changes for requeue on failure
+                    let drained: Vec<PathBuf> =
+                        state.pending_changes.drain().collect();
                     state.deleted_paths.clear();
                     state.first_change_at = None;
                     state.last_change_at = None;
                     state.last_emergency_at = Some(Instant::now());
                     state.overflow_occurred = false;
 
-                    // Collect for spawning after the loop
+                    // Collect for spawning after the loop (include drained for requeue)
                     emergency_spawns.push((
                         project_path.clone(),
                         state.hash.clone(),
                         Path::new(project_path).to_path_buf(),
                         message,
+                        drained,
                     ));
 
                     continue; // Skip normal debounce for this project
@@ -1237,12 +1274,12 @@ async fn process_pending_snapshots(
     }
 
     // Spawn emergency snapshot tasks (full scan, trigger = "emergency")
-    for (project_path_key, project_hash, proj_path, msg) in emergency_spawns {
+    for (project_path_key, project_hash, proj_path, msg, drained_changes) in emergency_spawns {
         let uhoh_dir_buf = uhoh_dir.to_path_buf();
         let cfg = config.clone();
         let db_for_task = database.clone();
         let permit = semaphore.clone().acquire_owned().await.unwrap();
-        let changed_for_requeue = Vec::new();
+        let changed_for_requeue = drained_changes;
         join.spawn(async move {
             let proj_hash_for_log = project_hash.clone();
             let res = tokio::task::spawn_blocking(move || {
@@ -1289,9 +1326,55 @@ async fn process_pending_snapshots(
                     state.last_snapshot = Instant::now();
                     if let Ok(Some(rowid)) = database.latest_snapshot_rowid(&state.hash) {
                         if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
-                            // Check for dynamic trigger upgrade (safety net in snapshot.rs)
-                            if row.trigger == "emergency" && state.last_emergency_at.is_none() {
+                            // Check for dynamic trigger upgrade (safety net in snapshot.rs).
+                            // When snapshot.rs upgrades auto→emergency, emit the same events
+                            // as daemon-side detection so webhooks/notifications fire.
+                            if row.trigger == "emergency" {
                                 state.last_emergency_at = Some(Instant::now());
+
+                                // Pin predecessor for recovery (the snapshot before this one)
+                                if let Ok(Some(pred)) =
+                                    database.snapshot_before(&state.hash, id)
+                                {
+                                    let _ = database.pin_snapshot(pred.rowid, true);
+                                    tracing::info!(
+                                        "Pinned predecessor snapshot (rowid={}) via dynamic upgrade",
+                                        pred.rowid
+                                    );
+                                }
+
+                                // Parse deleted count from message for event payload
+                                let (del_count, bl_count, ratio) =
+                                    parse_emergency_message(&row.message);
+                                let _ = event_tx.send(
+                                    crate::server::events::ServerEvent::EmergencyDeleteDetected {
+                                        project_hash: state.hash.clone(),
+                                        deleted_count: del_count,
+                                        baseline_count: bl_count,
+                                        ratio,
+                                        threshold: config.watch.emergency_delete_threshold,
+                                        min_files: config.watch.emergency_delete_min_files,
+                                    },
+                                );
+
+                                // Emit ledger event
+                                let severity = crate::emergency::severity_for_ratio(ratio);
+                                let detail = serde_json::json!({
+                                    "deleted_count": del_count,
+                                    "baseline_count": bl_count,
+                                    "ratio": ratio,
+                                    "threshold": config.watch.emergency_delete_threshold,
+                                    "min_files": config.watch.emergency_delete_min_files,
+                                    "source": "dynamic_upgrade",
+                                });
+                                let mut ledger_event = crate::event_ledger::new_event(
+                                    "fs",
+                                    "emergency_delete_detected",
+                                    severity,
+                                );
+                                ledger_event.project_hash = Some(state.hash.clone());
+                                ledger_event.detail = Some(detail.to_string());
+                                let _ = event_ledger.append(ledger_event);
                             }
 
                             let _ = event_tx.send(
@@ -1679,6 +1762,31 @@ fn check_inotify_limit() {
 #[allow(dead_code)]
 fn check_inotify_limit() {}
 
+/// Parse "Mass delete detected: X/Y files (Z%)" from the snapshot message
+/// set by the dynamic trigger upgrade in snapshot.rs. Returns (deleted, baseline, ratio).
+fn parse_emergency_message(msg: &str) -> (usize, u64, f64) {
+    // Format: "Mass delete detected: 15/20 files (75.0%)"
+    let default = (0, 0, 0.0);
+    let Some(after_colon) = msg.strip_prefix("Mass delete detected: ") else {
+        return default;
+    };
+    let Some(slash_pos) = after_colon.find('/') else {
+        return default;
+    };
+    let deleted: usize = after_colon[..slash_pos].parse().unwrap_or(0);
+    let rest = &after_colon[slash_pos + 1..];
+    let Some(space_pos) = rest.find(' ') else {
+        return default;
+    };
+    let baseline: u64 = rest[..space_pos].parse().unwrap_or(0);
+    let ratio = if baseline > 0 {
+        deleted as f64 / baseline as f64
+    } else {
+        0.0
+    };
+    (deleted, baseline, ratio)
+}
+
 fn check_for_new_projects(
     projects: &[crate::db::ProjectEntry],
     watcher: &mut notify::RecommendedWatcher,
@@ -1708,6 +1816,7 @@ fn check_for_new_projects(
                         cached_prev_file_count: None,
                         cached_prev_manifest: None,
                         overflow_occurred: false,
+                        restore_completed_at: None,
                     });
                     let _ = event_tx.send(crate::server::events::ServerEvent::ProjectAdded {
                         project_hash: p.hash.clone(),

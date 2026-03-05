@@ -86,8 +86,9 @@ pub fn expand_directory_deletion(
 /// Verify which manifest paths are truly deleted by stat-checking the filesystem.
 ///
 /// Only counts a file as deleted if `symlink_metadata(abs_path)` returns NotFound.
-/// This eliminates false positives from renames (delete+create pair),
-/// ephemeral files, and platform-specific watcher quirks.
+/// This eliminates false positives from ephemeral files and platform-specific
+/// watcher quirks. Note: renames are counted as deletions of the old path
+/// (which is correct — the file at that path no longer exists).
 pub fn verify_deletions_against_manifest(
     project_root: &Path,
     manifest_paths: &BTreeSet<String>,
@@ -444,7 +445,9 @@ mod tests {
     }
 
     #[test]
-    fn test_rename_not_counted_as_delete() {
+    fn test_rename_old_path_counted_as_delete() {
+        // A rename removes the old path — it IS correctly counted as deleted.
+        // The new path isn't in the manifest, so it doesn't affect the count.
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("new_name.rs"), "content").unwrap();
         fs::write(tmp.path().join("still_here.rs"), "content").unwrap();

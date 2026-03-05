@@ -39,7 +39,12 @@ impl NotificationPipeline {
         }
 
         if self.cfg.desktop {
-            let _ = send_desktop_notification("uhoh", &summary).await;
+            let title = if event_type == "emergency_delete_detected" {
+                "uhoh EMERGENCY"
+            } else {
+                "uhoh"
+            };
+            let _ = send_desktop_notification(title, &summary).await;
         }
 
         if !self.cfg.webhook_url.trim().is_empty()
@@ -77,15 +82,26 @@ impl NotificationPipeline {
 }
 
 async fn send_desktop_notification(title: &str, message: &str) -> std::io::Result<()> {
+    let is_critical = title.contains("EMERGENCY");
+
     #[cfg(target_os = "macos")]
     {
-        tokio::process::Command::new("osascript")
-            .arg("-e")
-            .arg(format!(
+        let script = if is_critical {
+            format!(
+                "display notification \"{}\" with title \"{}\" sound name \"Sosumi\"",
+                message.replace('"', "\\\""),
+                title.replace('"', "\\\"")
+            )
+        } else {
+            format!(
                 "display notification \"{}\" with title \"{}\"",
                 message.replace('"', "\\\""),
                 title.replace('"', "\\\"")
-            ))
+            )
+        };
+        tokio::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
             .status()
             .await
             .map(|_| ())
@@ -93,8 +109,11 @@ async fn send_desktop_notification(title: &str, message: &str) -> std::io::Resul
 
     #[cfg(target_os = "linux")]
     {
-        tokio::process::Command::new("notify-send")
-            .arg(title)
+        let mut cmd = tokio::process::Command::new("notify-send");
+        if is_critical {
+            cmd.arg("--urgency=critical");
+        }
+        cmd.arg(title)
             .arg(message)
             .status()
             .await

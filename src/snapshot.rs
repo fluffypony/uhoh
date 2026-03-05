@@ -50,7 +50,7 @@ pub fn create_snapshot(
     let mut current_hashes: HashMap<String, (String, bool)> = HashMap::new();
 
     if let Some(paths) = changed_paths {
-        // If any changed path is a directory or equals project root, fall back to full scan
+        // If any changed path is a directory or equals project root, fall back to full scan.
         let mut requires_full = false;
         for p in paths {
             if p == project_path || p.is_dir() {
@@ -236,6 +236,33 @@ pub fn create_snapshot(
                             cached.stored,
                             cas::StorageMethod::from_db(cached.storage_method).to_db(),
                         ));
+                    } else {
+                        // Deleted path not found as direct file — check if it's a
+                        // directory prefix of prev_files entries (e.g., rm -rf src/).
+                        // After deletion, is_dir() returns false so the fast-path
+                        // check at the top doesn't catch this case. Fall back to
+                        // full scan to accurately capture all deletions.
+                        let dir_prefix = format!("{}/", rel_path);
+                        let has_children = prev_files
+                            .keys()
+                            .any(|k| k.starts_with(&dir_prefix));
+                        if has_children {
+                            tracing::debug!(
+                                "Deleted path '{}' is a directory with children in prev snapshot; \
+                                 forcing full tree walk",
+                                rel_path
+                            );
+                            return create_snapshot(
+                                uhoh_dir,
+                                database,
+                                project_hash,
+                                project_path,
+                                trigger,
+                                message,
+                                config,
+                                None,
+                            );
+                        }
                     }
                 }
                 Err(e) => {

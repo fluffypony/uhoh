@@ -14,12 +14,56 @@ pub fn compact_project(
     let snapshots = database.list_snapshots(project_hash)?;
     let now = Utc::now();
     let mut freed_bytes = 0u64;
+    let emergency_retention = Duration::hours(config.emergency_expire_hours as i64);
 
     // Track occupied buckets for O(1) dominance checking
     let mut buckets_5min: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut buckets_hourly: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut buckets_daily: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut buckets_weekly: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
+    // Predecessor protection: protect the snapshot immediately preceding any
+    // retained emergency snapshot. This ensures the pre-deletion state survives
+    // as long as the emergency snapshot does.
+    let mut protected_predecessors: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    // Also track emergency snapshots that have expired so we can unpin their predecessors.
+    let mut expired_emergency_predecessor_rowids: Vec<i64> = Vec::new();
+
+    // First pass: identify protected predecessors and expired emergency predecessors.
+    // Snapshots are newest-first, so the predecessor of snapshot[i] is snapshot[i+1].
+    for i in 0..snapshots.len() {
+        let snapshot = &snapshots[i];
+        if snapshot.trigger == "emergency" {
+            let ts = parse_timestamp(&snapshot.timestamp)
+                .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
+            let age = now.signed_duration_since(ts);
+            if age < emergency_retention {
+                // Emergency still within retention: protect its predecessor
+                if let Some(pred) = snapshots.get(i + 1) {
+                    protected_predecessors.insert(pred.rowid);
+                }
+            } else {
+                // Emergency expired: if predecessor is pinned, consider unpinning
+                if let Some(pred) = snapshots.get(i + 1) {
+                    if pred.pinned {
+                        expired_emergency_predecessor_rowids.push(pred.rowid);
+                    }
+                }
+            }
+        }
+    }
+
+    // Unpin predecessors of expired emergency snapshots, unless they're protected
+    // by another retained emergency snapshot or are the predecessor of a non-expired one.
+    for rowid in expired_emergency_predecessor_rowids {
+        if !protected_predecessors.contains(&rowid) {
+            let _ = database.pin_snapshot(rowid, false);
+            tracing::debug!(
+                "Unpinned predecessor snapshot (rowid={}) — associated emergency snapshot expired",
+                rowid
+            );
+        }
+    }
 
     // Snapshots are returned newest-first; process in that order so
     // newer snapshots take precedence in each bucket. If this order ever changes,
@@ -39,6 +83,20 @@ pub fn compact_project(
             continue;
         }
 
+        // Protected predecessors of retained emergency snapshots: always keep
+        if protected_predecessors.contains(&snapshot.rowid) {
+            register_in_buckets(
+                snapshot,
+                &now,
+                config,
+                &mut buckets_5min,
+                &mut buckets_hourly,
+                &mut buckets_daily,
+                &mut buckets_weekly,
+            );
+            continue;
+        }
+
         let ts = parse_timestamp(&snapshot.timestamp)
             .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
         let age = now.signed_duration_since(ts);
@@ -46,7 +104,7 @@ pub fn compact_project(
         // Emergency snapshots are immune to bucket-deduplication pruning within
         // the configured retention window.
         if snapshot.trigger == "emergency" {
-            if age < Duration::hours(config.emergency_expire_hours as i64) {
+            if age < emergency_retention {
                 register_in_buckets(
                     snapshot,
                     &now,
