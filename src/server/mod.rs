@@ -65,27 +65,27 @@ pub async fn start_server(
     app = app
         .route("/api/v1/projects", get(api::list_projects))
         .route(
-            "/api/v1/projects/:hash/snapshots",
+            "/api/v1/projects/{hash}/snapshots",
             get(api::list_snapshots).post(api::create_snapshot),
         )
         .route(
-            "/api/v1/projects/:hash/snapshots/:id/files",
+            "/api/v1/projects/{hash}/snapshots/{id}/files",
             get(api::get_snapshot_files),
         )
         .route(
-            "/api/v1/projects/:hash/snapshots/:id/diff",
+            "/api/v1/projects/{hash}/snapshots/{id}/diff",
             get(api::get_diff),
         )
         .route(
-            "/api/v1/projects/:hash/snapshots/:id/file/*path",
+            "/api/v1/projects/{hash}/snapshots/{id}/file/{*path}",
             get(api::get_file_content),
         )
         .route(
-            "/api/v1/projects/:hash/restore/:id",
+            "/api/v1/projects/{hash}/restore/{id}",
             post(api::restore_snapshot),
         )
         .route("/api/v1/search", get(api::search))
-        .route("/api/v1/projects/:hash/timeline", get(api::get_timeline))
+        .route("/api/v1/projects/{hash}/timeline", get(api::get_timeline))
         .route("/ws", get(ws::websocket_handler))
         .route("/api/v1/health", get(health_check))
         .route("/health", get(health_check));

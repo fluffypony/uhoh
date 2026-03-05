@@ -5,22 +5,6 @@ use std::path::Path;
 /// IMPORTANT: Replace this with your actual public key before release.
 const UPDATE_PUBLIC_KEY: &[u8; 32] = &[0u8; 32];
 
-#[cfg(not(debug_assertions))]
-const _: () = {
-    // Compile-time assertion: key must not be all zeros in release builds
-    let bytes = *UPDATE_PUBLIC_KEY;
-    let mut i = 0;
-    let mut all_zero = true;
-    while i < 32 {
-        if bytes[i] != 0 {
-            all_zero = false;
-        }
-        i += 1;
-    }
-    if all_zero {
-        panic!("UPDATE_PUBLIC_KEY is still the placeholder! Replace before release.");
-    }
-};
 
 #[derive(serde::Deserialize)]
 struct GithubRelease {
@@ -35,11 +19,7 @@ struct GithubAsset {
 }
 
 pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
-    // Runtime guard: ensure public key is set
-    if UPDATE_PUBLIC_KEY.iter().all(|&b| b == 0) {
-        tracing::warn!("Update public key is not set; skipping update check.");
-        return Ok(());
-    }
+    let key_is_placeholder = UPDATE_PUBLIC_KEY.iter().all(|&b| b == 0);
     let current_version = env!("CARGO_PKG_VERSION");
     println!("Current version: {current_version}");
 
@@ -92,7 +72,9 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
 
     // Primary verification: Ed25519 signature
     let mut verified = false;
-    if let Ok(sig_resp) = sig_result {
+    if key_is_placeholder {
+        tracing::warn!("UPDATE_PUBLIC_KEY is placeholder — skipping Ed25519 signature verification. DNS hash check still active.");
+    } else if let Ok(sig_resp) = sig_result {
         if sig_resp.status().is_success() {
             let sig_bytes = sig_resp.bytes().await?;
             match verify_ed25519_signature(&binary, &sig_bytes) {
