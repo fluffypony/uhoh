@@ -1251,9 +1251,9 @@ impl Database {
     }
 
     pub fn insert_event_ledger(&self, event: &NewEventLedgerEntry) -> Result<i64> {
-        let conn = self.conn();
+        let mut conn = self.conn();
         let ts = chrono::Utc::now().to_rfc3339();
-        let tx = conn.unchecked_transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let next_id: i64 = tx.query_row(
             "SELECT COALESCE(MAX(id), 0) + 1 FROM event_ledger",
             [],

@@ -787,6 +787,19 @@ fn handle_db_commands(
             }
             let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
 
+            if engine == "postgres" && mode.eq_ignore_ascii_case("replication") {
+                anyhow::bail!(
+                    "Postgres replication mode is not implemented. Use 'triggers' mode instead."
+                );
+            }
+            if engine == "mysql"
+                && (mode.eq_ignore_ascii_case("cdc") || mode.eq_ignore_ascii_case("binlog"))
+            {
+                anyhow::bail!(
+                    "MySQL CDC/binlog mode is not implemented. Use 'triggers' mode instead."
+                );
+            }
+
             if engine == "postgres" {
                 install_postgres_monitoring_infrastructure(dsn, tables_csv.as_str())?;
             }
