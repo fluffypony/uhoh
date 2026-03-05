@@ -155,8 +155,6 @@ compression = ["zstd"]
 keyring = ["dep:keyring"]
 audit-trail = []
 landlock-sandbox = ["dep:landlock"]
-pg-replication = []
-mysql-cdc = []
 
 [profile.release]
 lto = true

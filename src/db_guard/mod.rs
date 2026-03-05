@@ -179,44 +179,11 @@ impl DbGuardSubsystem {
                     engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS)?;
                 }
                 "postgres" => {
-                    #[cfg(not(feature = "pg-replication"))]
-                    if guard.mode.eq_ignore_ascii_case("replication") {
-                        let mut event =
-                            new_event("db_guard", "pg_replication_mode_unsupported", "warn");
-                        event.guard_name = Some(guard.name.clone());
-                        event.detail = Some(
-                            "guard mode is replication but uhoh was built without pg-replication feature"
-                                .to_string(),
-                        );
-                        if let Err(err) = ctx.event_ledger.append(event) {
-                            tracing::error!(
-                                "failed to append pg_replication_mode_unsupported event: {err}"
-                            );
-                        }
-                        continue;
-                    }
                     let mut engine = PostgresEngine;
                     tracing::trace!("db_guard tick via {} engine", engine.engine_name());
                     engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS)?;
                 }
                 "mysql" => {
-                    #[cfg(not(feature = "mysql-cdc"))]
-                    if guard.mode.eq_ignore_ascii_case("cdc")
-                        || guard.mode.eq_ignore_ascii_case("binlog")
-                    {
-                        let mut event = new_event("db_guard", "mysql_cdc_mode_unsupported", "warn");
-                        event.guard_name = Some(guard.name.clone());
-                        event.detail = Some(
-                            "guard mode requests mysql CDC but uhoh was built without mysql-cdc feature"
-                                .to_string(),
-                        );
-                        if let Err(err) = ctx.event_ledger.append(event) {
-                            tracing::error!(
-                                "failed to append mysql_cdc_mode_unsupported event: {err}"
-                            );
-                        }
-                        continue;
-                    }
                     let mut engine = MysqlEngine {
                         states: &mut self.mysql_states,
                     };

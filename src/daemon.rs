@@ -878,10 +878,9 @@ fn handle_watch_event(
     let is_delete = matches!(event, WatchEvent::FileDeleted(_));
 
     // Filter out paths under the uhoh data directory to prevent self-monitoring loops
-    if let Ok(uhoh_dir) = crate::uhoh_dir() {
-        if path.starts_with(&uhoh_dir) {
-            return;
-        }
+    let uhoh_data_dir = crate::uhoh_dir();
+    if path.starts_with(&uhoh_data_dir) {
+        return;
     }
 
     // Find which project this path belongs to

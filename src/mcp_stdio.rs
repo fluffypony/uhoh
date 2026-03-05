@@ -392,7 +392,7 @@ fn handle_stdio_tool_call(
                     tracing::error!("failed to append pre_notify event: {err}");
                     None
                 }
-            });
+            };
             JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 result: Some(json!({

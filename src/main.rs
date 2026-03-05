@@ -787,20 +787,6 @@ fn handle_db_commands(
             }
             let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
 
-            if engine == "postgres" && mode.eq_ignore_ascii_case("replication") {
-                #[cfg(not(feature = "pg-replication"))]
-                anyhow::bail!(
-                    "Postgres replication mode requires building with --features pg-replication"
-                );
-            }
-
-            if engine == "mysql"
-                && (mode.eq_ignore_ascii_case("cdc") || mode.eq_ignore_ascii_case("binlog"))
-            {
-                #[cfg(not(feature = "mysql-cdc"))]
-                anyhow::bail!("MySQL CDC/binlog mode requires building with --features mysql-cdc");
-            }
-
             if engine == "postgres" {
                 install_postgres_monitoring_infrastructure(dsn, tables_csv.as_str())?;
             }

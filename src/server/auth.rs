@@ -54,7 +54,6 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    let method = request.method().clone();
     let path = request.uri().path().to_string();
 
     if path == "/health" || path == "/api/v1/health" || path == "/ws" {
