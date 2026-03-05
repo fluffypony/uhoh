@@ -703,6 +703,15 @@ impl Config {
             if config.ai.mlx.check_interval_hours == 0 {
                 anyhow::bail!("ai.mlx.check_interval_hours must be > 0");
             }
+            if config.storage.max_binary_blob_bytes == 0 {
+                anyhow::bail!("storage.max_binary_blob_bytes must be > 0");
+            }
+            if config.storage.max_text_blob_bytes == 0 {
+                anyhow::bail!("storage.max_text_blob_bytes must be > 0");
+            }
+            if config.watch.max_debounce_secs < config.watch.debounce_quiet_secs {
+                anyhow::bail!("watch.max_debounce_secs must be >= watch.debounce_quiet_secs");
+            }
             Ok(config)
         } else {
             let config = Config::default();
