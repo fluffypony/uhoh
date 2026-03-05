@@ -300,7 +300,7 @@ impl Database {
 
     pub fn update_project_path(&self, hash: &str, new_path: &str) -> Result<()> {
         let mut conn = self.conn();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let now = chrono::Utc::now().to_rfc3339();
         let old_path: Option<String> = tx
             .query_row(
@@ -430,7 +430,7 @@ impl Database {
                     COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
              FROM snapshots s
              WHERE s.project_hash = ?1
-             ORDER BY s.timestamp DESC",
+             ORDER BY s.timestamp DESC, s.rowid DESC",
         )?;
         let rows = stmt.query_map(params![project_hash], |row| {
             Ok(SnapshotRow {
@@ -1294,7 +1294,7 @@ impl Database {
             return Ok(0);
         }
         let mut conn = self.conn();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut next_id: i64 = tx.query_row(
             "SELECT COALESCE(MAX(id), 0) + 1 FROM event_ledger",
             [],
