@@ -236,6 +236,8 @@ pub fn create_snapshot(
                             cached.stored,
                             cas::StorageMethod::from_db(cached.storage_method).to_db(),
                         ));
+                        // Mark as inserted so carry-forward doesn't copy it back
+                        inserted.insert(rel_path.clone());
                     } else {
                         // Deleted path not found as direct file — check if it's a
                         // directory prefix of prev_files entries (e.g., rm -rf src/).

@@ -585,6 +585,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let mut debounce_interval =
         tokio::time::interval(Duration::from_secs(config.watch.debounce_quiet_secs));
     let update_trigger = uhoh_dir.join(".update-ready");
+    let mut maintenance_interval = tokio::time::interval(Duration::from_secs(60));
 
     tracing::info!("Daemon running, watching {} projects", projects.len());
 
@@ -652,6 +653,10 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     let args: Vec<String> = std::env::args().collect();
                     let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
                     if let Some(ref exe) = exe_path {
+                        // Clean up state files before exec replaces the process
+                        let _ = std::fs::remove_file(uhoh_dir.join("daemon.pid"));
+                        let _ = std::fs::remove_file(uhoh_dir.join("server.port"));
+                        let _ = std::fs::remove_file(uhoh_dir.join("server.token"));
                         let err = std::process::Command::new(exe).args(rest).exec();
                         anyhow::bail!("exec failed: {err}");
                     }
@@ -687,7 +692,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     &mut was_restoring,
                 ).await;
             }
-            _ = tokio::time::sleep(Duration::from_secs(60)) => {
+            _ = maintenance_interval.tick() => {
                 let tick = run_tick_maintenance(
                     &config,
                     &config_path,
@@ -718,6 +723,10 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                         let args: Vec<String> = std::env::args().collect();
                         let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
                         if let Ok(exe) = std::env::current_exe() {
+                            // Clean up state files before exec replaces the process
+                            let _ = std::fs::remove_file(uhoh_dir.join("daemon.pid"));
+                            let _ = std::fs::remove_file(uhoh_dir.join("server.port"));
+                            let _ = std::fs::remove_file(uhoh_dir.join("server.token"));
                             let err = std::process::Command::new(exe).args(rest).exec();
                             tracing::error!("exec failed: {}", err);
                         }
@@ -868,9 +877,28 @@ fn handle_watch_event(
 
     let is_delete = matches!(event, WatchEvent::FileDeleted(_));
 
+    // Filter out paths under the uhoh data directory to prevent self-monitoring loops
+    if let Ok(uhoh_dir) = crate::uhoh_dir() {
+        if path.starts_with(&uhoh_dir) {
+            return;
+        }
+    }
+
     // Find which project this path belongs to
     for (project_path, state) in states.iter_mut() {
         if path.starts_with(project_path) {
+            // Apply ignore rules to targeted file events (B30)
+            if let Ok(rel) = path.strip_prefix(project_path) {
+                let rel_str = rel.to_string_lossy();
+                // Skip .git internals and .uhoh directory
+                if rel_str.starts_with(".git/") || rel_str.starts_with(".git\\")
+                    || rel_str == ".git"
+                    || rel_str.starts_with(".uhoh/") || rel_str.starts_with(".uhoh\\")
+                    || rel_str == ".uhoh"
+                {
+                    return;
+                }
+            }
             state.pending_changes.insert(path.clone());
             let now = Instant::now();
             if state.first_change_at.is_none() {
@@ -1245,7 +1273,8 @@ async fn process_pending_snapshots(
                 }
 
                 crate::emergency::EmergencyEvaluation::NoEmergency => {
-                    // Continue to normal debounce path
+                    // Clear overflow flag so future emergency detection works
+                    state.overflow_occurred = false;
                 }
             }
         }
