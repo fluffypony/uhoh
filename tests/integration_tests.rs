@@ -329,3 +329,247 @@ fn test_compaction_preserves_pinned() {
     let pinned_rowid = pin_rowid.unwrap();
     assert!(snaps.iter().any(|s| s.rowid == pinned_rowid));
 }
+
+// ---- Emergency delete detection integration tests ----
+
+/// Mass deletion in create_snapshot triggers dynamic auto→emergency upgrade.
+#[test]
+fn test_dynamic_trigger_upgrade_on_mass_delete() {
+    let tmp = TempDir::new().unwrap();
+    let uhoh_dir = tmp.path().join(".uhoh");
+    std::fs::create_dir_all(uhoh_dir.join("blobs")).unwrap();
+    let db = uhoh::db::Database::open(&uhoh_dir.join("test.db")).unwrap();
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    // Create 20 files
+    for i in 0..20 {
+        std::fs::write(project_dir.join(format!("file{}.rs", i)), "content").unwrap();
+    }
+
+    db.add_project("emrg1", project_dir.to_str().unwrap()).unwrap();
+    let cfg = uhoh::config::Config::default();
+
+    // First snapshot captures all 20 files
+    let snap1 = uhoh::snapshot::create_snapshot(
+        &uhoh_dir, &db, "emrg1", &project_dir, "auto", None, &cfg, None,
+    )
+    .unwrap();
+    assert!(snap1.is_some());
+
+    // Delete 15 of 20 files (75% > 30% threshold, 15 > 5 min_files)
+    for i in 0..15 {
+        std::fs::remove_file(project_dir.join(format!("file{}.rs", i))).unwrap();
+    }
+
+    // Second snapshot should auto-upgrade to "emergency"
+    let snap2 = uhoh::snapshot::create_snapshot(
+        &uhoh_dir, &db, "emrg1", &project_dir, "auto", None, &cfg, None,
+    )
+    .unwrap();
+    assert!(snap2.is_some());
+
+    let snaps = db.list_snapshots("emrg1").unwrap();
+    let latest = &snaps[0]; // newest first
+    assert_eq!(latest.trigger, "emergency", "Expected trigger upgrade to 'emergency'");
+    assert!(
+        latest.message.contains("Mass delete detected"),
+        "Expected auto-generated emergency message, got: {}",
+        latest.message
+    );
+}
+
+/// Sub-threshold deletions produce normal "auto" trigger, not "emergency".
+#[test]
+fn test_sub_threshold_no_emergency_upgrade() {
+    let tmp = TempDir::new().unwrap();
+    let uhoh_dir = tmp.path().join(".uhoh");
+    std::fs::create_dir_all(uhoh_dir.join("blobs")).unwrap();
+    let db = uhoh::db::Database::open(&uhoh_dir.join("test.db")).unwrap();
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    // Create 100 files
+    for i in 0..100 {
+        std::fs::write(project_dir.join(format!("file{}.rs", i)), "content").unwrap();
+    }
+
+    db.add_project("emrg2", project_dir.to_str().unwrap()).unwrap();
+    let cfg = uhoh::config::Config::default();
+
+    let _ = uhoh::snapshot::create_snapshot(
+        &uhoh_dir, &db, "emrg2", &project_dir, "auto", None, &cfg, None,
+    )
+    .unwrap();
+
+    // Delete 2 files (2% < 30% threshold)
+    std::fs::remove_file(project_dir.join("file0.rs")).unwrap();
+    std::fs::remove_file(project_dir.join("file1.rs")).unwrap();
+
+    let snap2 = uhoh::snapshot::create_snapshot(
+        &uhoh_dir, &db, "emrg2", &project_dir, "auto", None, &cfg, None,
+    )
+    .unwrap();
+    assert!(snap2.is_some());
+
+    let snaps = db.list_snapshots("emrg2").unwrap();
+    assert_eq!(snaps[0].trigger, "auto", "Should remain 'auto' for sub-threshold delete");
+}
+
+/// Emergency snapshots within retention window survive compaction.
+#[test]
+fn test_emergency_snapshot_retained_within_window() {
+    let tmp = TempDir::new().unwrap();
+    let db = uhoh::db::Database::open(&tmp.path().join("test.db")).unwrap();
+    db.add_project("emrg3", "/fake/path").unwrap();
+
+    // Create snapshots with emergency trigger
+    let ts_recent = chrono::Utc::now().to_rfc3339();
+    let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
+    let deleted: Vec<(String, String, u64, bool, i64)> = Vec::new();
+    let tree: Vec<(String, String)> = Vec::new();
+
+    let (rowid, _) = db
+        .create_snapshot("emrg3", 0, &ts_recent, "emergency", "mass delete", false, &files, &deleted, &tree)
+        .unwrap();
+
+    let cfg = uhoh::config::CompactionConfig::default();
+    let _ = uhoh::compaction::compact_project(&db, "emrg3", &cfg).unwrap();
+
+    let snaps = db.list_snapshots("emrg3").unwrap();
+    assert!(
+        snaps.iter().any(|s| s.rowid == rowid),
+        "Emergency snapshot within retention window should survive compaction"
+    );
+}
+
+/// Emergency snapshot outside retention window is eligible for pruning.
+#[test]
+fn test_emergency_snapshot_pruned_after_window() {
+    let tmp = TempDir::new().unwrap();
+    let db = uhoh::db::Database::open(&tmp.path().join("test.db")).unwrap();
+    db.add_project("emrg4", "/fake/path").unwrap();
+
+    // Create emergency snapshot with old timestamp (72h ago, beyond 48h default)
+    let old_ts = (chrono::Utc::now() - chrono::Duration::hours(72)).to_rfc3339();
+    let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
+    let deleted: Vec<(String, String, u64, bool, i64)> = Vec::new();
+    let tree: Vec<(String, String)> = Vec::new();
+
+    let (old_rowid, _) = db
+        .create_snapshot("emrg4", 0, &old_ts, "emergency", "old mass delete", false, &files, &deleted, &tree)
+        .unwrap();
+
+    // Create a recent snapshot so the old one can be dominated in buckets
+    let recent_ts = chrono::Utc::now().to_rfc3339();
+    let (_, _) = db
+        .create_snapshot("emrg4", 0, &recent_ts, "auto", "", false, &files, &deleted, &tree)
+        .unwrap();
+
+    let cfg = uhoh::config::CompactionConfig {
+        emergency_expire_hours: 48,
+        keep_all_minutes: 0,
+        keep_5min_days: 0,
+        keep_hourly_days: 0,
+        keep_daily_days: 0,
+        keep_weekly_beyond: false,
+        ..Default::default()
+    };
+    let _ = uhoh::compaction::compact_project(&db, "emrg4", &cfg).unwrap();
+
+    let snaps = db.list_snapshots("emrg4").unwrap();
+    assert!(
+        !snaps.iter().any(|s| s.rowid == old_rowid),
+        "Emergency snapshot beyond retention window should be prunable"
+    );
+}
+
+/// Predecessor of a retained emergency snapshot is protected from compaction.
+#[test]
+fn test_predecessor_protection_in_compaction() {
+    let tmp = TempDir::new().unwrap();
+    let db = uhoh::db::Database::open(&tmp.path().join("test.db")).unwrap();
+    db.add_project("emrg5", "/fake/path").unwrap();
+
+    let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
+    let deleted: Vec<(String, String, u64, bool, i64)> = Vec::new();
+    let tree: Vec<(String, String)> = Vec::new();
+
+    // Create predecessor snapshot (old but not emergency)
+    let pred_ts = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+    let (pred_rowid, _) = db
+        .create_snapshot("emrg5", 0, &pred_ts, "auto", "", false, &files, &deleted, &tree)
+        .unwrap();
+
+    // Create emergency snapshot (recent, within retention)
+    let emrg_ts = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let (emrg_rowid, _) = db
+        .create_snapshot("emrg5", 0, &emrg_ts, "emergency", "mass delete", false, &files, &deleted, &tree)
+        .unwrap();
+
+    // Aggressive compaction config that would normally prune old snapshots
+    let cfg = uhoh::config::CompactionConfig {
+        emergency_expire_hours: 48,
+        keep_all_minutes: 0,
+        keep_5min_days: 0,
+        keep_hourly_days: 0,
+        keep_daily_days: 0,
+        keep_weekly_beyond: false,
+        ..Default::default()
+    };
+    let _ = uhoh::compaction::compact_project(&db, "emrg5", &cfg).unwrap();
+
+    let snaps = db.list_snapshots("emrg5").unwrap();
+    assert!(
+        snaps.iter().any(|s| s.rowid == emrg_rowid),
+        "Emergency snapshot should survive compaction"
+    );
+    assert!(
+        snaps.iter().any(|s| s.rowid == pred_rowid),
+        "Predecessor of retained emergency snapshot should be protected"
+    );
+}
+
+/// Fast-path directory deletion falls back to full scan.
+#[test]
+fn test_fast_path_directory_deletion_fallback() {
+    let tmp = TempDir::new().unwrap();
+    let uhoh_dir = tmp.path().join(".uhoh");
+    std::fs::create_dir_all(uhoh_dir.join("blobs")).unwrap();
+    let db = uhoh::db::Database::open(&uhoh_dir.join("test.db")).unwrap();
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(project_dir.join("src")).unwrap();
+
+    // Create files in a subdirectory
+    std::fs::write(project_dir.join("src/main.rs"), "fn main() {}").unwrap();
+    std::fs::write(project_dir.join("src/lib.rs"), "pub fn hello() {}").unwrap();
+    std::fs::write(project_dir.join("Cargo.toml"), "[package]").unwrap();
+
+    db.add_project("dirtest", project_dir.to_str().unwrap()).unwrap();
+    let cfg = uhoh::config::Config::default();
+
+    // Take initial snapshot
+    let _ = uhoh::snapshot::create_snapshot(
+        &uhoh_dir, &db, "dirtest", &project_dir, "auto", None, &cfg, None,
+    )
+    .unwrap();
+
+    // Delete the src directory entirely
+    std::fs::remove_dir_all(project_dir.join("src")).unwrap();
+
+    // Use incremental path with changed_paths pointing to the deleted directory
+    let changed = vec![project_dir.join("src")];
+    let snap2 = uhoh::snapshot::create_snapshot(
+        &uhoh_dir, &db, "dirtest", &project_dir, "auto", None, &cfg, Some(&changed),
+    )
+    .unwrap();
+    assert!(snap2.is_some(), "Should detect directory deletion as a change");
+
+    // Verify the resulting snapshot only has Cargo.toml (src/* deleted)
+    let snaps = db.list_snapshots("dirtest").unwrap();
+    let latest_rowid = snaps[0].rowid;
+    let files = db.get_snapshot_files(latest_rowid).unwrap();
+    let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    assert!(paths.contains(&"Cargo.toml"), "Cargo.toml should survive");
+    assert!(!paths.iter().any(|p| p.starts_with("src/")), "src/* should be deleted");
+}
