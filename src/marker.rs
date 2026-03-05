@@ -34,9 +34,6 @@ pub fn read_marker(project_path: &Path) -> Result<Option<String>> {
         Ok(bytes) => {
             if bytes.len() == 37 && &bytes[..4] == MARKER_MAGIC && bytes[4] == MARKER_VERSION {
                 Ok(Some(hex::encode(&bytes[5..37])))
-            } else if bytes.len() == 32 {
-                // Legacy
-                Ok(Some(hex::encode(&bytes)))
             } else {
                 tracing::warn!(
                     "Marker file has unexpected size ({} bytes): {}",

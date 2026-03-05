@@ -264,22 +264,15 @@ impl Database {
 
     pub fn find_project_by_hash_prefix(&self, prefix: &str) -> Result<Option<ProjectEntry>> {
         let conn = self.conn();
-        // Escape SQL wildcards in user-provided prefix
-        let mut esc = String::new();
-        for ch in prefix.chars() {
-            match ch {
-                '%' | '_' => {
-                    esc.push('[');
-                    esc.push(ch);
-                    esc.push(']');
-                }
-                _ => esc.push(ch),
-            }
-        }
+        // Escape SQL wildcards in user-provided prefix using backslash + ESCAPE clause
+        let esc = prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         let pattern = format!("{esc}%");
 
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM projects WHERE hash LIKE ?1",
+            "SELECT COUNT(*) FROM projects WHERE hash LIKE ?1 ESCAPE '\\'",
             params![pattern.clone()],
             |row| row.get(0),
         )?;
@@ -291,7 +284,7 @@ impl Database {
         }
 
         conn.query_row(
-            "SELECT hash, current_path, created_at FROM projects WHERE hash LIKE ?1 LIMIT 1",
+            "SELECT hash, current_path, created_at FROM projects WHERE hash LIKE ?1 ESCAPE '\\' LIMIT 1",
             params![pattern],
             |row| {
                 Ok(ProjectEntry {
@@ -764,7 +757,7 @@ impl Database {
         Ok(entries)
     }
 
-    /// All blob hashes referenced by any snapshot
+    /// All blob hashes referenced by any snapshot or event ledger entry
     pub fn all_referenced_blob_hashes(&self) -> Result<std::collections::HashSet<String>> {
         let conn = self.conn();
         let mut set = std::collections::HashSet::new();
@@ -777,6 +770,15 @@ impl Database {
             conn.prepare("SELECT DISTINCT hash FROM snapshot_deleted WHERE stored = 1")?;
         let rows2 = stmt2.query_map([], |row| row.get::<_, String>(0))?;
         for row in rows2 {
+            set.insert(row?);
+        }
+        // Include blob references from the event ledger
+        let mut stmt3 = conn.prepare(
+            "SELECT pre_state_ref FROM event_ledger WHERE pre_state_ref IS NOT NULL
+             UNION SELECT post_state_ref FROM event_ledger WHERE post_state_ref IS NOT NULL",
+        )?;
+        let rows3 = stmt3.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows3 {
             set.insert(row?);
         }
         Ok(set)
@@ -864,8 +866,13 @@ impl Database {
     ) -> Result<Vec<SearchResult>> {
         let conn = self.conn();
 
-        // conservative query normalization for FTS parser safety
-        let safe = query.replace(['"', '*', ':'], " ").trim().to_string();
+        // conservative query normalization for FTS5 parser safety
+        let safe = query
+            .replace(['"', '*', ':', '(', ')', '+', '-', '^'], " ")
+            .split_whitespace()
+            .filter(|w| !["AND", "OR", "NOT", "NEAR"].contains(w))
+            .collect::<Vec<_>>()
+            .join(" ");
         if safe.is_empty() {
             return Ok(Vec::new());
         }

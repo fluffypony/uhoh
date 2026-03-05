@@ -41,7 +41,10 @@ pub fn write_token_file(uhoh_dir: &Path, token: &str) -> anyhow::Result<PathBuf>
 }
 
 pub fn write_port_file(uhoh_dir: &Path, port: u16) -> anyhow::Result<()> {
-    fs::write(uhoh_dir.join("server.port"), port.to_string())?;
+    let port_path = uhoh_dir.join("server.port");
+    let tmp = port_path.with_extension("tmp");
+    fs::write(&tmp, port.to_string())?;
+    fs::rename(&tmp, &port_path)?;
     Ok(())
 }
 
@@ -54,7 +57,7 @@ pub async fn auth_middleware(
     let method = request.method().clone();
     let path = request.uri().path().to_string();
 
-    if method == axum::http::Method::GET || path == "/health" || path == "/api/v1/health" {
+    if path == "/health" || path == "/api/v1/health" || path == "/ws" {
         return next.run(request).await;
     }
 

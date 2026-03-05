@@ -47,7 +47,7 @@ pub fn start_watching(
                             }
                         }
                         EventKind::Other => {
-                            let _ = sender.send(WatchEvent::Overflow);
+                            tracing::trace!("Ignoring EventKind::Other");
                         }
                         _ => {}
                     },

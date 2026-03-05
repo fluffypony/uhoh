@@ -6,9 +6,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 #[cfg(feature = "compression")]
-const COMPRESSION_MAGIC_NEW: &[u8; 12] = b"UHZS\x00ZSTD\x00v1";
-#[cfg(feature = "compression")]
-const COMPRESSION_MAGIC_OLD: &[u8; 8] = b"UHZS\x00\xF0\x9F\xA6";
+const COMPRESSION_MAGIC: &[u8; 12] = b"UHZS\x00ZSTD\x00v1";
 
 /// How a blob was stored in the CAS.
 /// Numeric values can be persisted in the DB if needed.
@@ -191,7 +189,20 @@ pub fn store_blob_from_file(
     #[cfg(not(feature = "compression"))]
     let do_compress = false;
 
+    // Finish reading the file to complete the hash (first_n may not cover entire file)
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
     let hash = hasher.finalize().to_hex().to_string();
+
+    // Reopen the file for the copy/compress pass
+    let file2 = std::fs::File::open(file_path)
+        .with_context(|| format!("Cannot reopen: {}", file_path.display()))?;
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file2);
     let dir = blob_root.join(&hash[..hash.len().min(2)]);
     std::fs::create_dir_all(&dir)?;
     let blob_path = dir.join(&hash);
@@ -229,19 +240,14 @@ pub fn store_blob_from_file(
             };
             let tmp_file = create_restricted_file(&tmp_path)?;
             let mut tmp_writer = std::io::BufWriter::new(tmp_file);
-            tmp_writer.write_all(COMPRESSION_MAGIC_NEW)?;
+            tmp_writer.write_all(COMPRESSION_MAGIC)?;
             let mut encoder = zstd::stream::write::Encoder::new(tmp_writer, level)?;
-
-            if first_n > 0 {
-                encoder.write_all(&buf[..first_n])?;
-            }
 
             loop {
                 let n = reader.read(&mut buf)?;
                 if n == 0 {
                     break;
                 }
-                hasher.update(&buf[..n]);
                 encoder.write_all(&buf[..n])?;
             }
 
@@ -253,7 +259,7 @@ pub fn store_blob_from_file(
             file.sync_all()?;
             let mut compressed_size = file.metadata()?.len();
 
-            if compressed_size >= file_size + COMPRESSION_MAGIC_NEW.len() as u64 {
+            if compressed_size >= file_size + COMPRESSION_MAGIC.len() as u64 {
                 drop(file);
                 let _ = std::fs::remove_file(&tmp_path);
 
@@ -278,9 +284,6 @@ pub fn store_blob_from_file(
         }
     } else {
         let mut tmp_file = create_restricted_file(&tmp_path)?;
-        if first_n > 0 {
-            tmp_file.write_all(&buf[..first_n])?;
-        }
         loop {
             let n = reader.read(&mut buf)?;
             if n == 0 {
@@ -392,8 +395,8 @@ pub fn maybe_compress_with_level(data: &[u8], level: i32) -> Vec<u8> {
 #[cfg(feature = "compression")]
 fn maybe_wrap_compressed(original: &[u8], compressed: &[u8]) -> Vec<u8> {
     if compressed.len() < original.len() {
-        let mut out = Vec::with_capacity(compressed.len() + COMPRESSION_MAGIC_NEW.len());
-        out.extend_from_slice(COMPRESSION_MAGIC_NEW);
+        let mut out = Vec::with_capacity(compressed.len() + COMPRESSION_MAGIC.len());
+        out.extend_from_slice(COMPRESSION_MAGIC);
         out.extend_from_slice(compressed);
         return out;
     }
@@ -403,12 +406,8 @@ fn maybe_wrap_compressed(original: &[u8], compressed: &[u8]) -> Vec<u8> {
 fn maybe_decompress(data: &[u8]) -> Result<Vec<u8>> {
     #[cfg(feature = "compression")]
     {
-        if data.len() > 12 && &data[..12] == COMPRESSION_MAGIC_NEW {
+        if data.len() > 12 && &data[..12] == COMPRESSION_MAGIC {
             return zstd::decode_all(std::io::Cursor::new(&data[12..]))
-                .context("Failed to decompress blob");
-        }
-        if data.len() > 8 && &data[..8] == COMPRESSION_MAGIC_OLD {
-            return zstd::decode_all(std::io::Cursor::new(&data[8..]))
                 .context("Failed to decompress blob");
         }
     }
