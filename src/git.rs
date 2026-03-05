@@ -234,8 +234,10 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
     let exe_str = if which("uhoh").is_ok() {
         "uhoh".to_string()
     } else {
+        let bin_name = format!("uhoh{}", std::env::consts::EXE_SUFFIX);
         crate::platform::uhoh_dir()
-            .join("bin/uhoh")
+            .join("bin")
+            .join(bin_name)
             .to_string_lossy()
             .to_string()
     };

@@ -411,16 +411,15 @@ pub fn cmd_restore(
 
             let full_path = restore_tmp.join(path);
             if let Some(parent) = full_path.parent() {
-                std::fs::create_dir_all(parent)?;
+                // Check for symlinks BEFORE creating directories
                 check_no_symlink_parents(&restore_tmp, &full_path)?;
+                std::fs::create_dir_all(parent)?;
             }
 
+            // Remove existing file/symlink before restoring
             if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
-                if meta.file_type().is_symlink() {
-                    anyhow::bail!(
-                        "Refusing to overwrite symlinked file: {}",
-                        full_path.display()
-                    );
+                if meta.file_type().is_symlink() || meta.is_file() {
+                    std::fs::remove_file(&full_path)?;
                 }
             }
 

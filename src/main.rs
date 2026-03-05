@@ -735,7 +735,7 @@ async fn main() -> Result<()> {
                         .wait()
                         .with_context(|| format!("Failed to collect status for {}", command[0]))?;
                     if !exit_status.success() {
-                        anyhow::bail!("Command failed with status: {exit_status}");
+                        std::process::exit(exit_status.code().unwrap_or(1));
                     }
                 } else {
                     tracing::warn!(
@@ -746,7 +746,7 @@ async fn main() -> Result<()> {
                         .wait()
                         .with_context(|| format!("Failed to wait for command: {}", command[0]))?;
                     if !status.success() {
-                        anyhow::bail!("Command failed with status: {status}");
+                        std::process::exit(status.code().unwrap_or(1));
                     }
                 }
             }
@@ -757,7 +757,7 @@ async fn main() -> Result<()> {
                     .status()
                     .with_context(|| format!("Failed to run command: {}", command[0]))?;
                 if !status.success() {
-                    anyhow::bail!("Command failed with status: {status}");
+                    std::process::exit(status.code().unwrap_or(1));
                 }
             }
         }
@@ -1501,7 +1501,14 @@ fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Resul
             println!("No paused agent pid available to resume");
         }
         AgentAction::Setup => {
-            println!("Agent setup: configure profiles under ~/.uhoh/agents");
+            let agents_dir = uhoh::uhoh_dir().join("agents");
+            std::fs::create_dir_all(&agents_dir)?;
+            let template_path = agents_dir.join("default.toml");
+            if !template_path.exists() {
+                std::fs::write(&template_path, "# Default agent profile\n# Edit this file to configure agent monitoring.\n\n[agent]\nname = \"default\"\n")?;
+            }
+            println!("Agent profiles initialized at {}", agents_dir.display());
+            println!("Edit {} to configure agent monitoring.", template_path.display());
         }
         AgentAction::Test { name } => {
             let exists = database.list_agents()?.into_iter().any(|a| a.name == *name);

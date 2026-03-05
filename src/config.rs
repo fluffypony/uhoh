@@ -2,15 +2,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Schema version for config file migration
-const CURRENT_SCHEMA_VERSION: u32 = 1;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_schema_version")]
-    /// Schema version of the config file (restart not required)
-    pub schema_version: u32,
-
     #[serde(default)]
     /// Watch configuration. Hot-reload applies to debounce_quiet_secs only; other fields require daemon restart.
     pub watch: WatchConfig,
@@ -50,10 +43,6 @@ pub struct Config {
     #[serde(default)]
     /// Agent monitoring and interception settings.
     pub agent: AgentConfig,
-}
-
-fn default_schema_version() -> u32 {
-    CURRENT_SCHEMA_VERSION
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -478,7 +467,6 @@ fn default_agent_dangerous_patterns() -> Vec<String> {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            schema_version: CURRENT_SCHEMA_VERSION,
             watch: WatchConfig::default(),
             compaction: CompactionConfig::default(),
             storage: StorageConfig::default(),

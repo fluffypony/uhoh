@@ -8,7 +8,6 @@ use zeroize::Zeroize;
 
 use super::credentials::CredentialMaterial;
 
-const ENC_MAGIC_V1: &[u8; 8] = b"UHOHENC1";
 const ENC_MAGIC_V2: &[u8; 8] = b"UHOHENC2";
 const ENC_KDF_BLAKE3: u8 = 0;
 const ENC_KDF_ARGON2ID: u8 = 1;
@@ -267,9 +266,7 @@ pub fn decrypt_recovery_payload(payload: &[u8], uhoh_dir: &std::path::Path) -> R
     if payload.starts_with(ENC_MAGIC_V2) {
         return decrypt_v2(payload, uhoh_dir);
     }
-    if payload.starts_with(ENC_MAGIC_V1) {
-        return decrypt_v1_legacy(payload, uhoh_dir);
-    }
+    // Legacy V1 encryption format removed
     Ok(payload.to_vec())
 }
 
@@ -386,21 +383,6 @@ fn decrypt_v2(payload: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {
     result
 }
 
-fn decrypt_v1_legacy(payload: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {
-    if payload.len() <= 20 {
-        anyhow::bail!("Encrypted legacy recovery artifact is malformed");
-    }
-    let mut key = derive_key_material_legacy(uhoh_dir)?;
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-    let nonce = Nonce::from_slice(&payload[8..20]);
-    let ciphertext = &payload[20..];
-    let result = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| anyhow::anyhow!("Failed to decrypt legacy recovery artifact"));
-    key.zeroize();
-    result
-}
-
 fn read_master_key_from_env() -> Option<String> {
     std::env::var("UHOH_MASTER_KEY")
         .ok()
@@ -457,33 +439,6 @@ fn load_or_create_machine_key(uhoh_dir: &std::path::Path) -> Result<[u8; 32]> {
         .with_context(|| format!("Failed writing {}", key_path.display()))?;
     set_secure_permissions(&key_path)?;
     Ok(key)
-}
-
-fn derive_key_material_legacy(uhoh_dir: &std::path::Path) -> Result<[u8; 32]> {
-    tracing::warn!(
-        "Decrypting legacy UHOHENC1 artifact via compatibility path; migrate by re-writing artifact"
-    );
-    if let Some(mut master) = read_master_key_from_env() {
-        if let Some(mut raw_key) = decode_hex_key(&master) {
-            let out = blake3::derive_key(RECOVERY_BLAKE3_CONTEXT, &raw_key);
-            raw_key.zeroize();
-            master.zeroize();
-            return Ok(out);
-        }
-        let salt = [0u8; 16];
-        let out = derive_argon2_key(&master, &salt)?;
-        master.zeroize();
-        return Ok(out);
-    }
-
-    tracing::warn!(
-        "Decrypting legacy recovery artifact using machine-local fallback key at ~/.uhoh/{}",
-        MACHINE_KEY_FILE
-    );
-    let mut machine_key = load_or_create_machine_key(uhoh_dir)?;
-    let out = blake3::derive_key(RECOVERY_BLAKE3_CONTEXT, &machine_key);
-    machine_key.zeroize();
-    Ok(out)
 }
 
 fn ensure_guard_dirs(

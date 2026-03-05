@@ -31,6 +31,12 @@ pub async fn maybe_run_mlx_auto_update(
     uhoh_dir: &std::path::Path,
     event_tx: Option<&tokio::sync::broadcast::Sender<ServerEvent>>,
 ) -> Result<()> {
+    // MLX only works on Apple Silicon macOS
+    if cfg!(not(target_os = "macos")) {
+        let _ = (config, uhoh_dir, event_tx);
+        return Ok(());
+    }
+
     if !config.mlx.auto_update {
         return Ok(());
     }

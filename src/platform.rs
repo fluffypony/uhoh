@@ -290,6 +290,7 @@ pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
     #[cfg(target_os = "macos")]
     {
         let output = std::process::Command::new("ps")
+            .env("LC_ALL", "C")
             .args(["-p", &pid.to_string(), "-o", "lstart="])
             .output()
             .ok()?;

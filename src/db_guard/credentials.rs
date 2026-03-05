@@ -354,26 +354,6 @@ fn decrypt_credentials_map(
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
     let mut out = std::collections::BTreeMap::new();
 
-    // Backward compatibility for older single-ciphertext payloads.
-    if payload.len() >= 42 {
-        let old_len = u32::from_be_bytes(payload[38..42].try_into().unwrap_or([0u8; 4])) as usize;
-        if payload.len() >= 42 + old_len {
-            let mut nonce = [0u8; 12];
-            nonce.copy_from_slice(&payload[26..38]);
-            let ciphertext = &payload[42..42 + old_len];
-            if let Ok(plaintext) = cipher.decrypt(Nonce::from_slice(&nonce), ciphertext) {
-                if let Ok(map) = serde_json::from_slice::<
-                    std::collections::BTreeMap<String, CredentialMaterial>,
-                >(&plaintext)
-                {
-                    master.zeroize();
-                    key.zeroize();
-                    return Ok(map);
-                }
-            }
-        }
-    }
-
     if payload.len() < cursor + 4 {
         anyhow::bail!("Encrypted credentials entry header is truncated");
     }
