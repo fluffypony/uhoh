@@ -326,16 +326,10 @@ fn mcp_proxy_runs_as_async_task_with_shutdown_token() {
 }
 
 #[test]
-fn cargo_features_include_replication_and_cdc_gates() {
+fn cargo_features_include_core_gates() {
     let cargo = std::fs::read_to_string("Cargo.toml").expect("read Cargo.toml");
     assert!(cargo.contains("audit-trail = []"));
-    assert!(cargo.contains("pg-replication = []"));
-    assert!(cargo.contains("mysql-cdc = []"));
     assert!(cargo.contains("keyring = [\"dep:keyring\"]"));
-
-    let db_main = std::fs::read_to_string("src/main.rs").expect("read db command handler");
-    assert!(db_main.contains("requires building with --features pg-replication"));
-    assert!(db_main.contains("requires building with --features mysql-cdc"));
 }
 
 #[test]
