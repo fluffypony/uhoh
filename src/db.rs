@@ -782,6 +782,16 @@ impl Database {
         Ok(set)
     }
 
+    /// Set or clear the pinned flag on a snapshot.
+    pub fn pin_snapshot(&self, rowid: i64, pinned: bool) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE snapshots SET pinned = ?1 WHERE rowid = ?2",
+            params![pinned as i32, rowid],
+        )?;
+        Ok(())
+    }
+
     /// Delete old snapshots (used by compaction)
     pub fn delete_snapshot(&self, rowid: i64) -> Result<()> {
         let conn = self.conn();

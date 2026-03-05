@@ -53,6 +53,14 @@ pub enum ServerEvent {
     ProjectRemoved {
         project_hash: String,
     },
+    EmergencyDeleteDetected {
+        project_hash: String,
+        deleted_count: usize,
+        baseline_count: u64,
+        ratio: f64,
+        threshold: f64,
+        min_files: usize,
+    },
 }
 
 impl ServerEvent {
@@ -68,6 +76,9 @@ impl ServerEvent {
             ServerEvent::AgentAlert { event_type, .. } => event_type.clone(),
             ServerEvent::ProjectAdded { .. } => "project_added".to_string(),
             ServerEvent::ProjectRemoved { .. } => "project_removed".to_string(),
+            ServerEvent::EmergencyDeleteDetected { .. } => {
+                "emergency_delete_detected".to_string()
+            }
         }
     }
 
@@ -121,6 +132,19 @@ impl ServerEvent {
             ServerEvent::ProjectAdded { path, .. } => format!("Project added: {path}"),
             ServerEvent::ProjectRemoved { project_hash } => {
                 format!("Project removed: {project_hash}")
+            }
+            ServerEvent::EmergencyDeleteDetected {
+                deleted_count,
+                baseline_count,
+                ratio,
+                ..
+            } => {
+                format!(
+                    "Emergency: mass delete detected — {}/{} files ({:.1}%)",
+                    deleted_count,
+                    baseline_count,
+                    ratio * 100.0
+                )
             }
         }
     }

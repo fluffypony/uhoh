@@ -5,6 +5,7 @@ pub mod cli;
 pub mod compaction;
 pub mod config;
 pub mod daemon;
+pub mod emergency;
 pub mod db;
 pub mod db_guard;
 pub mod diff_view;

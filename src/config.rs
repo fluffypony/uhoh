@@ -81,6 +81,11 @@ pub struct WatchConfig {
     #[serde(default = "default_emergency_delete_min_files")]
     /// Requires daemon restart to take effect.
     pub emergency_delete_min_files: usize,
+
+    /// Cooldown in seconds between emergency snapshots per project.
+    /// Prevents snapshot spam during sustained delete bursts.
+    #[serde(default = "default_emergency_cooldown_secs")]
+    pub emergency_cooldown_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,6 +333,9 @@ fn default_emergency_delete_threshold() -> f64 {
 fn default_emergency_delete_min_files() -> usize {
     5
 }
+fn default_emergency_cooldown_secs() -> u64 {
+    120
+}
 fn default_keep_all_minutes() -> u64 {
     60
 }
@@ -411,6 +419,7 @@ fn default_webhook_events() -> Vec<String> {
         "truncate".to_string(),
         "dangerous_agent_action".to_string(),
         "mlx_update_failed".to_string(),
+        "emergency_delete_detected".to_string(),
     ]
 }
 fn default_notifications_cooldown() -> u64 {
@@ -485,6 +494,7 @@ impl Default for WatchConfig {
             max_debounce_secs: default_max_debounce_secs(),
             emergency_delete_threshold: default_emergency_delete_threshold(),
             emergency_delete_min_files: default_emergency_delete_min_files(),
+            emergency_cooldown_secs: default_emergency_cooldown_secs(),
         }
     }
 }
@@ -642,6 +652,20 @@ impl Config {
             }
             if config.compaction.emergency_expire_hours == 0 {
                 anyhow::bail!("compaction.emergency_expire_hours must be > 0");
+            }
+            if config.watch.emergency_delete_threshold <= 0.0
+                || config.watch.emergency_delete_threshold > 1.0
+            {
+                anyhow::bail!(
+                    "watch.emergency_delete_threshold must be in (0.0, 1.0], got {}",
+                    config.watch.emergency_delete_threshold
+                );
+            }
+            if config.watch.emergency_delete_min_files == 0 {
+                anyhow::bail!("watch.emergency_delete_min_files must be > 0");
+            }
+            if config.watch.emergency_cooldown_secs == 0 {
+                anyhow::bail!("watch.emergency_cooldown_secs must be > 0");
             }
             if config.ai.max_context_tokens == 0 {
                 anyhow::bail!("ai.max_context_tokens must be > 0");

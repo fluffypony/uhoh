@@ -467,8 +467,48 @@ pub fn create_snapshot(
         return Ok(None);
     }
 
-    // Removed emergency-delete dead code; use provided trigger.
-    let actual_trigger = trigger;
+    // Dynamic trigger upgrade: if trigger is "auto" and mass deletion is detected,
+    // upgrade to "emergency" as a safety net for cases the daemon-side detection missed
+    // (e.g., directory deletion on macOS FSEvents emitting a single event for rm -rf).
+    let actual_trigger = if trigger == "auto" {
+        let deleted_count = deleted_for_manifest.len();
+        let prev_count = prev_files.len() as u64;
+        if crate::emergency::exceeds_threshold(
+            deleted_count,
+            prev_count,
+            config.watch.emergency_delete_threshold,
+            config.watch.emergency_delete_min_files,
+        ) {
+            let ratio = crate::emergency::deletion_ratio(deleted_count, prev_count);
+            tracing::warn!(
+                "Dynamic trigger upgrade: auto -> emergency \
+                 (deleted={}, baseline={}, ratio={:.3})",
+                deleted_count,
+                prev_count,
+                ratio
+            );
+            "emergency"
+        } else {
+            trigger
+        }
+    } else {
+        trigger
+    };
+
+    // Override message for dynamically-upgraded emergency snapshots
+    let auto_msg: String;
+    let msg = if actual_trigger == "emergency" && message.is_none() {
+        let deleted_count = deleted_for_manifest.len();
+        let prev_count = prev_files.len() as u64;
+        let ratio = crate::emergency::deletion_ratio(deleted_count, prev_count);
+        auto_msg = format!(
+            "Mass delete detected: {}/{} files ({:.1}%)",
+            deleted_count, prev_count, ratio * 100.0
+        );
+        auto_msg.as_str()
+    } else {
+        message.unwrap_or("")
+    };
 
     // Tree hashes removed to reduce per-snapshot overhead; left table exists for potential future use
     let tree_hashes: Vec<(String, String)> = Vec::new();
@@ -476,7 +516,6 @@ pub fn create_snapshot(
     // Snapshot ID will be allocated inside the DB transaction
     let snapshot_id: u64 = 0;
     let timestamp = chrono::Utc::now().to_rfc3339();
-    let msg = message.unwrap_or("");
     let pinned = false;
 
     let (rowid, snapshot_id) = database.create_snapshot(
@@ -798,12 +837,24 @@ fn enforce_storage_limit(
     );
 
     // Delete oldest unpinned snapshots until under limit (approximate freed space)
+    let emergency_retention =
+        chrono::Duration::hours(config.compaction.emergency_expire_hours as i64);
+    let now = chrono::Utc::now();
     for snap in database.list_snapshots_oldest_first(project_hash)? {
         if blob_size <= max_blob_size {
             break;
         }
         if snap.pinned {
             continue;
+        }
+        // Protect emergency snapshots within their retention window
+        if snap.trigger == "emergency" {
+            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&snap.timestamp) {
+                let age = now.signed_duration_since(ts.with_timezone(&chrono::Utc));
+                if age < emergency_retention {
+                    continue;
+                }
+            }
         }
         // Estimate how much this snapshot frees
         let freed = database.estimate_snapshot_blob_size(snap.rowid)?;

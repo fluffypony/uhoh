@@ -43,7 +43,23 @@ pub fn compact_project(
             .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
         let age = now.signed_duration_since(ts);
 
-        // Emergency-delete trigger path was removed as dead code; regular retention applies.
+        // Emergency snapshots are immune to bucket-deduplication pruning within
+        // the configured retention window.
+        if snapshot.trigger == "emergency" {
+            if age < Duration::hours(config.emergency_expire_hours as i64) {
+                register_in_buckets(
+                    snapshot,
+                    &now,
+                    config,
+                    &mut buckets_5min,
+                    &mut buckets_hourly,
+                    &mut buckets_daily,
+                    &mut buckets_weekly,
+                );
+                continue;
+            }
+            // After retention window expires, fall through to normal bucket logic
+        }
 
         // Keep everything within keep_all_minutes
         if age < Duration::minutes(config.keep_all_minutes as i64) {

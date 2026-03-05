@@ -515,6 +515,25 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     // Per-project state
     let mut project_states: HashMap<String, ProjectDaemonState> = HashMap::new();
     for project in projects {
+        // Seed cached manifest and file count from the latest snapshot
+        let (cached_count, cached_manifest) =
+            if let Ok(Some(rowid)) = database.latest_snapshot_rowid(&project.hash) {
+                if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
+                    let file_count = row.file_count;
+                    let manifest: std::collections::BTreeSet<String> =
+                        if let Ok(files) = database.get_snapshot_files(rowid) {
+                            files.iter().map(|f| f.path.clone()).collect()
+                        } else {
+                            std::collections::BTreeSet::new()
+                        };
+                    (Some(file_count), Some(manifest))
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
+
         project_states.insert(
             project.current_path.clone(),
             ProjectDaemonState {
@@ -523,6 +542,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 pending_changes: std::collections::HashSet::new(),
                 first_change_at: None,
                 last_change_at: None,
+                deleted_paths: std::collections::HashSet::new(),
+                last_emergency_at: None,
+                cached_prev_file_count: cached_count,
+                cached_prev_manifest: cached_manifest,
+                overflow_occurred: false,
             },
         );
     }
@@ -643,6 +667,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     &mut project_states,
                     &config,
                     &server_event_tx,
+                    &event_ledger,
+                    &restore_in_progress,
                 ).await;
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
@@ -744,6 +770,18 @@ struct ProjectDaemonState {
     pending_changes: std::collections::HashSet<PathBuf>,
     first_change_at: Option<Instant>,
     last_change_at: Option<Instant>,
+
+    // --- Emergency delete detection ---
+    /// Deletion candidates observed during the current debounce window.
+    deleted_paths: std::collections::HashSet<PathBuf>,
+    /// Timestamp of last emergency snapshot for cooldown gating.
+    last_emergency_at: Option<Instant>,
+    /// Cached file count from the most recent snapshot (denominator for ratio).
+    cached_prev_file_count: Option<u64>,
+    /// Cached manifest paths from the most recent snapshot for verification.
+    cached_prev_manifest: Option<std::collections::BTreeSet<String>>,
+    /// Set when a watcher Overflow event occurs; suppresses emergency detection.
+    overflow_occurred: bool,
 }
 
 struct TickOutcome {
@@ -752,6 +790,8 @@ struct TickOutcome {
     updated_update_interval: Option<tokio::time::Interval>,
     should_restart_for_update: bool,
 }
+
+const MAX_DELETED_PATHS: usize = 100_000;
 
 fn handle_watch_event(
     states: &mut HashMap<String, ProjectDaemonState>,
@@ -767,6 +807,8 @@ fn handle_watch_event(
                 state.first_change_at = Some(now);
             }
             state.last_change_at = Some(now);
+            // Mark overflow: event counts are unreliable, suppress emergency detection
+            state.overflow_occurred = true;
         }
         return;
     }
@@ -781,16 +823,47 @@ fn handle_watch_event(
         _ => return,
     };
 
+    let is_delete = matches!(event, WatchEvent::FileDeleted(_));
+
     // Find which project this path belongs to
     for (project_path, state) in states.iter_mut() {
         if path.starts_with(project_path) {
-            // Rely on ignore rules during snapshot walk; do not pre-filter here to avoid mismatches
             state.pending_changes.insert(path.clone());
             let now = Instant::now();
             if state.first_change_at.is_none() {
                 state.first_change_at = Some(now);
             }
             state.last_change_at = Some(now);
+
+            // Track deletions separately for emergency detection
+            if is_delete && state.deleted_paths.len() < MAX_DELETED_PATHS {
+                if let Some(ref manifest) = state.cached_prev_manifest {
+                    if let Ok(rel) = path.strip_prefix(project_path) {
+                        let rel_path = rel.to_string_lossy().to_string();
+                        if manifest.contains(&rel_path) {
+                            // Direct file match
+                            state.deleted_paths.insert(path.clone());
+                        } else {
+                            // Check if this is a directory deletion: expand to all
+                            // manifest entries under this prefix
+                            let expanded = crate::emergency::expand_directory_deletion(
+                                &rel_path, manifest,
+                            );
+                            for exp_rel in expanded {
+                                if state.deleted_paths.len() >= MAX_DELETED_PATHS {
+                                    break;
+                                }
+                                let exp_abs = PathBuf::from(project_path).join(&exp_rel);
+                                state.deleted_paths.insert(exp_abs);
+                            }
+                        }
+                    }
+                } else {
+                    // No cached manifest: insert raw for heuristic counting
+                    state.deleted_paths.insert(path.clone());
+                }
+            }
+
             break;
         }
     }
@@ -895,6 +968,8 @@ async fn process_pending_snapshots(
     states: &mut HashMap<String, ProjectDaemonState>,
     config: &Config,
     event_tx: &broadcast::Sender<crate::server::events::ServerEvent>,
+    event_ledger: &EventLedger,
+    restore_in_progress: &AtomicBool,
 ) {
     let now = Instant::now();
 
@@ -907,7 +982,184 @@ async fn process_pending_snapshots(
         Vec<PathBuf>,
         anyhow::Result<Option<SnapshotResult>>,
     )> = tokio::task::JoinSet::new();
+
+    // Collect emergency snapshots to spawn (we can't borrow states mutably while iterating)
+    let mut emergency_spawns: Vec<(String, String, PathBuf, String)> = Vec::new();
+
     for (project_path, state) in states.iter_mut() {
+        if state.pending_changes.is_empty() && state.deleted_paths.is_empty() {
+            continue;
+        }
+
+        // ===== EMERGENCY EVALUATION (before normal debounce) =====
+        let is_restoring =
+            restore_in_progress.load(std::sync::atomic::Ordering::SeqCst);
+
+        if is_restoring {
+            state.deleted_paths.clear();
+        } else if !state.deleted_paths.is_empty() {
+            let hint_count = state.deleted_paths.len();
+
+            let eval = crate::emergency::evaluate_emergency(
+                hint_count,
+                state.cached_prev_file_count,
+                state.last_emergency_at,
+                config.watch.emergency_cooldown_secs,
+                config.watch.emergency_delete_threshold,
+                config.watch.emergency_delete_min_files,
+                is_restoring,
+                state.overflow_occurred,
+                Path::new(project_path),
+                state.cached_prev_manifest.as_ref(),
+            );
+
+            match eval {
+                crate::emergency::EmergencyEvaluation::Triggered {
+                    verified_deleted_count,
+                    baseline_count,
+                    ratio,
+                    deleted_paths_sample,
+                } => {
+                    let severity = crate::emergency::severity_for_ratio(ratio);
+                    let message = format!(
+                        "Mass delete detected: {}/{} files ({:.1}%)",
+                        verified_deleted_count,
+                        baseline_count,
+                        ratio * 100.0
+                    );
+
+                    tracing::warn!(
+                        project = %state.hash,
+                        deleted = verified_deleted_count,
+                        baseline = baseline_count,
+                        ratio = %format!("{:.3}", ratio),
+                        "Emergency delete detected: {}",
+                        message
+                    );
+
+                    // Pin the predecessor snapshot (pre-deletion state)
+                    if let Ok(Some(prev_rowid)) =
+                        database.latest_snapshot_rowid(&state.hash)
+                    {
+                        if let Err(e) = database.pin_snapshot(prev_rowid, true) {
+                            tracing::error!(
+                                "Failed to pin predecessor snapshot: {}",
+                                e
+                            );
+                        } else {
+                            tracing::info!(
+                                "Pinned predecessor snapshot (rowid={}) for recovery",
+                                prev_rowid
+                            );
+                        }
+                    }
+
+                    // Emit ledger event
+                    let detail = serde_json::json!({
+                        "deleted_count": verified_deleted_count,
+                        "baseline_count": baseline_count,
+                        "ratio": ratio,
+                        "threshold": config.watch.emergency_delete_threshold,
+                        "min_files": config.watch.emergency_delete_min_files,
+                        "cooldown_suppressed": false,
+                        "deleted_paths_sample": deleted_paths_sample,
+                    });
+                    let mut ledger_event = crate::event_ledger::new_event(
+                        "fs",
+                        "emergency_delete_detected",
+                        severity,
+                    );
+                    ledger_event.project_hash = Some(state.hash.clone());
+                    ledger_event.detail = Some(detail.to_string());
+                    let _ = event_ledger.append(ledger_event);
+
+                    // Broadcast server event
+                    let _ = event_tx.send(
+                        crate::server::events::ServerEvent::EmergencyDeleteDetected {
+                            project_hash: state.hash.clone(),
+                            deleted_count: verified_deleted_count,
+                            baseline_count,
+                            ratio,
+                            threshold: config.watch.emergency_delete_threshold,
+                            min_files: config.watch.emergency_delete_min_files,
+                        },
+                    );
+
+                    // Clear state before spawning task
+                    state.pending_changes.drain();
+                    state.deleted_paths.clear();
+                    state.first_change_at = None;
+                    state.last_change_at = None;
+                    state.last_emergency_at = Some(Instant::now());
+                    state.overflow_occurred = false;
+
+                    // Collect for spawning after the loop
+                    emergency_spawns.push((
+                        project_path.clone(),
+                        state.hash.clone(),
+                        Path::new(project_path).to_path_buf(),
+                        message,
+                    ));
+
+                    continue; // Skip normal debounce for this project
+                }
+
+                crate::emergency::EmergencyEvaluation::CooldownSuppressed {
+                    verified_deleted_count,
+                    baseline_count,
+                    ratio,
+                    cooldown_remaining_secs,
+                } => {
+                    tracing::info!(
+                        project = %state.hash,
+                        deleted = verified_deleted_count,
+                        baseline = baseline_count,
+                        ratio = %format!("{:.3}", ratio),
+                        cooldown_remaining = cooldown_remaining_secs,
+                        "Emergency threshold exceeded but cooldown active"
+                    );
+
+                    let detail = serde_json::json!({
+                        "deleted_count": verified_deleted_count,
+                        "baseline_count": baseline_count,
+                        "ratio": ratio,
+                        "threshold": config.watch.emergency_delete_threshold,
+                        "min_files": config.watch.emergency_delete_min_files,
+                        "cooldown_suppressed": true,
+                        "cooldown_remaining_secs": cooldown_remaining_secs,
+                    });
+                    let mut ledger_event = crate::event_ledger::new_event(
+                        "fs",
+                        "emergency_delete_detected",
+                        "info",
+                    );
+                    ledger_event.project_hash = Some(state.hash.clone());
+                    ledger_event.detail = Some(detail.to_string());
+                    let _ = event_ledger.append(ledger_event);
+
+                    // Don't clear deleted_paths on cooldown — let them accumulate
+                    // Normal debounce proceeds below
+                }
+
+                crate::emergency::EmergencyEvaluation::Skipped { reason } => {
+                    tracing::debug!(
+                        project = %state.hash,
+                        reason = reason,
+                        "Emergency detection skipped"
+                    );
+                    if reason == "restore_in_progress" {
+                        state.deleted_paths.clear();
+                    }
+                }
+
+                crate::emergency::EmergencyEvaluation::NoEmergency => {
+                    // Continue to normal debounce path
+                }
+            }
+        }
+
+        // ===== NORMAL DEBOUNCE PATH =====
+
         if state.pending_changes.is_empty() {
             continue;
         }
@@ -943,6 +1195,7 @@ async fn process_pending_snapshots(
             let project_path_key = project_path.clone();
             state.first_change_at = None;
             state.last_change_at = None;
+            state.deleted_paths.clear(); // Reset for next window
             join.spawn(async move {
                 let proj_hash_for_log = project_hash.clone();
                 let res = tokio::task::spawn_blocking(move || {
@@ -982,6 +1235,53 @@ async fn process_pending_snapshots(
             });
         }
     }
+
+    // Spawn emergency snapshot tasks (full scan, trigger = "emergency")
+    for (project_path_key, project_hash, proj_path, msg) in emergency_spawns {
+        let uhoh_dir_buf = uhoh_dir.to_path_buf();
+        let cfg = config.clone();
+        let db_for_task = database.clone();
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let changed_for_requeue = Vec::new();
+        join.spawn(async move {
+            let proj_hash_for_log = project_hash.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                match snapshot::create_snapshot(
+                    &uhoh_dir_buf,
+                    &db_for_task,
+                    &project_hash,
+                    &proj_path,
+                    "emergency",
+                    Some(&msg),
+                    &cfg,
+                    None, // Full scan for emergency
+                ) {
+                    Ok(Some(id)) => Ok(Some(SnapshotResult::Created(id))),
+                    Ok(None) => Ok(Some(SnapshotResult::NoChanges)),
+                    Err(e) => Err(e),
+                }
+            })
+            .await;
+            let task_result = match res {
+                Ok(Ok(v)) => Ok(v),
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        "Emergency snapshot task failed for {}: {}",
+                        &proj_hash_for_log[..proj_hash_for_log.len().min(12)],
+                        e
+                    );
+                    Err(e)
+                }
+                Err(e) => {
+                    tracing::error!("Emergency snapshot task join error: {:?}", e);
+                    Err(anyhow::anyhow!("Emergency snapshot task join error: {e}"))
+                }
+            };
+            drop(permit);
+            (project_path_key, changed_for_requeue, task_result)
+        });
+    }
+
     while let Some(result) = join.join_next().await {
         match result {
             Ok((project_path, _drained, Ok(Some(SnapshotResult::Created(id))))) => {
@@ -989,6 +1289,11 @@ async fn process_pending_snapshots(
                     state.last_snapshot = Instant::now();
                     if let Ok(Some(rowid)) = database.latest_snapshot_rowid(&state.hash) {
                         if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
+                            // Check for dynamic trigger upgrade (safety net in snapshot.rs)
+                            if row.trigger == "emergency" && state.last_emergency_at.is_none() {
+                                state.last_emergency_at = Some(Instant::now());
+                            }
+
                             let _ = event_tx.send(
                                 crate::server::events::ServerEvent::SnapshotCreated {
                                     project_hash: state.hash.clone(),
@@ -1004,12 +1309,26 @@ async fn process_pending_snapshots(
                                 },
                             );
                         }
+
+                        // Refresh cached manifest from the new snapshot
+                        if let Ok(files) = database.get_snapshot_files(rowid) {
+                            state.cached_prev_manifest = Some(
+                                files.iter().map(|f| f.path.clone()).collect(),
+                            );
+                        }
+                        if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
+                            state.cached_prev_file_count = Some(row.file_count);
+                        }
                     }
+                    state.deleted_paths.clear();
+                    state.overflow_occurred = false;
                 }
             }
             Ok((project_path, _drained, Ok(Some(SnapshotResult::NoChanges)))) => {
                 if let Some(state) = states.get_mut(&project_path) {
                     state.last_snapshot = Instant::now();
+                    state.deleted_paths.clear();
+                    state.overflow_occurred = false;
                 }
             }
             Ok((project_path, drained, Ok(None))) | Ok((project_path, drained, Err(_))) => {
@@ -1384,6 +1703,11 @@ fn check_for_new_projects(
                         pending_changes: std::collections::HashSet::new(),
                         first_change_at: None,
                         last_change_at: None,
+                        deleted_paths: std::collections::HashSet::new(),
+                        last_emergency_at: None,
+                        cached_prev_file_count: None,
+                        cached_prev_manifest: None,
+                        overflow_occurred: false,
                     });
                     let _ = event_tx.send(crate::server::events::ServerEvent::ProjectAdded {
                         project_hash: p.hash.clone(),
