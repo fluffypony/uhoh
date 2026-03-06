@@ -301,7 +301,9 @@ pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
         if raw.is_empty() {
             return None;
         }
-        let parsed = chrono::NaiveDateTime::parse_from_str(&raw, "%a %b %e %H:%M:%S %Y").ok()?;
+        // Normalize whitespace: %e can produce double spaces for single-digit days
+        let normalized: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        let parsed = chrono::NaiveDateTime::parse_from_str(&normalized, "%a %b %d %H:%M:%S %Y").ok()?;
         let dt = chrono::Local.from_local_datetime(&parsed).single()?;
         return Some(dt.timestamp() as u64);
     }

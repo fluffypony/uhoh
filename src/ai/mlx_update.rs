@@ -32,7 +32,7 @@ pub async fn maybe_run_mlx_auto_update(
     event_tx: Option<&tokio::sync::broadcast::Sender<ServerEvent>>,
 ) -> Result<()> {
     // MLX only works on Apple Silicon macOS
-    if cfg!(not(target_os = "macos")) {
+    if cfg!(not(all(target_os = "macos", target_arch = "aarch64"))) {
         let _ = (config, uhoh_dir, event_tx);
         return Ok(());
     }
@@ -92,7 +92,11 @@ pub async fn maybe_run_mlx_auto_update(
 
 fn resolve_venv_path(cfg: &MlxConfig, uhoh_dir: &std::path::Path) -> PathBuf {
     if let Some(rest) = cfg.mlx_path_from_home() {
-        return rest;
+        return if rest.is_absolute() {
+            rest
+        } else {
+            uhoh_dir.join(rest)
+        };
     }
     uhoh_dir.join("venv").join("mlx")
 }
@@ -100,7 +104,11 @@ fn resolve_venv_path(cfg: &MlxConfig, uhoh_dir: &std::path::Path) -> PathBuf {
 async fn ensure_venv(venv_dir: &std::path::Path, cfg: &MlxConfig) -> Result<()> {
     if !venv_dir.exists() {
         let python = if cfg.python_path.trim().is_empty() {
-            "python3".to_string()
+            if cfg!(windows) {
+                "python".to_string()
+            } else {
+                "python3".to_string()
+            }
         } else {
             cfg.python_path.clone()
         };

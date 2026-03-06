@@ -70,10 +70,12 @@ pub fn expand_directory_deletion(
     deleted_path_rel: &str,
     manifest: &BTreeSet<String>,
 ) -> Vec<String> {
-    let prefix = if deleted_path_rel.ends_with('/') || deleted_path_rel.ends_with('\\') {
-        deleted_path_rel.to_string()
+    // Normalize backslashes to forward slashes for cross-platform matching
+    let normalized = deleted_path_rel.replace('\\', "/");
+    let prefix = if normalized.ends_with('/') {
+        normalized
     } else {
-        format!("{}/", deleted_path_rel)
+        format!("{}/", normalized)
     };
 
     manifest

@@ -27,16 +27,16 @@ pub fn generate_token() -> String {
 
 pub fn write_token_file(uhoh_dir: &Path, token: &str) -> anyhow::Result<PathBuf> {
     let token_path = uhoh_dir.join("server.token");
-    fs::write(&token_path, token)?;
+    let tmp_path = uhoh_dir.join(".server.token.tmp");
+    fs::write(&tmp_path, token)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&token_path)?.permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(&token_path, perms)?;
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
     }
 
+    fs::rename(&tmp_path, &token_path)?;
     Ok(token_path)
 }
 

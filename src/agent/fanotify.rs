@@ -28,9 +28,21 @@ use crate::event_ledger::EventLedger;
 use crate::subsystem::SubsystemContext;
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+struct FanotifyFd(RawFd);
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+impl Drop for FanotifyFd {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.0);
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
 pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) -> Result<()> {
     let monitor_root = std::env::current_dir().context("Unable to resolve current directory")?;
-    let fan_fd = unsafe {
+    let fan_fd_raw = unsafe {
         libc::fanotify_init(
             (libc::FAN_CLASS_CONTENT
                 | libc::FAN_CLOEXEC
@@ -39,9 +51,10 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
             libc::O_RDONLY | libc::O_LARGEFILE,
         )
     };
-    if fan_fd < 0 {
+    if fan_fd_raw < 0 {
         anyhow::bail!("fanotify_init failed (CAP_SYS_ADMIN likely required)");
     }
+    let fan_fd = FanotifyFd(fan_fd_raw);
 
     let cpath = CString::new(monitor_root.as_os_str().as_bytes().to_vec())
         .context("Invalid monitor root path")?;
@@ -52,7 +65,7 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
         .with_context(|| format!("Failed opening monitor root: {}", monitor_root.display()))?;
     let mark_ok = unsafe {
         libc::fanotify_mark(
-            fan_fd,
+            fan_fd.0,
             (libc::FAN_MARK_ADD | libc::FAN_MARK_MOUNT | libc::FAN_MARK_FILESYSTEM) as u32,
             (libc::FAN_OPEN_PERM | libc::FAN_EVENT_ON_CHILD) as u64,
             mark_fd.as_raw_fd(),
@@ -60,10 +73,26 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
         )
     };
     if mark_ok < 0 {
-        unsafe {
-            libc::close(fan_fd);
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINVAL) {
+            tracing::warn!(
+                "FAN_MARK_FILESYSTEM unsupported, retrying with FAN_MARK_MOUNT only"
+            );
+            let fallback = unsafe {
+                libc::fanotify_mark(
+                    fan_fd.0,
+                    (libc::FAN_MARK_ADD | libc::FAN_MARK_MOUNT) as u32,
+                    (libc::FAN_OPEN_PERM | libc::FAN_EVENT_ON_CHILD) as u64,
+                    mark_fd.as_raw_fd(),
+                    cpath.as_ptr(),
+                )
+            };
+            if fallback < 0 {
+                anyhow::bail!("fanotify_mark failed for {}", monitor_root.display());
+            }
+        } else {
+            anyhow::bail!("fanotify_mark failed for {}", monitor_root.display());
         }
-        anyhow::bail!("fanotify_mark failed for {}", monitor_root.display());
     }
 
     let mut event = new_event("agent", "fanotify_monitor_started", "info");
@@ -78,9 +107,37 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
     let mut sec_window_start = std::time::Instant::now();
     let mut sec_count = 0u64;
     let mut buf = vec![0u8; 8192];
+    let mut pollfd = libc::pollfd {
+        fd: fan_fd.0,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+
     loop {
-        let nread = unsafe { libc::read(fan_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-        if nread <= 0 {
+        let poll_ret = unsafe { libc::poll(&mut pollfd, 1, 1000) };
+        if poll_ret == 0 {
+            continue;
+        }
+        if poll_ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                tracing::error!("fanotify poll error: {err}");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            continue;
+        }
+
+        let nread = unsafe { libc::read(fan_fd.0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if nread < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                tracing::error!("fanotify read error: {err}");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            flush_batch(ctx.event_ledger.clone(), &mut batch)?;
+            continue;
+        }
+        if nread == 0 {
             flush_batch(ctx.event_ledger.clone(), &mut batch)?;
             continue;
         }
@@ -113,7 +170,7 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
                         }
                     }
                 }
-                respond_allow(fan_fd, metadata.fd);
+                respond_allow(fan_fd.0, metadata.fd);
             }
             if metadata.fd >= 0 {
                 unsafe {
@@ -225,9 +282,15 @@ fn flush_batch(ledger: EventLedger, batch: &mut VecDeque<PendingAudit>) -> Resul
 fn process_start_ticks(pid: i32) -> Result<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .with_context(|| format!("Failed reading /proc/{pid}/stat"))?;
-    let parts: Vec<&str> = stat.split_whitespace().collect();
+    let close_paren = stat
+        .rfind(')')
+        .ok_or_else(|| anyhow::anyhow!("Malformed /proc/{pid}/stat: missing ')'"))?;
+    let tail = stat
+        .get(close_paren + 2..)
+        .ok_or_else(|| anyhow::anyhow!("Malformed /proc/{pid}/stat: missing tail"))?;
+    let parts: Vec<&str> = tail.split_whitespace().collect();
     let start_ticks = parts
-        .get(21)
+        .get(19)
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or_default();
     Ok(start_ticks)
@@ -239,12 +302,19 @@ fn respond_allow(fan_fd: RawFd, fd: RawFd) {
         fd,
         response: libc::FAN_ALLOW,
     };
-    unsafe {
-        let _ = libc::write(
+    let ret = unsafe {
+        libc::write(
             fan_fd,
             &response as *const libc::fanotify_response as *const libc::c_void,
             std::mem::size_of::<libc::fanotify_response>(),
+        )
+    };
+    if ret < 0 {
+        tracing::error!(
+            "Failed to write FAN_ALLOW response: {}",
+            std::io::Error::last_os_error()
         );
+        // Do NOT close fd here — caller owns the fd and will close it
     }
 }
 

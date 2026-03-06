@@ -16,7 +16,7 @@ pub async fn run_session_tailers_async(
     let mut offsets: HashMap<String, u64> = HashMap::new();
     loop {
         for agent in agents {
-            let profile_toml = expand_home(&agent.profile_path);
+            let profile_toml = crate::util::expand_home(&agent.profile_path);
             let profile_path = Path::new(&profile_toml);
             if !profile_path.exists() {
                 continue;
@@ -45,10 +45,13 @@ async fn async_tail_one_file(
     offset: u64,
 ) -> Result<u64> {
     let file = tokio::fs::File::open(path).await?;
+    let file_len = file.metadata().await?.len();
     let mut reader = BufReader::new(file);
-    reader.seek(SeekFrom::Start(offset)).await?;
+    // If file was truncated/rotated, reset to beginning
+    let actual_offset = if offset > file_len { 0 } else { offset };
+    reader.seek(SeekFrom::Start(actual_offset)).await?;
 
-    let mut new_offset = offset;
+    let mut new_offset = actual_offset;
     let mut carry = String::new();
     loop {
         let mut line = String::new();
@@ -116,13 +119,4 @@ async fn process_jsonl_event(
         tracing::error!("failed to append session_tool_call event: {err}");
     }
     Ok(())
-}
-
-fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
 }
