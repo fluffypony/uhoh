@@ -89,8 +89,22 @@ pub fn compute_event_chain_hash_with_id(
     hasher.update(&[0u8]);
     hasher.update(event.event_type.as_bytes());
     hasher.update(&[0u8]);
+    hasher.update(event.severity.as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(event.project_hash.as_deref().unwrap_or("").as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(event.agent_name.as_deref().unwrap_or("").as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(event.guard_name.as_deref().unwrap_or("").as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(event.path.as_deref().unwrap_or("").as_bytes());
+    hasher.update(&[0u8]);
     if let Some(detail) = event.detail.as_deref() {
         hasher.update(detail.as_bytes());
     }
+    hasher.update(&[0u8]);
+    hasher.update(event.pre_state_ref.as_deref().unwrap_or("").as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(event.post_state_ref.as_deref().unwrap_or("").as_bytes());
     hasher.finalize().to_hex().to_string()
 }

@@ -1984,7 +1984,6 @@ fn parse_emergency_message(msg: &str) -> (usize, u64, f64) {
     parse_emergency_message_opt(msg).unwrap_or((0, 0, 0.0))
 }
 
-#[allow(dead_code)]
 fn parse_emergency_message_opt(msg: &str) -> Option<(usize, u64, f64)> {
     // Format: "Mass delete detected: 15/20 files (75.0%)"
     let after_colon = msg.strip_prefix("Mass delete detected: ")?;
