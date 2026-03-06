@@ -151,7 +151,7 @@ pub async fn handle_mcp(
         "initialize" => JsonRpcResponse::success(
             request.id,
             json!({
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": "2025-06-18",
                 "capabilities": { "tools": {} },
                 "serverInfo": {
                     "name": "uhoh",

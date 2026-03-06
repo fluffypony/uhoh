@@ -39,7 +39,7 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
             "initialize" => JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 result: Some(json!({
-                    "protocolVersion": "2025-03-26",
+                    "protocolVersion": "2025-06-18",
                     "capabilities": { "tools": {} },
                     "serverInfo": {
                         "name": "uhoh",

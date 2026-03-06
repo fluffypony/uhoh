@@ -165,7 +165,7 @@ impl DaemonMaintenanceSubsystem {
 
         self.sidecar_check_interval =
             std::time::Duration::from_secs(ctx.config.sidecar_update.check_interval_hours * 3600);
-        if ctx.config.sidecar_update.auto_update {
+        if ctx.config.sidecar_update.auto_update && ctx.config.ai.enabled {
             let should_check = self
                 .last_sidecar_check
                 .map(|last| last.elapsed() >= self.sidecar_check_interval)

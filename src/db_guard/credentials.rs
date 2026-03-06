@@ -64,19 +64,32 @@ impl CredentialBackend for KeyringBackend {
 }
 
 pub fn scrub_dsn(dsn: &str) -> String {
-    if let Some((scheme, rest)) = dsn.split_once("://") {
-        let mut tail = rest.to_string();
-        if let Some((userinfo, host_and_path)) = rest.split_once('@') {
-            if let Some((user, _password)) = userinfo.split_once(':') {
-                tail = format!("{user}@{host_and_path}");
-            }
+    // Use url::Url for safe parsing that handles passwords containing @ or ?
+    if let Ok(mut parsed) = url::Url::parse(dsn) {
+        let _ = parsed.set_password(None);
+        // Also strip password= from query parameters
+        let cleaned_query: Vec<(String, String)> = parsed
+            .query_pairs()
+            .filter(|(k, _)| k.to_ascii_lowercase() != "password")
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        if cleaned_query.is_empty() {
+            parsed.set_query(None);
+        } else {
+            let qs = cleaned_query
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("&");
+            parsed.set_query(Some(&qs));
         }
-        if let Some((base, _)) = tail.split_once("?password=") {
-            return format!("{scheme}://{base}");
-        }
-        return format!("{scheme}://{tail}");
+        return parsed.to_string();
     }
-    dsn.to_string()
+    // Fallback for keyword-value DSNs: redact password=... segments
+    dsn.split_whitespace()
+        .filter(|seg| !seg.starts_with("password="))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn ensure_guard_dir(uhoh_dir: &std::path::Path) -> Result<std::path::PathBuf> {

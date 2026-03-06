@@ -6,7 +6,11 @@ use std::path::PathBuf;
 pub fn uhoh_dir() -> PathBuf {
     // Keep a single definition consistent with main; both resolve to ~/.uhoh
     dirs::home_dir()
-        .expect("Cannot determine home directory")
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            eprintln!("Cannot determine home directory. Set HOME or ensure user profile exists.");
+            std::process::exit(1);
+        })
         .join(".uhoh")
 }
 

@@ -834,9 +834,13 @@ impl Database {
     ) -> Result<Vec<SearchResult>> {
         let conn = self.conn();
 
-        // conservative query normalization for FTS5 parser safety
+        // Conservative query normalization for FTS5 parser safety.
+        // Strip all FTS5 special characters to prevent syntax errors.
         let safe = query
-            .replace(['"', '*', ':', '(', ')', '+', '-', '^'], " ")
+            .replace(
+                ['"', '*', ':', '(', ')', '+', '-', '^', '{', '}', '\\', '\''],
+                " ",
+            )
             .split_whitespace()
             .filter(|w| !["AND", "OR", "NOT", "NEAR"].contains(w))
             .collect::<Vec<_>>()

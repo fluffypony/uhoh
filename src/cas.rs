@@ -426,6 +426,18 @@ fn maybe_decompress(data: &[u8]) -> Result<Vec<u8>> {
                 .context("Failed to decompress blob");
         }
     }
+    #[cfg(not(feature = "compression"))]
+    {
+        // Detect compressed blobs when the compression feature is not compiled in.
+        // Without this check, the raw compressed data would fail the BLAKE3
+        // integrity check with a misleading "Blob missing" error.
+        if data.len() > 12 && data.starts_with(b"UHZS\x00ZSTD\x00v1") {
+            anyhow::bail!(
+                "Blob is compressed (zstd) but uhoh was built without the 'compression' feature. \
+                 Rebuild with --features compression to access this data."
+            );
+        }
+    }
     Ok(data.to_vec())
 }
 

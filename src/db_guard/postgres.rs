@@ -14,13 +14,30 @@ use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
 
 /// Build a connection string with resolved credentials injected.
+fn url_encode_param(s: &str) -> String {
+    // Percent-encode characters that are problematic in URL query parameters
+    s.replace('%', "%25")
+        .replace('&', "%26")
+        .replace('=', "%3D")
+        .replace('+', "%2B")
+        .replace('#', "%23")
+        .replace(' ', "%20")
+        .replace('?', "%3F")
+        .replace('@', "%40")
+}
+
 fn build_connect_dsn(connection_ref: &str) -> Result<String> {
     let creds = credentials::resolve_postgres_credentials(connection_ref)?;
+    let is_url = connection_ref.starts_with("postgres://")
+        || connection_ref.starts_with("postgresql://");
+
     let mut dsn = connection_ref.to_string();
     if let Some(ref pw) = creds.password {
         if !dsn.contains("password=") && !dsn.contains("password%3D") {
-            if dsn.contains('?') {
-                dsn.push_str(&format!("&password={pw}"));
+            if is_url {
+                // URL-form: use query parameter syntax with proper encoding
+                let sep = if dsn.contains('?') { "&" } else { "?" };
+                dsn.push_str(&format!("{}password={}", sep, url_encode_param(pw)));
             } else {
                 dsn.push_str(&format!(" password={pw}"));
             }
@@ -28,8 +45,9 @@ fn build_connect_dsn(connection_ref: &str) -> Result<String> {
     }
     if let Some(ref user) = creds.username {
         if !dsn.contains("user=") && !dsn.contains("user%3D") {
-            if dsn.contains('?') {
-                dsn.push_str(&format!("&user={user}"));
+            if is_url {
+                let sep = if dsn.contains('?') { "&" } else { "?" };
+                dsn.push_str(&format!("{}user={}", sep, url_encode_param(user)));
             } else {
                 dsn.push_str(&format!(" user={user}"));
             }

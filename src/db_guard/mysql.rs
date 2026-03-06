@@ -76,7 +76,14 @@ pub fn tick_mysql_guard(
 
     if let Some(prev_rows) = state.last_row_total {
         let deleted = prev_rows.saturating_sub(snapshot.row_total);
-        if deleted >= ctx.config.db_guard.mass_delete_row_threshold as i64 {
+        let pct = if prev_rows > 0 {
+            deleted as f64 / prev_rows as f64
+        } else {
+            0.0
+        };
+        if deleted >= ctx.config.db_guard.mass_delete_row_threshold as i64
+            || pct >= ctx.config.db_guard.mass_delete_pct_threshold
+        {
             let mut event = new_event("db_guard", "mass_delete", "critical");
             event.guard_name = Some(guard.name.clone());
             event.detail = Some(
