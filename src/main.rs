@@ -1691,21 +1691,66 @@ fn handle_agent_commands(
             {
                 let runtime = uhoh::uhoh_dir().join("agents/runtime");
                 let resume_file = runtime.join("resume.pid");
-                if let Ok(pid_raw) = std::fs::read_to_string(&resume_file) {
-                    if let Ok(pid) = pid_raw.trim().parse::<i32>() {
-                        let signal = unsafe { libc::kill(pid, libc::SIGCONT) };
-                        if signal == 0 {
-                            println!("Requested agent resume for pid {pid}");
-                            return Ok(());
+                // Align with pause implementation in mcp_proxy:
+                // pause waits for `*.approved.json` files, not SIGSTOP/SIGCONT.
+                let mut resumed_any = false;
+                if let Ok(entries) = std::fs::read_dir(&runtime) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
+                            continue;
+                        };
+                        if !name.ends_with(".pending.json") {
+                            continue;
                         }
+                        let Some(stem) = name.strip_suffix(".pending.json") else {
+                            continue;
+                        };
+                        let pending_raw = match std::fs::read_to_string(&path) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let pending_json: serde_json::Value =
+                            match serde_json::from_str(&pending_raw) {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            };
+                        let Some(approval_id) =
+                            pending_json.get("approval_id").and_then(|v| v.as_str())
+                        else {
+                            continue;
+                        };
+                        let Some(challenge) =
+                            pending_json.get("challenge").and_then(|v| v.as_str())
+                        else {
+                            continue;
+                        };
+
+                        let token = uhoh::agent::ensure_proxy_token(&uhoh::uhoh_dir())?;
+                        let response =
+                            uhoh::agent::build_approval_response(&token, approval_id, challenge);
+                        let body = serde_json::json!({
+                            "approval_id": approval_id,
+                            "response": response,
+                        });
+                        write_secure_runtime_json(
+                            &runtime.join(format!("{stem}.approved.json")),
+                            &serde_json::to_vec_pretty(&body)?,
+                        )?;
+                        resumed_any = true;
                     }
+                }
+                let _ = std::fs::remove_file(&resume_file);
+                if resumed_any {
+                    println!("Approved pending agent action(s); proxy resumed processing");
+                    return Ok(());
                 }
             }
             #[cfg(not(unix))]
             {
                 anyhow::bail!("Agent resume is not supported on this platform");
             }
-            println!("No paused agent pid available to resume");
+            println!("No pending agent approvals found to resume");
         }
         AgentAction::Setup => {
             let agents_dir = uhoh::uhoh_dir().join("agents");

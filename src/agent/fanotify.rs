@@ -266,14 +266,8 @@ fn capture_preimage(
     file.read_to_end(&mut bytes)
         .with_context(|| format!("Failed reading pre-image source: {}", path.display()))?;
     let (hash, _) = crate::cas::store_blob(&uhoh_dir.join("blobs"), &bytes)?;
-    let start_ticks = process_start_ticks(pid).unwrap_or_else(|err| {
-        tracing::warn!(
-            "failed to resolve process start ticks for pid {}: {}",
-            pid,
-            err
-        );
-        0
-    });
+    let start_ticks = process_start_ticks(pid)
+        .with_context(|| format!("failed to resolve process start ticks for pid {}", pid))?;
     batch.push_back(PendingAudit {
         path: path.to_path_buf(),
         pre_state_ref: hash,

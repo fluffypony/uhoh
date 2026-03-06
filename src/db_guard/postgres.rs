@@ -58,12 +58,12 @@ fn build_connect_dsn(connection_ref: &str) -> Result<String> {
 }
 
 static PG_DDL_CURSOR: Lazy<Mutex<HashMap<String, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-struct ListenWorker {
+struct DdlPollWorker {
     queue: std::sync::Arc<Mutex<Vec<String>>>,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
-static PG_LISTEN_WORKERS: Lazy<Mutex<HashMap<String, ListenWorker>>> =
+static PG_DDL_POLL_WORKERS: Lazy<Mutex<HashMap<String, DdlPollWorker>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub fn tick_postgres_guard(
@@ -259,9 +259,9 @@ pub fn reconcile_listen_workers(
         .map(|g| build_connect_dsn(&g.connection_ref).unwrap_or_else(|_| g.connection_ref.clone()))
         .collect();
 
-    let mut workers = PG_LISTEN_WORKERS
+    let mut workers = PG_DDL_POLL_WORKERS
         .lock()
-        .map_err(|_| anyhow::anyhow!("Postgres LISTEN worker map lock poisoned"))?;
+        .map_err(|_| anyhow::anyhow!("Postgres DDL poll worker map lock poisoned"))?;
 
     let stale = workers
         .keys()
@@ -289,7 +289,7 @@ pub fn reconcile_listen_workers(
         });
         workers.insert(
             dsn,
-            ListenWorker {
+            DdlPollWorker {
                 queue,
                 cancel,
                 task,
@@ -301,7 +301,7 @@ pub fn reconcile_listen_workers(
 }
 
 pub fn shutdown_all_listen_workers() {
-    if let Ok(mut workers) = PG_LISTEN_WORKERS.lock() {
+    if let Ok(mut workers) = PG_DDL_POLL_WORKERS.lock() {
         for (_, worker) in workers.drain() {
             worker.cancel.cancel();
             worker.task.abort();
@@ -441,7 +441,7 @@ async fn run_listen_worker(
             Ok(client) => client,
             Err(err) => {
                 tracing::warn!(
-                    "postgres LISTEN connect failed for {}: {}",
+                    "postgres DDL poll connect failed for {}: {}",
                     scrub_ref(&connection_ref),
                     err
                 );
@@ -452,19 +452,6 @@ async fn run_listen_worker(
                 continue;
             }
         };
-
-        if let Err(err) = client.batch_execute("LISTEN uhoh_events;").await {
-            tracing::warn!(
-                "postgres LISTEN setup failed for {}: {}",
-                scrub_ref(&connection_ref),
-                credentials::scrub_error_message(&err.to_string())
-            );
-            if sleep_or_cancel(backoff, &shutdown).await {
-                return;
-            }
-            backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
-            continue;
-        }
 
         backoff = std::time::Duration::from_secs(1);
 
@@ -508,7 +495,7 @@ async fn run_listen_worker(
                         }
                         Err(err) => {
                             tracing::warn!(
-                                "postgres LISTEN poll failed for {}: {}",
+                                "postgres DDL poll failed for {}: {}",
                                 scrub_ref(&connection_ref),
                                 credentials::scrub_error_message(&err.to_string())
                             );
@@ -527,16 +514,16 @@ async fn run_listen_worker(
 }
 
 fn drain_listen_payloads(connection_ref: &str) -> Result<Vec<String>> {
-    let workers = PG_LISTEN_WORKERS
+    let workers = PG_DDL_POLL_WORKERS
         .lock()
-        .map_err(|_| anyhow::anyhow!("Postgres LISTEN worker map lock poisoned"))?;
+        .map_err(|_| anyhow::anyhow!("Postgres DDL poll worker map lock poisoned"))?;
     let Some(worker) = workers.get(connection_ref) else {
         return Ok(Vec::new());
     };
     let mut pending = worker
         .queue
         .lock()
-        .map_err(|_| anyhow::anyhow!("Postgres LISTEN payload queue lock poisoned"))?;
+        .map_err(|_| anyhow::anyhow!("Postgres DDL poll payload queue lock poisoned"))?;
     Ok(std::mem::take(&mut *pending))
 }
 
