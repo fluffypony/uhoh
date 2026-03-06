@@ -89,7 +89,10 @@ pub fn create_snapshot(
         // This ensures incremental snapshots respect .gitignore rules
         let walked_set: HashSet<PathBuf> = crate::ignore_rules::build_walker(project_path)
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_some_and(|ft| ft.is_file() || ft.is_symlink()))
+            .filter(|e| {
+                e.file_type()
+                    .is_some_and(|ft| ft.is_file() || ft.is_symlink())
+            })
             .map(|e| e.into_path())
             .collect();
         let mut rel_changed: HashSet<String> = HashSet::new();
@@ -270,9 +273,7 @@ pub fn create_snapshot(
                         // check at the top doesn't catch this case. Fall back to
                         // full scan to accurately capture all deletions.
                         let dir_prefix = format!("{}/", rel_path);
-                        let has_children = prev_files
-                            .keys()
-                            .any(|k| k.starts_with(&dir_prefix));
+                        let has_children = prev_files.keys().any(|k| k.starts_with(&dir_prefix));
                         if has_children {
                             tracing::debug!(
                                 "Deleted path '{}' is a directory with children in prev snapshot; \
@@ -557,7 +558,9 @@ pub fn create_snapshot(
         let ratio = crate::emergency::deletion_ratio(deleted_count, prev_count);
         auto_msg = format!(
             "Mass delete detected: {}/{} files ({:.1}%)",
-            deleted_count, prev_count, ratio * 100.0
+            deleted_count,
+            prev_count,
+            ratio * 100.0
         );
         auto_msg.as_str()
     } else {

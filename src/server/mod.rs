@@ -84,6 +84,10 @@ pub async fn start_server(
             get(api::list_snapshots).post(api::create_snapshot),
         )
         .route(
+            "/api/v1/projects/{hash}/snapshots/{id}",
+            get(api::get_snapshot).post(api::set_snapshot_pin),
+        )
+        .route(
             "/api/v1/projects/{hash}/snapshots/{id}/files",
             get(api::get_snapshot_files),
         )
@@ -102,7 +106,6 @@ pub async fn start_server(
         .route("/api/v1/search", get(api::search))
         .route("/api/v1/projects/{hash}/timeline", get(api::get_timeline))
         .route("/ws", get(ws::websocket_handler))
-        .route("/api/v1/health", get(health_check))
         .route("/health", get(health_check));
 
     if config.ui_enabled {

@@ -471,7 +471,16 @@ mod tests {
         let manifest = BTreeSet::new();
 
         let result = evaluate_emergency(
-            100, None, None, 120, 0.30, 5, false, false, tmp.path(), Some(&manifest),
+            100,
+            None,
+            None,
+            120,
+            0.30,
+            5,
+            false,
+            false,
+            tmp.path(),
+            Some(&manifest),
         );
         assert!(matches!(
             result,

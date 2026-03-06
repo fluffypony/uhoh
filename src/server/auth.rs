@@ -58,11 +58,7 @@ pub async fn auth_middleware(
 
     // Exempt health, WebSocket, and UI HTML routes from auth.
     // The UI page must load before the JS auth flow can prompt for a token.
-    if path == "/health"
-        || path == "/api/v1/health"
-        || path == "/ws"
-        || (!path.starts_with("/api/") && path != "/mcp")
-    {
+    if path == "/health" || path == "/ws" || (!path.starts_with("/api/") && path != "/mcp") {
         return next.run(request).await;
     }
 
@@ -89,7 +85,7 @@ pub async fn auth_middleware(
         return (
             StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({
-                "error": "Bearer token required for mutating operations. Token is in ~/.uhoh/server.token"
+                "error": "Bearer token required for mutating operations. Token is in your uhoh data directory (server.token)."
             })),
         )
             .into_response();

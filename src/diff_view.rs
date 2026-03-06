@@ -54,7 +54,8 @@ pub fn compute_structured_diff(
     file_path: &str,
     with_highlighting: bool,
 ) -> FileDiff {
-    let is_binary = content_inspector::inspect(&old_content[..old_content.len().min(8192)]).is_binary()
+    let is_binary = content_inspector::inspect(&old_content[..old_content.len().min(8192)])
+        .is_binary()
         || content_inspector::inspect(&new_content[..new_content.len().min(8192)]).is_binary();
     if is_binary {
         return FileDiff {

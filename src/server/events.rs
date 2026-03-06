@@ -78,9 +78,7 @@ impl ServerEvent {
             ServerEvent::AgentAlert { event_type, .. } => event_type.clone(),
             ServerEvent::ProjectAdded { .. } => "project_added".to_string(),
             ServerEvent::ProjectRemoved { .. } => "project_removed".to_string(),
-            ServerEvent::EmergencyDeleteDetected { .. } => {
-                "emergency_delete_detected".to_string()
-            }
+            ServerEvent::EmergencyDeleteDetected { .. } => "emergency_delete_detected".to_string(),
         }
     }
 
@@ -162,5 +160,27 @@ impl ServerEvent {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServerEvent;
+
+    #[test]
+    fn server_event_kind_matches_expected_values() {
+        let ev = ServerEvent::ProjectAdded {
+            project_hash: "abc".to_string(),
+            path: "/tmp/demo".to_string(),
+        };
+        assert_eq!(ev.kind(), "project_added");
+
+        let ev = ServerEvent::DbGuardAlert {
+            guard_name: "g".to_string(),
+            event_type: "mass_delete".to_string(),
+            severity: "critical".to_string(),
+            detail: "{}".to_string(),
+        };
+        assert_eq!(ev.kind(), "mass_delete");
     }
 }

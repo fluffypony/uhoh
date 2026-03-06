@@ -47,6 +47,7 @@ pub fn tick_sqlite_guard(
             "data_change",
             ctx.config.db_guard.encrypt_recovery,
             ctx.config.db_guard.recovery_retention_days,
+            ctx.config.db_guard.max_recovery_file_mb,
         )?;
         event.pre_state_ref = Some(artifact.blake3.clone());
         event.detail = Some(
@@ -79,6 +80,7 @@ pub fn tick_sqlite_guard(
             std::path::Path::new(&path),
             ctx.config.db_guard.encrypt_recovery,
             ctx.config.db_guard.recovery_retention_days,
+            ctx.config.db_guard.max_baseline_size_mb,
         )?;
         let ts = chrono::Utc::now().to_rfc3339();
         let _ = ctx.database.set_db_guard_baseline_time(&guard.name, &ts);

@@ -107,7 +107,13 @@ async fn handle_connection_async(
 
     let mut authed = !config.agent.mcp_proxy_require_auth;
     let expected_token = ensure_proxy_token(&uhoh_dir)?;
-    while let Some(line) = client_lines.next_line().await? {
+    while let Some(line) = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        client_lines.next_line(),
+    )
+    .await
+    .context("MCP proxy read timeout waiting for client data")??
+    {
         let mut should_forward = true;
 
         if !authed {

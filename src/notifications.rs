@@ -141,11 +141,7 @@ async fn send_desktop_notification(title: &str, message: &str) -> std::io::Resul
         if is_critical {
             cmd.arg("--urgency=critical");
         }
-        cmd.arg(title)
-            .arg(message)
-            .status()
-            .await
-            .map(|_| ())
+        cmd.arg(title).arg(message).status().await.map(|_| ())
     }
 
     #[cfg(target_os = "windows")]

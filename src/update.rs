@@ -5,7 +5,6 @@ use std::path::Path;
 /// IMPORTANT: Replace this with your actual public key before release.
 const UPDATE_PUBLIC_KEY: &[u8; 32] = &[0u8; 32];
 
-
 #[derive(serde::Deserialize)]
 struct GithubRelease {
     tag_name: String,

@@ -154,7 +154,34 @@ impl Subsystem for DbGuardSubsystem {
                     }
                     last_guard_names = guards.iter().map(|g| g.name.clone()).collect();
 
-                    self.tick_guards(&ctx, &guards)?;
+                    let ctx_cl = ctx.clone();
+                    let guards_cl = guards.clone();
+                    let sqlite_versions = std::mem::take(&mut self.sqlite_versions);
+                    let mysql_states = std::mem::take(&mut self.mysql_states);
+                    let shutdown = self.shutdown.clone();
+                    let tick_result = tokio::task::spawn_blocking(move || {
+                        let mut worker = DbGuardSubsystem {
+                            healthy: true,
+                            sqlite_versions,
+                            mysql_states,
+                            shutdown,
+                        };
+                        let result = worker.tick_guards(&ctx_cl, &guards_cl);
+                        (result, worker.sqlite_versions, worker.mysql_states)
+                    })
+                    .await;
+
+                    match tick_result {
+                        Ok((result, sqlite_versions, mysql_states)) => {
+                            self.sqlite_versions = sqlite_versions;
+                            self.mysql_states = mysql_states;
+                            result?;
+                        }
+                        Err(err) => {
+                            tracing::error!("db_guard tick worker panicked: {err}");
+                            self.healthy = false;
+                        }
+                    }
                 }
             }
         }

@@ -347,12 +347,20 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
         std::fs::write(project_dir.join(format!("file{}.rs", i)), "content").unwrap();
     }
 
-    db.add_project("emrg1", project_dir.to_str().unwrap()).unwrap();
+    db.add_project("emrg1", project_dir.to_str().unwrap())
+        .unwrap();
     let cfg = uhoh::config::Config::default();
 
     // First snapshot captures all 20 files
     let snap1 = uhoh::snapshot::create_snapshot(
-        &uhoh_dir, &db, "emrg1", &project_dir, "auto", None, &cfg, None,
+        &uhoh_dir,
+        &db,
+        "emrg1",
+        &project_dir,
+        "auto",
+        None,
+        &cfg,
+        None,
     )
     .unwrap();
     assert!(snap1.is_some());
@@ -364,14 +372,24 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
 
     // Second snapshot should auto-upgrade to "emergency"
     let snap2 = uhoh::snapshot::create_snapshot(
-        &uhoh_dir, &db, "emrg1", &project_dir, "auto", None, &cfg, None,
+        &uhoh_dir,
+        &db,
+        "emrg1",
+        &project_dir,
+        "auto",
+        None,
+        &cfg,
+        None,
     )
     .unwrap();
     assert!(snap2.is_some());
 
     let snaps = db.list_snapshots("emrg1").unwrap();
     let latest = &snaps[0]; // newest first
-    assert_eq!(latest.trigger, "emergency", "Expected trigger upgrade to 'emergency'");
+    assert_eq!(
+        latest.trigger, "emergency",
+        "Expected trigger upgrade to 'emergency'"
+    );
     assert!(
         latest.message.contains("Mass delete detected"),
         "Expected auto-generated emergency message, got: {}",
@@ -394,11 +412,19 @@ fn test_sub_threshold_no_emergency_upgrade() {
         std::fs::write(project_dir.join(format!("file{}.rs", i)), "content").unwrap();
     }
 
-    db.add_project("emrg2", project_dir.to_str().unwrap()).unwrap();
+    db.add_project("emrg2", project_dir.to_str().unwrap())
+        .unwrap();
     let cfg = uhoh::config::Config::default();
 
     let _ = uhoh::snapshot::create_snapshot(
-        &uhoh_dir, &db, "emrg2", &project_dir, "auto", None, &cfg, None,
+        &uhoh_dir,
+        &db,
+        "emrg2",
+        &project_dir,
+        "auto",
+        None,
+        &cfg,
+        None,
     )
     .unwrap();
 
@@ -407,13 +433,23 @@ fn test_sub_threshold_no_emergency_upgrade() {
     std::fs::remove_file(project_dir.join("file1.rs")).unwrap();
 
     let snap2 = uhoh::snapshot::create_snapshot(
-        &uhoh_dir, &db, "emrg2", &project_dir, "auto", None, &cfg, None,
+        &uhoh_dir,
+        &db,
+        "emrg2",
+        &project_dir,
+        "auto",
+        None,
+        &cfg,
+        None,
     )
     .unwrap();
     assert!(snap2.is_some());
 
     let snaps = db.list_snapshots("emrg2").unwrap();
-    assert_eq!(snaps[0].trigger, "auto", "Should remain 'auto' for sub-threshold delete");
+    assert_eq!(
+        snaps[0].trigger, "auto",
+        "Should remain 'auto' for sub-threshold delete"
+    );
 }
 
 /// Emergency snapshots within retention window survive compaction.
@@ -429,7 +465,16 @@ fn test_emergency_snapshot_retained_within_window() {
     let deleted: Vec<(String, String, u64, bool, i64)> = Vec::new();
 
     let (rowid, _) = db
-        .create_snapshot("emrg3", 0, &ts_recent, "emergency", "mass delete", false, &files, &deleted)
+        .create_snapshot(
+            "emrg3",
+            0,
+            &ts_recent,
+            "emergency",
+            "mass delete",
+            false,
+            &files,
+            &deleted,
+        )
         .unwrap();
 
     let cfg = uhoh::config::CompactionConfig::default();
@@ -455,7 +500,16 @@ fn test_emergency_snapshot_pruned_after_window() {
     let deleted: Vec<(String, String, u64, bool, i64)> = Vec::new();
 
     let (old_rowid, _) = db
-        .create_snapshot("emrg4", 0, &old_ts, "emergency", "old mass delete", false, &files, &deleted)
+        .create_snapshot(
+            "emrg4",
+            0,
+            &old_ts,
+            "emergency",
+            "old mass delete",
+            false,
+            &files,
+            &deleted,
+        )
         .unwrap();
 
     // Create a recent snapshot so the old one can be dominated in buckets
@@ -501,7 +555,16 @@ fn test_predecessor_protection_in_compaction() {
     // Create emergency snapshot (recent, within retention)
     let emrg_ts = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
     let (emrg_rowid, _) = db
-        .create_snapshot("emrg5", 0, &emrg_ts, "emergency", "mass delete", false, &files, &deleted)
+        .create_snapshot(
+            "emrg5",
+            0,
+            &emrg_ts,
+            "emergency",
+            "mass delete",
+            false,
+            &files,
+            &deleted,
+        )
         .unwrap();
 
     // Aggressive compaction config that would normally prune old snapshots
@@ -542,12 +605,20 @@ fn test_fast_path_directory_deletion_fallback() {
     std::fs::write(project_dir.join("src/lib.rs"), "pub fn hello() {}").unwrap();
     std::fs::write(project_dir.join("Cargo.toml"), "[package]").unwrap();
 
-    db.add_project("dirtest", project_dir.to_str().unwrap()).unwrap();
+    db.add_project("dirtest", project_dir.to_str().unwrap())
+        .unwrap();
     let cfg = uhoh::config::Config::default();
 
     // Take initial snapshot
     let _ = uhoh::snapshot::create_snapshot(
-        &uhoh_dir, &db, "dirtest", &project_dir, "auto", None, &cfg, None,
+        &uhoh_dir,
+        &db,
+        "dirtest",
+        &project_dir,
+        "auto",
+        None,
+        &cfg,
+        None,
     )
     .unwrap();
 
@@ -557,10 +628,20 @@ fn test_fast_path_directory_deletion_fallback() {
     // Use incremental path with changed_paths pointing to the deleted directory
     let changed = vec![project_dir.join("src")];
     let snap2 = uhoh::snapshot::create_snapshot(
-        &uhoh_dir, &db, "dirtest", &project_dir, "auto", None, &cfg, Some(&changed),
+        &uhoh_dir,
+        &db,
+        "dirtest",
+        &project_dir,
+        "auto",
+        None,
+        &cfg,
+        Some(&changed),
     )
     .unwrap();
-    assert!(snap2.is_some(), "Should detect directory deletion as a change");
+    assert!(
+        snap2.is_some(),
+        "Should detect directory deletion as a change"
+    );
 
     // Verify the resulting snapshot only has Cargo.toml (src/* deleted)
     let snaps = db.list_snapshots("dirtest").unwrap();
@@ -568,7 +649,10 @@ fn test_fast_path_directory_deletion_fallback() {
     let files = db.get_snapshot_files(latest_rowid).unwrap();
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
     assert!(paths.contains(&"Cargo.toml"), "Cargo.toml should survive");
-    assert!(!paths.iter().any(|p| p.starts_with("src/")), "src/* should be deleted");
+    assert!(
+        !paths.iter().any(|p| p.starts_with("src/")),
+        "src/* should be deleted"
+    );
 }
 
 /// Non-daemon restore should create and remove marker file used by daemon
@@ -583,7 +667,8 @@ fn test_restore_sets_and_clears_restore_marker_file() {
     std::fs::create_dir_all(&project_dir).unwrap();
 
     std::fs::write(project_dir.join("keep.txt"), "v1").unwrap();
-    db.add_project("restmark", project_dir.to_str().unwrap()).unwrap();
+    db.add_project("restmark", project_dir.to_str().unwrap())
+        .unwrap();
     let cfg = uhoh::config::Config::default();
 
     // Initial snapshot
@@ -604,16 +689,8 @@ fn test_restore_sets_and_clears_restore_marker_file() {
     // Modify file then restore
     std::fs::write(project_dir.join("keep.txt"), "v2").unwrap();
     let project = uhoh::resolve::resolve_project(&db, Some("restmark"), None).unwrap();
-    let outcome = uhoh::restore::cmd_restore(
-        &uhoh_dir,
-        &db,
-        &project,
-        &snap_id,
-        None,
-        false,
-        true,
-    )
-    .unwrap();
+    let outcome =
+        uhoh::restore::cmd_restore(&uhoh_dir, &db, &project, &snap_id, None, false, true).unwrap();
     assert!(outcome.applied);
 
     let marker = uhoh_dir.join(".restore-in-progress");

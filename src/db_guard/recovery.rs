@@ -36,6 +36,7 @@ pub fn write_sqlite_baseline(
     sqlite_path: &std::path::Path,
     encrypt: bool,
     retention_days: u64,
+    max_baseline_size_mb: u64,
 ) -> Result<ArtifactInfo> {
     let (base_dir, baseline_dir, _) = ensure_guard_dirs(uhoh_dir, guard_name)?;
     ensure_secure_dir(&base_dir)?;
@@ -56,6 +57,7 @@ pub fn write_sqlite_baseline(
     } else {
         raw
     };
+    enforce_max_payload_size(&payload, max_baseline_size_mb, "sqlite baseline")?;
     if encrypt {
         std::fs::write(&target, &payload)?;
     }
@@ -76,6 +78,7 @@ pub fn write_sqlite_schema_recovery(
     label: &str,
     encrypt: bool,
     retention_days: u64,
+    max_recovery_file_mb: u64,
 ) -> Result<ArtifactInfo> {
     let (_, _, recovery_dir) = ensure_guard_dirs(uhoh_dir, guard_name)?;
     ensure_secure_dir(&recovery_dir)?;
@@ -85,6 +88,7 @@ pub fn write_sqlite_schema_recovery(
     if encrypt {
         payload = maybe_encrypt(&payload, uhoh_dir)?;
     }
+    enforce_max_payload_size(&payload, max_recovery_file_mb, "sqlite recovery")?;
 
     let file = recovery_dir.join(format!("{}_{}_schema.sql", timestamp_tag(), label));
     std::fs::write(&file, &payload)?;
@@ -106,6 +110,7 @@ pub fn write_postgres_schema_recovery(
     label: &str,
     encrypt: bool,
     retention_days: u64,
+    max_recovery_file_mb: u64,
 ) -> Result<ArtifactInfo> {
     let (_, baseline_dir, recovery_dir) = ensure_guard_dirs(uhoh_dir, guard_name)?;
     ensure_secure_dir(&baseline_dir)?;
@@ -116,6 +121,7 @@ pub fn write_postgres_schema_recovery(
     if encrypt {
         payload = maybe_encrypt(&payload, uhoh_dir)?;
     }
+    enforce_max_payload_size(&payload, max_recovery_file_mb, "postgres recovery")?;
 
     let file = recovery_dir.join(format!("{}_{}_schema.sql", timestamp_tag(), label));
     std::fs::write(&file, &payload)?;
@@ -136,12 +142,14 @@ pub fn write_postgres_schema_baseline(
     connection_ref: &str,
     creds: &CredentialMaterial,
     retention_days: u64,
+    max_baseline_size_mb: u64,
 ) -> Result<ArtifactInfo> {
     let (_, baseline_dir, _) = ensure_guard_dirs(uhoh_dir, guard_name)?;
     ensure_secure_dir(&baseline_dir)?;
 
     let schema = postgres_schema_dump(connection_ref, creds)?;
     let payload = schema.into_bytes();
+    enforce_max_payload_size(&payload, max_baseline_size_mb, "postgres baseline")?;
     let file = baseline_dir.join(format!("{}_schema.sql", timestamp_tag()));
     std::fs::write(&file, &payload)?;
     set_secure_permissions(&file)?;
@@ -260,6 +268,22 @@ fn wrap_in_transaction(sql: &str) -> String {
     } else {
         format!("BEGIN;\n{trimmed}\nCOMMIT;\n")
     }
+}
+
+fn enforce_max_payload_size(payload: &[u8], max_mb: u64, label: &str) -> Result<()> {
+    let max_bytes = max_mb.saturating_mul(1024 * 1024);
+    if max_bytes == 0 {
+        anyhow::bail!("{} maximum size must be greater than 0", label);
+    }
+    if payload.len() as u64 > max_bytes {
+        anyhow::bail!(
+            "{} payload ({:.2} MiB) exceeds configured limit ({:.2} MiB)",
+            label,
+            payload.len() as f64 / 1_048_576.0,
+            max_bytes as f64 / 1_048_576.0
+        );
+    }
+    Ok(())
 }
 
 pub fn decrypt_recovery_payload(payload: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {

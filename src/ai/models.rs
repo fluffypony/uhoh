@@ -23,7 +23,10 @@ pub fn select_model(config: &AiConfig) -> Option<ModelTierConfig> {
     select_model_with_sys(config, None)
 }
 
-pub fn select_model_with_sys(config: &AiConfig, existing_sys: Option<&System>) -> Option<ModelTierConfig> {
+pub fn select_model_with_sys(
+    config: &AiConfig,
+    existing_sys: Option<&System>,
+) -> Option<ModelTierConfig> {
     let tiers: Vec<ModelTierConfig> = if config.models.is_empty() {
         default_model_tiers()
     } else {
