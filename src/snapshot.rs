@@ -50,12 +50,27 @@ pub fn create_snapshot(
     let mut current_hashes: HashMap<String, (String, bool)> = HashMap::new();
 
     if let Some(paths) = changed_paths {
-        // If any changed path is a directory or equals project root, fall back to full scan.
+        // If any changed path is a directory, equals project root, or is a
+        // non-existent non-file (deleted directory), fall back to full scan.
         let mut requires_full = false;
         for p in paths {
             if p == project_path || p.is_dir() {
                 requires_full = true;
                 break;
+            }
+            // If path doesn't exist, it may be a deleted directory —
+            // fall back to full scan to detect child deletions
+            if !p.exists() && !p.extension().is_some() {
+                // Heuristic: paths without extensions are likely directories.
+                // Check if any previous file was under this path.
+                if let Ok(rel) = p.strip_prefix(project_path) {
+                    let prefix = cas::encode_relpath(rel);
+                    let prefix_with_sep = format!("{}/", prefix);
+                    if prev_files.keys().any(|k| k.starts_with(&prefix_with_sep)) {
+                        requires_full = true;
+                        break;
+                    }
+                }
             }
         }
         if requires_full {
@@ -83,9 +98,10 @@ pub fn create_snapshot(
             if !p.starts_with(project_path) {
                 continue;
             }
-            // Skip paths not in the walker's output (i.e., ignored by .gitignore)
-            if !walked_set.contains(p) {
-                continue;
+            // For existing files, check ignore rules via walker output.
+            // For deleted files, include them (they need deletion detection).
+            if p.exists() && !walked_set.contains(p) {
+                continue; // Ignored by .gitignore
             }
             if let Ok(rel) = p.strip_prefix(project_path) {
                 let rel_s = cas::encode_relpath(rel);

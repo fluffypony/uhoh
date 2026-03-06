@@ -380,8 +380,6 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
         .and_then(|v| v.as_str())
         .map(str::to_string);
     let target_path_for_task = target_path.clone();
-    let path_for_lock = path.clone();
-    let hash_for_lock = hash.clone();
     let uhoh_dir = state.uhoh_dir.clone();
     let restore_in_progress = state.restore_in_progress.clone();
     let restore_locks = state.restore_locks.clone();
