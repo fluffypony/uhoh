@@ -26,6 +26,8 @@ pub struct AgentSubsystem {
     intercept_started: bool,
     fanotify_started: bool,
     proxy_started: bool,
+    proxy_failures: u32,
+    proxy_next_retry: Option<std::time::Instant>,
     background_failures: std::sync::Arc<std::sync::atomic::AtomicU64>,
     intercept_task: Option<tokio::task::JoinHandle<Result<()>>>,
     fanotify_task: Option<tokio::task::JoinHandle<()>>,
@@ -41,6 +43,8 @@ impl AgentSubsystem {
             intercept_started: false,
             fanotify_started: false,
             proxy_started: false,
+            proxy_failures: 0,
+            proxy_next_retry: None,
             background_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             intercept_task: None,
             fanotify_task: None,
@@ -209,6 +213,10 @@ impl AgentSubsystem {
             }
             self.proxy_shutdown = None;
             self.proxy_started = false;
+            self.proxy_failures = self.proxy_failures.saturating_add(1);
+            let backoff_secs = (2u64).pow(self.proxy_failures.min(6)); // max 64s
+            self.proxy_next_retry =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(backoff_secs));
         }
 
         if self
@@ -263,6 +271,16 @@ impl AgentSubsystem {
         }
         if ctx.config.agent.mcp_proxy_enabled {
             if !self.proxy_started {
+                // Localized backoff to avoid infinite restart loops
+                if let Some(retry_at) = self.proxy_next_retry {
+                    if std::time::Instant::now() < retry_at {
+                        return Ok(());
+                    }
+                }
+                if self.proxy_failures >= 10 {
+                    tracing::error!("MCP proxy permanently disabled after 10 failures");
+                    return Ok(());
+                }
                 self.proxy_started = true;
                 let ctx_cl = ctx.clone();
                 let token = CancellationToken::new();

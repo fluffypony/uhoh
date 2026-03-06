@@ -706,10 +706,10 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     let args: Vec<String> = std::env::args().collect();
                     let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
                     if let Some(ref exe) = exe_path {
-                        // Clean up state files before exec replaces the process
+                        // Clean up state files before exec replaces the process.
+                        // Keep server.token so browser localStorage tokens stay valid.
                         let _ = std::fs::remove_file(uhoh_dir.join("daemon.pid"));
                         let _ = std::fs::remove_file(uhoh_dir.join("server.port"));
-                        let _ = std::fs::remove_file(uhoh_dir.join("server.token"));
                         let err = std::process::Command::new(exe).args(rest).exec();
                         anyhow::bail!("exec failed: {err}");
                     }
@@ -775,10 +775,10 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                         let args: Vec<String> = std::env::args().collect();
                         let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
                         if let Ok(exe) = std::env::current_exe() {
-                            // Clean up state files before exec replaces the process
+                            // Clean up state files before exec replaces the process.
+                            // Keep server.token so browser localStorage tokens stay valid.
                             let _ = std::fs::remove_file(uhoh_dir.join("daemon.pid"));
                             let _ = std::fs::remove_file(uhoh_dir.join("server.port"));
-                            let _ = std::fs::remove_file(uhoh_dir.join("server.token"));
                             let err = std::process::Command::new(exe).args(rest).exec();
                             tracing::error!("exec failed: {}", err);
                         }

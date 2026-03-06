@@ -379,10 +379,10 @@ pub async fn get_file_content(
     let uhoh_dir = state.uhoh_dir.clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
         let project = resolve::resolve_project(&db, Some(&hash), None)?;
-        let clean_path = file_path.trim_start_matches('/');
+        let clean_path = file_path.trim_start_matches('/').replace('\\', "/");
         resolve::validate_path_within_project(
             std::path::Path::new(&project.current_path),
-            clean_path,
+            &clean_path,
         )?;
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?

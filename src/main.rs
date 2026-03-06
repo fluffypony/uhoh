@@ -796,8 +796,9 @@ fn handle_db_commands(
             }
             let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
 
-            if !mode.eq_ignore_ascii_case("triggers") {
-                anyhow::bail!("Only 'triggers' mode is supported");
+            let valid_modes = ["triggers", "schema_polling"];
+            if !valid_modes.iter().any(|m| mode.eq_ignore_ascii_case(m)) {
+                anyhow::bail!("Supported modes: {}", valid_modes.join(", "));
             }
 
             if engine == "postgres" {

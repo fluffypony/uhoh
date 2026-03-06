@@ -832,7 +832,7 @@ fn append_diff_chunk(
 
 pub fn mtime_to_millis(t: SystemTime) -> i64 {
     match t.duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_millis() as i64,
+        Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
         Err(e) => {
             let dur = e.duration();
             let millis = dur.as_millis() as i64;

@@ -63,7 +63,7 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
         )
     };
     if fan_fd_raw < 0 {
-        anyhow::bail!("fanotify_init failed (CAP_SYS_ADMIN likely required)");
+        anyhow::bail!("fanotify_init failed (requires CAP_SYS_ADMIN and kernel >= 5.1)");
     }
     let fan_fd = FanotifyFd(fan_fd_raw);
 

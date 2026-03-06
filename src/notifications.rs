@@ -25,8 +25,17 @@ impl NotificationPipeline {
         let mut rx = event_tx.subscribe();
         let me = self.clone();
         tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
-                me.process_event(event).await;
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        me.process_event(event).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Notification pipeline lagged, missed {} events", n);
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
     }

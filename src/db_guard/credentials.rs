@@ -510,7 +510,7 @@ fn resolve_pgpass(connection_ref: &str) -> Result<Option<CredentialMaterial>> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let fields: Vec<&str> = line.split(':').collect();
+        let fields = parse_pgpass_fields(line);
         if fields.len() != 5 {
             continue;
         }
@@ -533,6 +533,30 @@ fn resolve_pgpass(connection_ref: &str) -> Result<Option<CredentialMaterial>> {
         }
     }
     Ok(None)
+}
+
+/// Parse a .pgpass line handling escaped colons (\:) and backslashes (\\).
+fn parse_pgpass_fields(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if next == ':' || next == '\\' {
+                    current.push(chars.next().unwrap());
+                    continue;
+                }
+            }
+        }
+        if c == ':' {
+            fields.push(std::mem::take(&mut current));
+        } else {
+            current.push(c);
+        }
+    }
+    fields.push(current);
+    fields
 }
 
 pub fn scrub_error_message(msg: &str) -> String {

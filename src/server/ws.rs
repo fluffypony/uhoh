@@ -48,7 +48,13 @@ pub async fn websocket_handler(
         }
     }
 
-    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state)))
+    // Echo matched Sec-WebSocket-Protocol so strict clients accept the connection
+    let matched_protocol = extract_matched_protocol(&headers);
+    let mut upgrade = ws;
+    if let Some(proto) = matched_protocol {
+        upgrade = upgrade.protocols([proto]);
+    }
+    Ok(upgrade.on_upgrade(move |socket| handle_socket(socket, state)))
 }
 
 fn websocket_auth_ok(
@@ -104,6 +110,28 @@ fn websocket_auth_ok(
     }
 
     false
+}
+
+/// Extract the protocol value to echo back to the client when auth was via Sec-WebSocket-Protocol.
+fn extract_matched_protocol(headers: &HeaderMap) -> Option<String> {
+    let protocol_header = headers.get("sec-websocket-protocol")?;
+    let protocols = protocol_header.to_str().ok()?;
+    // Check "bearer, <token>" format
+    let mut iter = protocols.split(',').map(|s| s.trim());
+    while let Some(name) = iter.next() {
+        if name.eq_ignore_ascii_case("bearer") {
+            if iter.next().is_some() {
+                return Some("bearer".to_string());
+            }
+        }
+    }
+    // Check "bearer.<token>" format
+    for value in protocols.split(',').map(|s| s.trim()) {
+        if value.starts_with("bearer.") {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {

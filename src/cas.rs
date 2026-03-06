@@ -476,6 +476,9 @@ pub fn base58_to_id(s: &str) -> Option<u64> {
     let start = 8usize.saturating_sub(bytes.len());
     buf[start..].copy_from_slice(&bytes);
     let id = u64::from_be_bytes(buf);
+    if id == 0 {
+        return None;
+    }
     Some(id)
 }
 
