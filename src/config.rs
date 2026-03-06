@@ -456,11 +456,13 @@ fn default_agent_pause_timeout() -> u64 {
 }
 fn default_agent_dangerous_patterns() -> Vec<String> {
     vec![
-        "self_modify_personality".to_string(),
-        "new_tool_permission".to_string(),
-        "model_downgrade".to_string(),
-        "mass_file_delete".to_string(),
-        "config_change".to_string(),
+        "tool:write".to_string(),
+        "tool:apply_patch".to_string(),
+        "tool:exec".to_string(),
+        "tool:bash".to_string(),
+        "path:.env".to_string(),
+        "path:package.json".to_string(),
+        "path:Cargo.toml".to_string(),
     ]
 }
 
@@ -564,7 +566,7 @@ impl Default for ServerConfig {
             bind_address: default_bind_address(),
             ui_enabled: true,
             mcp_enabled: true,
-            mcp_require_auth: false,
+            mcp_require_auth: true,
             require_auth: true,
         }
     }

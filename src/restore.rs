@@ -16,10 +16,7 @@ struct RestoreSignalGuard {
 impl RestoreSignalGuard {
     fn install(uhoh_dir: &Path, project_hash: &str) -> Result<Self> {
         let path = uhoh_dir.join(RESTORE_IN_PROGRESS_FILE);
-        let payload = format!(
-            "project_hash={project_hash}\npid={}\n",
-            std::process::id()
-        );
+        let payload = format!("project_hash={project_hash}\npid={}\n", std::process::id());
         // Use create_new(true) for atomic mutual exclusion: if another
         // restore is in progress, the file already exists and this fails.
         std::fs::OpenOptions::new()
@@ -352,7 +349,7 @@ pub fn cmd_restore(
 
         tracing::info!("Creating pre-restore snapshot...");
         let cfg = crate::config::Config::load(&uhoh_dir.join("config.toml"))?;
-        let _ = snapshot::create_snapshot(
+        snapshot::create_snapshot(
             uhoh_dir,
             database,
             &project.hash,
@@ -361,7 +358,8 @@ pub fn cmd_restore(
             Some(&format!("Before restore to {id_str}")),
             &cfg,
             None,
-        );
+        )
+        .context("Pre-restore snapshot failed; aborting restore")?;
 
         let mut missing_blobs = Vec::new();
         let mut unstored = Vec::new();

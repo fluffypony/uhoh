@@ -41,14 +41,18 @@ impl Drop for FanotifyFd {
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) -> Result<()> {
-    // Use the first active project root from the database instead of cwd,
+    // Use all active project roots from the database instead of cwd,
     // which is typically / or ~ when running as a daemon.
     let projects = ctx.database.list_projects().unwrap_or_default();
-    let monitor_root = projects
-        .first()
-        .map(|p| std::path::PathBuf::from(&p.current_path))
-        .or_else(|| std::env::current_dir().ok())
-        .context("No project roots found and unable to resolve current directory")?;
+    let monitor_roots: Vec<PathBuf> = if projects.is_empty() {
+        vec![std::env::current_dir()
+            .context("No project roots found and unable to resolve current directory")?]
+    } else {
+        projects
+            .into_iter()
+            .map(|p| PathBuf::from(p.current_path))
+            .collect()
+    };
     let fan_fd_raw = unsafe {
         libc::fanotify_init(
             (libc::FAN_CLASS_CONTENT
@@ -63,47 +67,56 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
     }
     let fan_fd = FanotifyFd(fan_fd_raw);
 
-    let cpath = CString::new(monitor_root.as_os_str().as_bytes().to_vec())
-        .context("Invalid monitor root path")?;
-    let mark_fd = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC)
-        .open(&monitor_root)
-        .with_context(|| format!("Failed opening monitor root: {}", monitor_root.display()))?;
-    let mark_ok = unsafe {
-        libc::fanotify_mark(
-            fan_fd.0,
-            (libc::FAN_MARK_ADD | libc::FAN_MARK_MOUNT | libc::FAN_MARK_FILESYSTEM) as u32,
-            (libc::FAN_OPEN_PERM | libc::FAN_EVENT_ON_CHILD) as u64,
-            mark_fd.as_raw_fd(),
-            cpath.as_ptr(),
-        )
-    };
-    if mark_ok < 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EINVAL) {
-            tracing::warn!(
-                "FAN_MARK_FILESYSTEM unsupported, retrying with FAN_MARK_MOUNT only"
-            );
-            let fallback = unsafe {
-                libc::fanotify_mark(
-                    fan_fd.0,
-                    (libc::FAN_MARK_ADD | libc::FAN_MARK_MOUNT) as u32,
-                    (libc::FAN_OPEN_PERM | libc::FAN_EVENT_ON_CHILD) as u64,
-                    mark_fd.as_raw_fd(),
-                    cpath.as_ptr(),
-                )
-            };
-            if fallback < 0 {
+    for monitor_root in &monitor_roots {
+        let cpath = CString::new(monitor_root.as_os_str().as_bytes().to_vec())
+            .context("Invalid monitor root path")?;
+        let mark_fd = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(monitor_root)
+            .with_context(|| format!("Failed opening monitor root: {}", monitor_root.display()))?;
+        let mark_ok = unsafe {
+            libc::fanotify_mark(
+                fan_fd.0,
+                (libc::FAN_MARK_ADD | libc::FAN_MARK_MOUNT | libc::FAN_MARK_FILESYSTEM) as u32,
+                (libc::FAN_OPEN_PERM | libc::FAN_EVENT_ON_CHILD) as u64,
+                mark_fd.as_raw_fd(),
+                cpath.as_ptr(),
+            )
+        };
+        if mark_ok < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINVAL) {
+                tracing::warn!(
+                    "FAN_MARK_FILESYSTEM unsupported, retrying with FAN_MARK_MOUNT only"
+                );
+                let fallback = unsafe {
+                    libc::fanotify_mark(
+                        fan_fd.0,
+                        (libc::FAN_MARK_ADD | libc::FAN_MARK_MOUNT) as u32,
+                        (libc::FAN_OPEN_PERM | libc::FAN_EVENT_ON_CHILD) as u64,
+                        mark_fd.as_raw_fd(),
+                        cpath.as_ptr(),
+                    )
+                };
+                if fallback < 0 {
+                    anyhow::bail!("fanotify_mark failed for {}", monitor_root.display());
+                }
+            } else {
                 anyhow::bail!("fanotify_mark failed for {}", monitor_root.display());
             }
-        } else {
-            anyhow::bail!("fanotify_mark failed for {}", monitor_root.display());
         }
     }
 
     let mut event = new_event("agent", "fanotify_monitor_started", "info");
-    event.detail = Some(format!("root={}", monitor_root.display()));
+    event.detail = Some(format!(
+        "roots={}",
+        monitor_roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
     if let Err(err) = ctx.event_ledger.append(event) {
         tracing::error!("failed to append fanotify_monitor_started event: {err}");
     }
@@ -134,7 +147,8 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
             continue;
         }
 
-        let nread = unsafe { libc::read(fan_fd.0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        let nread =
+            unsafe { libc::read(fan_fd.0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
         if nread < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() != std::io::ErrorKind::Interrupted {
@@ -161,7 +175,7 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
             if metadata.fd >= 0 && (metadata.mask & libc::FAN_OPEN_PERM as u64) != 0 {
                 let target_path = fd_path(metadata.fd);
                 if let Some(path) = target_path.as_ref() {
-                    if path_within(&monitor_root, path) {
+                    if monitor_roots.iter().any(|root| path_within(root, path)) {
                         if sec_window_start.elapsed() >= std::time::Duration::from_secs(1) {
                             sec_window_start = std::time::Instant::now();
                             sec_count = 0;
@@ -252,7 +266,14 @@ fn capture_preimage(
     file.read_to_end(&mut bytes)
         .with_context(|| format!("Failed reading pre-image source: {}", path.display()))?;
     let (hash, _) = crate::cas::store_blob(&uhoh_dir.join("blobs"), &bytes)?;
-    let start_ticks = process_start_ticks(pid).unwrap_or_default();
+    let start_ticks = process_start_ticks(pid).unwrap_or_else(|err| {
+        tracing::warn!(
+            "failed to resolve process start ticks for pid {}: {}",
+            pid,
+            err
+        );
+        0
+    });
     batch.push_back(PendingAudit {
         path: path.to_path_buf(),
         pre_state_ref: hash,
@@ -298,8 +319,9 @@ fn process_start_ticks(pid: i32) -> Result<u64> {
     let parts: Vec<&str> = tail.split_whitespace().collect();
     let start_ticks = parts
         .get(19)
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or_default();
+        .ok_or_else(|| anyhow::anyhow!("Malformed /proc/{pid}/stat: missing starttime field"))?
+        .parse::<u64>()
+        .with_context(|| format!("Malformed /proc/{pid}/stat: invalid starttime"))?;
     Ok(start_ticks)
 }
 

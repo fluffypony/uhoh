@@ -23,7 +23,9 @@ use uhoh::update;
 
 // Deduplicated: use library function for ~/.uhoh
 fn uhoh_dir() -> PathBuf {
-    uhoh::uhoh_dir()
+    std::env::var_os("UHOH_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(uhoh::uhoh_dir)
 }
 
 fn ensure_uhoh_dir() -> Result<PathBuf> {
@@ -145,6 +147,15 @@ async fn main() -> Result<()> {
             maybe_start_daemon(&uhoh)?;
             let project_path = resolve_project_path(path)?;
 
+            let uhoh_home = uhoh::uhoh_dir();
+            if uhoh_home.starts_with(&project_path) {
+                anyhow::bail!(
+                    "Refusing to watch parent directory '{}' because it contains {}",
+                    project_path.display(),
+                    uhoh_home.display()
+                );
+            }
+
             if let Some(existing_hash) = marker::read_marker(&project_path)? {
                 if let Some(existing) = database.get_project(&existing_hash)? {
                     let canonical = dunce::canonicalize(&project_path)?;
@@ -255,7 +266,6 @@ async fn main() -> Result<()> {
                             0 => "none",
                             1 => "copy",
                             2 => "reflink",
-                            3 => "hardlink",
                             _ => "none",
                         };
                         println!("       {:>8}  {:>7}  {}", f.size, method, f.path);
@@ -876,23 +886,16 @@ fn handle_db_commands(
             if let Some(pre_state_ref) = &entry.pre_state_ref {
                 println!("-- pre_state_ref: {pre_state_ref}");
             }
-            if let Some(path) = extract_artifact_path(&entry.detail) {
-                println!("-- artifact_path: {path}");
-                if *apply {
-                    apply_recovery_artifact(&path, uhoh_dir)?;
-                    println!(
-                        "Validated and decrypted recovery artifact from {path}; SQL execution remains manual"
-                    );
-                }
-            }
+            let artifact_path = extract_artifact_path(&entry.detail)
+                .context("Recovery event detail missing artifact path")?;
+            println!("-- artifact_path: {artifact_path}");
             if *apply {
-                println!(
-                    "Marked recovery marker for event #{} as resolved (no automatic SQL execution performed)",
-                    entry.id
-                );
+                apply_recovery_artifact(&entry, &artifact_path, uhoh_dir)?;
                 database.event_ledger_mark_resolved(entry.id)?;
-            } else {
-                println!("Use --apply to mark as resolved");
+                println!("Applied recovery artifact from {artifact_path}");
+            }
+            if !*apply {
+                println!("Use --apply to validate, decrypt, and execute the recovery artifact");
             }
         }
         DbAction::Baseline { name } => {
@@ -913,17 +916,22 @@ fn handle_db_commands(
                         std::path::Path::new(sqlite_path),
                         true,
                         30,
+                        config::Config::load(&uhoh::uhoh_dir().join("config.toml"))?
+                            .db_guard
+                            .max_baseline_size_mb,
                     )?;
                 }
                 "postgres" => {
                     let creds =
                         uhoh::db_guard::resolve_postgres_credentials_cli(&guard.connection_ref)?;
+                    let cfg = config::Config::load(&uhoh::uhoh_dir().join("config.toml"))?;
                     let _ = uhoh::db_guard::write_postgres_schema_baseline(
                         &uhoh::uhoh_dir(),
                         &guard.name,
                         &guard.connection_ref,
                         &creds,
                         30,
+                        cfg.db_guard.max_baseline_size_mb,
                     )?;
                 }
                 _ => {}
@@ -951,6 +959,11 @@ fn handle_db_commands(
 }
 
 fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Result<()> {
+    if postgres_connection_requires_tls(dsn) {
+        anyhow::bail!(
+            "Postgres DSN requires TLS (sslmode=require/verify-*), but CLI guard tooling currently supports NoTls only"
+        );
+    }
     block_on_runtime(async move {
         let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
             .await
@@ -1088,6 +1101,11 @@ async fn install_delete_counter_trigger(
 }
 
 fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Result<()> {
+    if postgres_connection_requires_tls(dsn) {
+        anyhow::bail!(
+            "Postgres DSN requires TLS (sslmode=require/verify-*), but CLI guard tooling currently supports NoTls only"
+        );
+    }
     block_on_runtime(async move {
         let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
             .await
@@ -1132,6 +1150,11 @@ fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Resul
 }
 
 fn test_postgres_monitoring_infrastructure(dsn: &str) -> Result<()> {
+    if postgres_connection_requires_tls(dsn) {
+        anyhow::bail!(
+            "Postgres DSN requires TLS (sslmode=require/verify-*), but CLI guard tooling currently supports NoTls only"
+        );
+    }
     block_on_runtime(async move {
         let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
             .await
@@ -1190,6 +1213,22 @@ fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
         .filter(|v| !v.is_empty())
         .map(|v| v.to_string())
         .collect()
+}
+
+fn postgres_connection_requires_tls(connection_ref: &str) -> bool {
+    if let Ok(url) = Url::parse(connection_ref) {
+        if matches!(url.scheme(), "postgres" | "postgresql") {
+            for (k, v) in url.query_pairs() {
+                if k.eq_ignore_ascii_case("sslmode") {
+                    let mode = v.to_ascii_lowercase();
+                    if mode == "require" || mode == "verify-ca" || mode == "verify-full" {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 fn quote_pg_ident(input: &str) -> Result<String> {
@@ -1276,7 +1315,11 @@ fn write_secure_runtime_json(path: &std::path::Path, payload: &[u8]) -> Result<(
     Ok(())
 }
 
-fn apply_recovery_artifact(path: &str, uhoh_dir: &std::path::Path) -> Result<()> {
+fn apply_recovery_artifact(
+    entry: &db::EventLedgerEntry,
+    path: &str,
+    uhoh_dir: &std::path::Path,
+) -> Result<()> {
     let artifact_path = std::path::Path::new(path);
     if !artifact_path.exists() {
         anyhow::bail!(
@@ -1297,12 +1340,31 @@ fn apply_recovery_artifact(path: &str, uhoh_dir: &std::path::Path) -> Result<()>
     }
 
     let payload = std::fs::read(artifact_path)?;
-    let decrypted = uhoh::db_guard::decrypt_recovery_payload(&payload, uhoh_dir)?;
+    let decrypted = match uhoh::db_guard::decrypt_recovery_payload(&payload, uhoh_dir) {
+        Ok(bytes) => bytes,
+        Err(_) => payload,
+    };
     let sql = String::from_utf8(decrypted).context("Recovery artifact is not valid UTF-8 SQL")?;
 
     if !sql.contains("BEGIN;") || !sql.contains("COMMIT;") {
         anyhow::bail!("Recovery SQL must be transaction-wrapped (BEGIN/COMMIT)");
     }
+
+    if entry.source != "db_guard" {
+        anyhow::bail!("Recovery apply is only supported for db_guard events");
+    }
+
+    let guard_name = entry
+        .guard_name
+        .as_deref()
+        .context("Recovery event missing guard_name")?;
+    let guard = database_get_guard_by_name(uhoh_dir, guard_name)?;
+
+    match guard.engine.as_str() {
+        "sqlite" => apply_sqlite_recovery(&guard.connection_ref, &sql),
+        "postgres" => apply_postgres_recovery(&guard.connection_ref, &sql),
+        other => anyhow::bail!("Recovery apply is not supported for engine '{other}'"),
+    }?;
 
     println!("-- SQL preview begin");
     for line in sql.lines().take(40) {
@@ -1313,6 +1375,96 @@ fn apply_recovery_artifact(path: &str, uhoh_dir: &std::path::Path) -> Result<()>
     }
     println!("-- SQL preview end");
     Ok(())
+}
+
+fn database_get_guard_by_name(uhoh_dir: &std::path::Path, name: &str) -> Result<db::DbGuardEntry> {
+    let database = db::Database::open(&uhoh_dir.join("uhoh.db"))?;
+    database
+        .list_db_guards()?
+        .into_iter()
+        .find(|g| g.name == name)
+        .with_context(|| format!("Guard '{name}' not found"))
+}
+
+fn apply_sqlite_recovery(connection_ref: &str, sql: &str) -> Result<()> {
+    let sqlite_path = connection_ref
+        .strip_prefix("sqlite://")
+        .unwrap_or(connection_ref);
+    let conn = rusqlite::Connection::open(sqlite_path)
+        .with_context(|| format!("Failed to open sqlite database at {sqlite_path}"))?;
+    conn.execute_batch(sql)
+        .with_context(|| format!("Failed to apply sqlite recovery SQL to {sqlite_path}"))?;
+    Ok(())
+}
+
+fn apply_postgres_recovery(connection_ref: &str, sql: &str) -> Result<()> {
+    if postgres_connection_requires_tls(connection_ref) {
+        anyhow::bail!(
+            "Postgres DSN requires TLS (sslmode=require/verify-*), but recovery apply currently supports NoTls only"
+        );
+    }
+
+    let dsn = build_connect_dsn_with_resolved_credentials(connection_ref)?;
+    block_on_runtime(async move {
+        let (client, connection) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+            .batch_execute(sql)
+            .await
+            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+        Ok(())
+    })
+}
+
+fn build_connect_dsn_with_resolved_credentials(connection_ref: &str) -> Result<String> {
+    let creds = uhoh::db_guard::resolve_postgres_credentials_cli(connection_ref)?;
+    if connection_ref.starts_with("postgres://") || connection_ref.starts_with("postgresql://") {
+        let mut url = Url::parse(connection_ref)
+            .with_context(|| format!("Invalid Postgres connection ref: {connection_ref}"))?;
+
+        if let Some(ref user) = creds.username {
+            url.set_username(user)
+                .map_err(|_| anyhow::anyhow!("Failed to set Postgres DSN username"))?;
+        }
+        if let Some(ref password) = creds.password {
+            url.set_password(Some(password))
+                .map_err(|_| anyhow::anyhow!("Failed to set Postgres DSN password"))?;
+        }
+
+        return Ok(url.to_string());
+    }
+
+    // keyword-value DSN fallback
+    let mut parts: Vec<String> = connection_ref
+        .split_whitespace()
+        .map(|p| p.to_string())
+        .collect();
+
+    let has_user = parts.iter().any(|p| {
+        p.split_once('=')
+            .is_some_and(|(k, _)| k.eq_ignore_ascii_case("user"))
+    });
+    let has_password = parts.iter().any(|p| {
+        p.split_once('=')
+            .is_some_and(|(k, _)| k.eq_ignore_ascii_case("password"))
+    });
+
+    if let Some(ref pw) = creds.password {
+        if !has_password {
+            parts.push(format!("password={pw}"));
+        }
+    }
+    if let Some(ref user) = creds.username {
+        if !has_user {
+            parts.push(format!("user={user}"));
+        }
+    }
+
+    Ok(parts.join(" "))
 }
 
 fn session_matches_event(entry: &db::EventLedgerEntry, session_id: &str) -> bool {
@@ -1421,7 +1573,7 @@ fn handle_agent_commands(
                         anyhow::bail!("Event #{} does not belong to session {}", id, session_id);
                     }
                 }
-                let ledger_db = std::sync::Arc::new(db::Database::open(&uhoh_dir.join("uhoh.db"))?);
+                let ledger_db = std::sync::Arc::new(database.clone_handle());
                 let ledger = uhoh::event_ledger::EventLedger::new(ledger_db);
                 uhoh::agent::resolve_event(database, &ledger, uhoh_dir, *id)?;
                 println!("Reverted event #{} and marked it as resolved", id);
@@ -1509,14 +1661,20 @@ fn handle_agent_commands(
             std::fs::create_dir_all(&agents_dir)?;
             let template_path = agents_dir.join("default.toml");
             if !template_path.exists() {
-                std::fs::write(&template_path, r#"profile_version = 1
+                std::fs::write(
+                    &template_path,
+                    r#"profile_version = 1
 name = "default"
 session_log_pattern = ""
 tool_call_format = "jsonl"
-"#)?;
+"#,
+                )?;
             }
             println!("Agent profiles initialized at {}", agents_dir.display());
-            println!("Edit {} to configure agent monitoring.", template_path.display());
+            println!(
+                "Edit {} to configure agent monitoring.",
+                template_path.display()
+            );
         }
         AgentAction::Test { name } => {
             let exists = database.list_agents()?.into_iter().any(|a| a.name == *name);
@@ -1557,13 +1715,69 @@ tool_call_format = "jsonl"
                 anyhow::bail!("No base profile exists yet. Run `uhoh agent init` first.");
             }
 
-            let _profile: toml::Value =
+            let template_profile: toml::Value =
                 toml::from_str(&std::fs::read_to_string(&default_profile)?)
                     .context("Failed to parse generic profile")?;
-            println!("Profile loaded: {}", default_profile.display());
+
+            let mut updated = 0usize;
+            let agents = database.list_agents()?;
+            for agent in agents {
+                if agent.profile_path == default_profile.to_string_lossy()
+                    || agent.profile_path.ends_with("/generic.toml")
+                    || agent.profile_path.ends_with("\\generic.toml")
+                {
+                    continue;
+                }
+                let profile_path = uhoh::util::expand_home(&agent.profile_path);
+                let profile_path = std::path::PathBuf::from(profile_path);
+                if !profile_path.exists() {
+                    continue;
+                }
+
+                let current = std::fs::read_to_string(&profile_path).with_context(|| {
+                    format!("Failed to read profile: {}", profile_path.display())
+                })?;
+                let parsed: toml::Value = toml::from_str(&current).with_context(|| {
+                    format!("Failed to parse profile: {}", profile_path.display())
+                })?;
+
+                let mut merged = template_profile.clone();
+                deep_merge_toml(&mut merged, &parsed);
+                if merged == parsed {
+                    continue;
+                }
+                let rendered = toml::to_string_pretty(&merged)?;
+                std::fs::write(&profile_path, rendered).with_context(|| {
+                    format!("Failed to write profile: {}", profile_path.display())
+                })?;
+                updated += 1;
+            }
+
+            println!(
+                "Updated {} agent profile(s) from template {}",
+                updated,
+                default_profile.display()
+            );
         }
     }
     Ok(())
+}
+
+fn deep_merge_toml(base: &mut toml::Value, overlay: &toml::Value) {
+    match (base, overlay) {
+        (toml::Value::Table(base_tbl), toml::Value::Table(overlay_tbl)) => {
+            for (k, v) in overlay_tbl {
+                if let Some(existing) = base_tbl.get_mut(k) {
+                    deep_merge_toml(existing, v);
+                } else {
+                    base_tbl.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        (base_leaf, overlay_leaf) => {
+            *base_leaf = overlay_leaf.clone();
+        }
+    }
 }
 
 fn extract_session_id(detail: &str) -> Option<String> {
@@ -1583,7 +1797,6 @@ fn extract_detail_field(detail: &str, key: &str) -> Option<String> {
     let json = serde_json::from_str::<serde_json::Value>(detail).ok()?;
     json.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
-
 
 fn normalize_timeline_source(source: &str) -> Result<String> {
     let source = source.trim().to_ascii_lowercase();

@@ -13,6 +13,17 @@ enum Backend {
     MlxLm { python: PathBuf },
 }
 
+impl Backend {
+    fn identity_key(&self) -> String {
+        match self {
+            Backend::LlamaServer { binary } => {
+                format!("llama:{}", binary.to_string_lossy())
+            }
+            Backend::MlxLm { python } => format!("mlx:{}", python.to_string_lossy()),
+        }
+    }
+}
+
 // Deprecated: we no longer pre-bind ephemeral ports to avoid TOCTOU.
 
 fn find_sidecar_binary(uhoh_dir: &Path) -> Result<PathBuf> {
@@ -39,6 +50,9 @@ pub(crate) struct GlobalSidecar {
     child: Child,
     port: u16,
     last_used: Instant,
+    model_path: PathBuf,
+    backend_key: String,
+    ctx_tokens: u64,
 }
 
 pub(crate) static GLOBAL_SIDECAR: Lazy<Mutex<Option<GlobalSidecar>>> =
@@ -66,6 +80,25 @@ pub fn get_or_spawn_port_with_ctx(
     idle_shutdown_secs: u64,
     ctx_tokens: u64,
 ) -> Result<u16> {
+    let requested_model_path = model_path.to_path_buf();
+    let requested_backend = detect_backend(uhoh_dir)?;
+    let requested_backend_key = requested_backend.identity_key();
+
+    // If a sidecar is running with different model/backend/context config, restart it.
+    {
+        let mut guard = lock_global_sidecar();
+        if let Some(ref mut gs) = *guard {
+            let config_matches = gs.model_path == requested_model_path
+                && gs.backend_key == requested_backend_key
+                && gs.ctx_tokens == ctx_tokens;
+            if !config_matches {
+                let _ = gs.child.kill();
+                let _ = gs.child.wait();
+                *guard = None;
+            }
+        }
+    }
+
     // Fast path: if child alive, update last_used and return
     {
         let mut guard = lock_global_sidecar();
@@ -86,7 +119,7 @@ pub fn get_or_spawn_port_with_ctx(
     }
 
     // Spawn new sidecar
-    let backend = detect_backend(uhoh_dir)?;
+    let backend = requested_backend;
     // Use OS-assigned ephemeral port to avoid TOCTOU race
     let (child, port) = {
         let mut last_err: Option<anyhow::Error> = None;
@@ -148,6 +181,9 @@ pub fn get_or_spawn_port_with_ctx(
             child,
             port,
             last_used: Instant::now(),
+            model_path: requested_model_path,
+            backend_key: requested_backend_key,
+            ctx_tokens,
         });
     }
 
@@ -249,9 +285,7 @@ fn detect_backend(uhoh_dir: &Path) -> Result<Backend> {
             .map(|s| s.success())
             .unwrap_or(false)
         {
-            return Ok(Backend::MlxLm {
-                python: mlx_python,
-            });
+            return Ok(Backend::MlxLm { python: mlx_python });
         }
     }
     // Fallback to llama-server shipped in ~/.uhoh/sidecar (no PATH)
@@ -303,18 +337,14 @@ fn spawn_backend(
                         "mlx-community/Qwen3.5-0.5B-Instruct-4bit".to_string()
                     }
                     s if s.contains("3b") => "mlx-community/Qwen3.5-3B-Instruct-4bit".to_string(),
-                    s if s.contains("7b") => {
-                        "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string()
-                    }
+                    s if s.contains("7b") => "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string(),
                     s if s.contains("9b") || s.contains("8b") => {
                         "mlx-community/Qwen3.5-8B-Instruct-4bit".to_string()
                     }
                     s if s.contains("35b") || s.contains("a3b") => {
                         "mlx-community/Qwen3.5-35B-A3B-4bit".to_string()
                     }
-                    s if s.contains("32b") => {
-                        "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string()
-                    }
+                    s if s.contains("32b") => "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string(),
                     _ => stem.to_string(),
                 }
             };

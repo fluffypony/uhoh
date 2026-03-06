@@ -209,9 +209,15 @@ impl Database {
     }
 
     fn conn(&self) -> DbConn {
-        self.pool
-            .get()
-            .expect("Database connection pool is unavailable")
+        loop {
+            match self.pool.get() {
+                Ok(conn) => return conn,
+                Err(err) => {
+                    tracing::error!("Database connection pool unavailable (retrying): {}", err);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
     }
 
     fn migrate(&self) -> Result<()> {
@@ -556,28 +562,27 @@ impl Database {
     /// Lookup a snapshot by its internal rowid
     pub fn get_snapshot_by_rowid(&self, rowid: i64) -> Result<Option<SnapshotRow>> {
         let conn = self.conn();
-        conn
-            .query_row(
-                "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
+        conn.query_row(
+            "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                         s.ai_summary,
                         s.file_count
                  FROM snapshots s WHERE s.rowid = ?1",
-                params![rowid],
-                |row| {
-                    Ok(SnapshotRow {
-                        rowid: row.get(0)?,
-                        snapshot_id: row.get::<_, i64>(1)? as u64,
-                        timestamp: row.get(2)?,
-                        trigger: row.get(3)?,
-                        message: row.get(4)?,
-                        pinned: row.get::<_, i32>(5)? != 0,
-                        ai_summary: row.get(6)?,
-                        file_count: row.get::<_, i64>(7)? as u64,
-                    })
-                },
-            )
-            .optional()
-            .context("Failed to query snapshot by rowid")
+            params![rowid],
+            |row| {
+                Ok(SnapshotRow {
+                    rowid: row.get(0)?,
+                    snapshot_id: row.get::<_, i64>(1)? as u64,
+                    timestamp: row.get(2)?,
+                    trigger: row.get(3)?,
+                    message: row.get(4)?,
+                    pinned: row.get::<_, i32>(5)? != 0,
+                    ai_summary: row.get(6)?,
+                    file_count: row.get::<_, i64>(7)? as u64,
+                })
+            },
+        )
+        .optional()
+        .context("Failed to query snapshot by rowid")
     }
 
     pub fn snapshot_count(&self, project_hash: &str) -> Result<u64> {

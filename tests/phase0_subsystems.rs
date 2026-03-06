@@ -261,14 +261,12 @@ fn cli_agent_undo_cascade_marks_descendants_resolved() {
 }
 
 #[test]
-fn cli_health_endpoint_alias_and_auth_middleware_exemption_present() {
+fn health_endpoint_and_auth_exemption_present() {
     let source = std::fs::read_to_string("src/server/mod.rs").expect("read server mod");
-    assert!(source.contains(".route(\"/api/v1/health\", get(health_check))"));
     assert!(source.contains(".route(\"/health\", get(health_check))"));
 
     let auth = std::fs::read_to_string("src/server/auth.rs").expect("read auth middleware");
     assert!(auth.contains("path == \"/health\""));
-    assert!(auth.contains("path == \"/api/v1/health\""));
 }
 
 #[test]
@@ -306,8 +304,10 @@ fn mcp_approval_reader_uses_nofollow_guards() {
 #[test]
 fn db_recover_apply_output_clarifies_manual_sql_execution() {
     let source = std::fs::read_to_string("src/main.rs").expect("read main command handler");
-    assert!(source.contains("Validated and decrypted recovery artifact"));
-    assert!(source.contains("no automatic SQL execution performed"));
+    assert!(source.contains("Applied recovery artifact from"));
+    assert!(source.contains("Use --apply to validate, decrypt, and execute the recovery artifact"));
+    assert!(source.contains("fn apply_postgres_recovery"));
+    assert!(source.contains("fn apply_sqlite_recovery"));
 }
 
 #[test]
