@@ -32,7 +32,19 @@ pub async fn run_session_tailers_async(
             };
 
             let entry = offsets.entry(agent.name.clone()).or_insert(0);
-            *entry = async_tail_one_file(ctx, agent, &session_path, *entry).await?;
+            match async_tail_one_file(ctx, agent, &session_path, *entry).await {
+                Ok(new_offset) => {
+                    *entry = new_offset;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "Agent log tailing error for {} at {}: {}",
+                        agent.name,
+                        session_path.display(),
+                        err
+                    );
+                }
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }

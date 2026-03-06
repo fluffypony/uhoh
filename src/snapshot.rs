@@ -129,8 +129,8 @@ pub fn create_snapshot(
                     let executable = cas::is_executable(&abs_path);
                     let is_symlink = meta.file_type().is_symlink();
                     if let Some(cached) = prev_files.get(rel_path) {
-                        let fs_mtime_ms = mtime_to_i64(mtime);
-                        let cached_mtime_ms = mtime_to_i64(cached.mtime);
+                        let fs_mtime_ms = mtime_to_millis(mtime);
+                        let cached_mtime_ms = mtime_to_millis(cached.mtime);
                         if cached.size == size && cached_mtime_ms == fs_mtime_ms {
                             files_for_manifest.push(crate::db::SnapFileEntry {
                                 path: rel_path.clone(),
@@ -157,7 +157,7 @@ pub fn create_snapshot(
                                     has_changes = true;
                                     new_files.push(rel_path.clone());
                                 }
-                                let mtime_i = mtime_to_i64(mtime);
+                                let mtime_i = mtime_to_millis(mtime);
                                 files_for_manifest.push(crate::db::SnapFileEntry {
                                     path: rel_path.clone(),
                                     hash: hash.clone(),
@@ -189,7 +189,7 @@ pub fn create_snapshot(
                                     size,
                                     stored: false,
                                     executable: false,
-                                    mtime: Some(mtime_to_i64(mtime)),
+                                    mtime: Some(mtime_to_millis(mtime)),
                                     storage_method: cas::StorageMethod::None.to_db(),
                                     is_symlink: true,
                                 });
@@ -215,7 +215,7 @@ pub fn create_snapshot(
                                     has_changes = true;
                                     new_files.push(rel_path.clone());
                                 }
-                                let mtime_i = mtime_to_i64(mtime);
+                                let mtime_i = mtime_to_millis(mtime);
                                 let stored = method.is_recoverable();
                                 files_for_manifest.push(crate::db::SnapFileEntry {
                                     path: rel_path.clone(),
@@ -241,7 +241,7 @@ pub fn create_snapshot(
                                     size,
                                     stored: false,
                                     executable,
-                                    mtime: Some(mtime_to_i64(mtime)),
+                                    mtime: Some(mtime_to_millis(mtime)),
                                     storage_method: cas::StorageMethod::None.to_db(),
                                     is_symlink: false,
                                 });
@@ -310,7 +310,7 @@ pub fn create_snapshot(
                 size: cached.size,
                 stored: cached.stored,
                 executable: cached.executable,
-                mtime: Some(mtime_to_i64(cached.mtime)),
+                mtime: Some(mtime_to_millis(cached.mtime)),
                 storage_method: cached.storage_method,
                 is_symlink: cached.is_symlink,
             });
@@ -385,8 +385,8 @@ pub fn create_snapshot(
             let executable = cas::is_executable(abs_path);
             let is_symlink = meta.file_type().is_symlink();
             if let Some(cached) = prev_files.get(rel_path) {
-                let fs_mtime_ms = mtime_to_i64(mtime);
-                let cached_mtime_ms = mtime_to_i64(cached.mtime);
+                let fs_mtime_ms = mtime_to_millis(mtime);
+                let cached_mtime_ms = mtime_to_millis(cached.mtime);
                 if cached.size == size && cached_mtime_ms == fs_mtime_ms {
                     files_for_manifest.push(crate::db::SnapFileEntry {
                         path: rel_path.clone(),
@@ -411,7 +411,7 @@ pub fn create_snapshot(
                             has_changes = true;
                             new_files.push(rel_path.clone());
                         }
-                        let mtime_i = mtime_to_i64(mtime);
+                        let mtime_i = mtime_to_millis(mtime);
                         files_for_manifest.push(crate::db::SnapFileEntry {
                             path: rel_path.clone(),
                             hash: hash.clone(),
@@ -442,7 +442,7 @@ pub fn create_snapshot(
                             size,
                             stored: false,
                             executable: false,
-                            mtime: Some(mtime_to_i64(mtime)),
+                            mtime: Some(mtime_to_millis(mtime)),
                             storage_method: cas::StorageMethod::None.to_db(),
                             is_symlink: true,
                         });
@@ -467,7 +467,7 @@ pub fn create_snapshot(
                             has_changes = true;
                             new_files.push(rel_path.clone());
                         }
-                        let mtime_i = mtime_to_i64(mtime);
+                        let mtime_i = mtime_to_millis(mtime);
                         let stored = method.is_recoverable();
                         files_for_manifest.push(crate::db::SnapFileEntry {
                             path: rel_path.clone(),
@@ -492,7 +492,7 @@ pub fn create_snapshot(
                             size,
                             stored: false,
                             executable,
-                            mtime: Some(mtime_to_i64(mtime)),
+                            mtime: Some(mtime_to_millis(mtime)),
                             storage_method: cas::StorageMethod::None.to_db(),
                             is_symlink: false,
                         });
@@ -829,7 +829,7 @@ fn append_diff_chunk(
     *truncated = true;
 }
 
-pub fn mtime_to_i64(t: SystemTime) -> i64 {
+pub fn mtime_to_millis(t: SystemTime) -> i64 {
     match t.duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_millis() as i64,
         Err(e) => {
@@ -844,13 +844,22 @@ pub fn mtime_to_i64(t: SystemTime) -> i64 {
     }
 }
 
-pub fn i64_to_mtime(secs: i64) -> SystemTime {
-    if secs >= 0 {
-        std::time::UNIX_EPOCH + std::time::Duration::from_millis(secs as u64)
+pub fn millis_to_mtime(millis: i64) -> SystemTime {
+    if millis >= 0 {
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis as u64)
     } else {
-        let abs_millis = (secs as i128).unsigned_abs().min(u64::MAX as u128) as u64;
+        let abs_millis = (millis as i128).unsigned_abs().min(u64::MAX as u128) as u64;
         std::time::UNIX_EPOCH - std::time::Duration::from_millis(abs_millis)
     }
+}
+
+// Backward-compatible aliases for older call sites and tests.
+pub fn mtime_to_i64(t: SystemTime) -> i64 {
+    mtime_to_millis(t)
+}
+
+pub fn i64_to_mtime(millis: i64) -> SystemTime {
+    millis_to_mtime(millis)
 }
 
 #[cfg(test)]
@@ -930,7 +939,7 @@ fn load_previous_snapshot_files(
                 CachedFileState {
                     hash: f.hash,
                     size: f.size,
-                    mtime: i64_to_mtime(f.mtime.unwrap_or(0)),
+                    mtime: millis_to_mtime(f.mtime.unwrap_or(0)),
                     stored: f.stored,
                     executable: f.executable,
                     storage_method: f.storage_method,
