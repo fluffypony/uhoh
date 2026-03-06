@@ -654,8 +654,24 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 was_restoring = currently_restoring;
 
                 if currently_restoring {
-                    tracing::debug!("Skipping watcher event during restore operation");
-                    continue;
+                    // Only drop events for the project being restored, not all projects
+                    let restoring_hash = read_restoring_project_hash(&uhoh_dir);
+                    let event_path = match &event {
+                        WatchEvent::FileChanged(p) | WatchEvent::FileDeleted(p) | WatchEvent::Rescan(p) => Some(p.clone()),
+                        _ => None,
+                    };
+                    let should_skip = if let (Some(ref rh), Some(ref ep)) = (&restoring_hash, &event_path) {
+                        project_states.iter().any(|(proj_path, state)| {
+                            state.hash == *rh && ep.starts_with(proj_path)
+                        })
+                    } else {
+                        // If we can't determine the project, skip all events (safe fallback)
+                        true
+                    };
+                    if should_skip {
+                        tracing::debug!("Skipping watcher event during restore operation");
+                        continue;
+                    }
                 }
                 match event {
                     WatchEvent::WatcherDied => {
@@ -929,6 +945,16 @@ fn restore_marker_active(uhoh_dir: &Path) -> bool {
     }
 
     true
+}
+
+/// Read the project_hash from the .restore-in-progress marker, if present.
+fn read_restoring_project_hash(uhoh_dir: &Path) -> Option<String> {
+    let marker_path = uhoh_dir.join(RESTORE_IN_PROGRESS_FILE);
+    let text = std::fs::read_to_string(&marker_path).ok()?;
+    text.lines()
+        .find(|l| l.starts_with("project_hash="))
+        .map(|l| l.trim_start_matches("project_hash=").trim().to_string())
+        .filter(|h| !h.is_empty())
 }
 
 fn handle_watch_event(

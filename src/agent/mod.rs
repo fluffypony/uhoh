@@ -24,6 +24,7 @@ pub struct AgentSubsystem {
     healthy: bool,
     fatal_error: Option<String>,
     intercept_started: bool,
+    intercept_agent_names: Vec<String>,
     fanotify_started: bool,
     proxy_started: bool,
     proxy_failures: u32,
@@ -41,6 +42,7 @@ impl AgentSubsystem {
             healthy: true,
             fatal_error: None,
             intercept_started: false,
+            intercept_agent_names: Vec::new(),
             fanotify_started: false,
             proxy_started: false,
             proxy_failures: 0,
@@ -240,10 +242,22 @@ impl AgentSubsystem {
 
     fn tick_agents(&mut self, ctx: &SubsystemContext, agents: &[AgentEntry]) -> Result<()> {
         if ctx.config.agent.intercept_enabled {
+            // Detect agent set changes and restart the tailer if needed
+            let current_names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
+            let agents_changed = self.intercept_started && current_names != self.intercept_agent_names;
+            if agents_changed {
+                // Cancel old tailer so it restarts with the updated agent list
+                if let Some(task) = self.intercept_task.take() {
+                    task.abort();
+                }
+                self.intercept_started = false;
+            }
+
             if !self.intercept_started {
                 // Clear fatal_error on successful restart to avoid permanent health degradation
                 self.fatal_error = None;
                 self.intercept_started = true;
+                self.intercept_agent_names = current_names;
                 let ctx_cl = ctx.clone();
                 let agents_cl = agents.to_vec();
                 self.intercept_task = Some(tokio::spawn(async move {

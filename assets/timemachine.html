@@ -1144,10 +1144,12 @@
     function connectWs() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const token = window.localStorage.getItem('uhoh_token') || '';
-      const wsUrl = token
-        ? `${proto}//${location.host}/ws?token=${encodeURIComponent(token)}`
-        : `${proto}//${location.host}/ws`;
-      const ws = new WebSocket(wsUrl);
+      const wsUrl = `${proto}//${location.host}/ws`;
+      // Send token via Sec-WebSocket-Protocol header instead of URL query
+      // to avoid credential leakage in browser history, server logs, and proxies.
+      const ws = token
+        ? new WebSocket(wsUrl, ['bearer', token])
+        : new WebSocket(wsUrl);
       ws.onopen = () => {
         state.wsConnected = true;
         wsRetryDelay = 1000;

@@ -260,11 +260,12 @@ pub enum AgentAction {
         cascade: Option<i64>,
     },
     Approve,
+    /// Deny (reject) pending dangerous agent actions
+    Deny,
     Resume,
     Setup,
     Test {
         name: String,
     },
     Init,
-    UpdateProfiles,
 }

@@ -1646,6 +1646,29 @@ fn handle_agent_commands(
                 println!("No pending agent actions found");
             }
         }
+        AgentAction::Deny => {
+            let runtime = uhoh::uhoh_dir().join("agents/runtime");
+            let mut denied_any = false;
+            if let Ok(entries) = std::fs::read_dir(&runtime) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let is_pending = path
+                        .file_name()
+                        .and_then(|v| v.to_str())
+                        .map(|v| v.ends_with(".pending.json"))
+                        .unwrap_or(false);
+                    if is_pending {
+                        let _ = std::fs::remove_file(&path);
+                        denied_any = true;
+                    }
+                }
+            }
+            if denied_any {
+                println!("Denied pending agent action(s)");
+            } else {
+                println!("No pending agent actions found to deny");
+            }
+        }
         AgentAction::Resume => {
             let runtime = uhoh::uhoh_dir().join("agents/runtime");
             // Approval logic is pure file I/O — works on all platforms.
@@ -1753,78 +1776,9 @@ tool_call_format = "jsonl"
                 );
             }
         }
-        AgentAction::UpdateProfiles => {
-            let profile_dir = uhoh::uhoh_dir().join("agents");
-            std::fs::create_dir_all(&profile_dir)?;
-            let default_profile = profile_dir.join("generic.toml");
-            if !default_profile.exists() {
-                anyhow::bail!("No base profile exists yet. Run `uhoh agent init` first.");
-            }
-
-            let template_profile: toml::Value =
-                toml::from_str(&std::fs::read_to_string(&default_profile)?)
-                    .context("Failed to parse generic profile")?;
-
-            let mut updated = 0usize;
-            let agents = database.list_agents()?;
-            for agent in agents {
-                if agent.profile_path == default_profile.to_string_lossy()
-                    || agent.profile_path.ends_with("/generic.toml")
-                    || agent.profile_path.ends_with("\\generic.toml")
-                {
-                    continue;
-                }
-                let profile_path = uhoh::util::expand_home(&agent.profile_path);
-                let profile_path = std::path::PathBuf::from(profile_path);
-                if !profile_path.exists() {
-                    continue;
-                }
-
-                let current = std::fs::read_to_string(&profile_path).with_context(|| {
-                    format!("Failed to read profile: {}", profile_path.display())
-                })?;
-                let parsed: toml::Value = toml::from_str(&current).with_context(|| {
-                    format!("Failed to parse profile: {}", profile_path.display())
-                })?;
-
-                let mut merged = template_profile.clone();
-                deep_merge_toml(&mut merged, &parsed);
-                if merged == parsed {
-                    continue;
-                }
-                let rendered = toml::to_string_pretty(&merged)?;
-                std::fs::write(&profile_path, rendered).with_context(|| {
-                    format!("Failed to write profile: {}", profile_path.display())
-                })?;
-                database.update_agent_profile_version(&agent.name, agent.profile_version + 1)?;
-                updated += 1;
-            }
-
-            println!(
-                "Updated {} agent profile(s) from template {}",
-                updated,
-                default_profile.display()
-            );
-        }
+        // AgentAction::UpdateProfiles removed — no longer needed pre-release
     }
     Ok(())
-}
-
-fn deep_merge_toml(base: &mut toml::Value, overlay: &toml::Value) {
-    match (base, overlay) {
-        (toml::Value::Table(base_tbl), toml::Value::Table(overlay_tbl)) => {
-            for (k, v) in overlay_tbl {
-                if let Some(existing) = base_tbl.get_mut(k) {
-                    deep_merge_toml(existing, v);
-                } else {
-                    base_tbl.insert(k.clone(), v.clone());
-                }
-            }
-        }
-        (base_leaf, overlay_leaf) => {
-            *base_leaf = overlay_leaf.clone();
-        }
-    }
 }
 
 fn extract_session_id(detail: &str) -> Option<String> {

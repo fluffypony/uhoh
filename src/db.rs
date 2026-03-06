@@ -30,6 +30,7 @@ impl CustomizeConnection<Connection, rusqlite::Error> for SqliteCustomizer {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+        conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
         Ok(())
     }
 }
@@ -1231,10 +1232,10 @@ impl Database {
         Ok(if v < 0 { 0 } else { v as u64 })
     }
 
-    /// Run VACUUM to reclaim free pages; should be scheduled during idle.
+    /// Run incremental vacuum to reclaim free pages without exclusive lock.
     pub fn vacuum(&self) -> Result<()> {
         let conn = self.conn();
-        conn.execute_batch("VACUUM;")?;
+        conn.execute_batch("PRAGMA incremental_vacuum(100);")?;
         Ok(())
     }
 
@@ -1688,14 +1689,6 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_agent_profile_version(&self, name: &str, profile_version: i64) -> Result<()> {
-        let conn = self.conn();
-        conn.execute(
-            "UPDATE agents SET profile_version = ?1 WHERE name = ?2",
-            params![profile_version, name],
-        )?;
-        Ok(())
-    }
 }
 
 // Type aliases to simplify complex tuple signatures used around snapshot creation

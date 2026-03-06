@@ -9,8 +9,8 @@ uhoh watches your project folders, takes content-addressable snapshots as files 
 ## Highlights
 
 - Fast, local snapshots with BLAKE3 and a deduplicated blob store
-- SQLite metadata with transactional snapshot creation and schema migrations
-- Tiered storage (reflink → hardlink → copy → none) to keep space under control
+- SQLite metadata with transactional snapshot creation and idempotent schema initialization
+- Tiered storage (reflink → copy → none) to keep space under control
 - Restore individual files or whole trees; see diffs and file history
 - Symlink-aware: stores and restores symlink targets (with Windows fallback)
 - Optional zstd compression for blobs (behind `compression` feature flag)
@@ -143,9 +143,8 @@ uhoh keeps two things in `~/.uhoh`:
 
 When a file changes, uhoh computes its BLAKE3 hash and tries to store it using a tiered strategy:
 1. Reflink (copy-on-write clone) if the filesystem supports it
-2. Hardlink as a fallback
-3. Full copy if under the configured size limit
-4. Otherwise record the hash only (not recoverable)
+2. Full copy if under the configured size limit
+3. Otherwise record the hash only (not recoverable)
 
 Symlinks are handled separately: uhoh stores the raw symlink target bytes in the blob store (not the file the symlink points to) and restores it as a proper symlink. On Windows, if symlink creation fails (common without Developer Mode or elevated privileges), the target path is written as a regular file instead.
 
@@ -173,7 +172,7 @@ When enabled, the daemon starts a unified localhost server (default `127.0.0.1:2
 | `/api/v1/search` | GET | Full-text search across snapshots (`?q=...&project=...`) |
 | `/ws` | GET | WebSocket live events |
 | `/mcp` | POST | MCP Streamable HTTP JSON-RPC endpoint |
-| `/health`, `/api/v1/health` | GET | Health check with subsystem status |
+| `/health` | GET | Health check with subsystem status |
 
 WebSocket events: `snapshot_created`, `snapshot_restored`, `ai_summary_completed`, `sidecar_updated`, `mlx_update_status`, `mlx_update_failed`, `db_guard_alert`, `agent_alert`, `project_added`, `project_removed`.
 
@@ -196,7 +195,7 @@ The STDIO transport reads JSON-RPC lines from stdin and writes responses to stdo
 
 uhoh includes two subsystem-style safety layers that feed a shared `event_ledger` table.
 
-**Database guardian** focuses on high-risk events, not full auditing. PostgreSQL guard mode installs trigger-based monitoring and periodic baseline snapshots. SQLite guard mode tracks `PRAGMA data_version` changes and emits recovery references when state shifts. MySQL support is currently phase-1 schema polling (queries `information_schema.tables` via the `mysql` CLI for table counts and row estimates).
+**Database guardian** focuses on high-risk events, not full auditing. PostgreSQL guard mode installs trigger-based monitoring and periodic baseline snapshots. SQLite guard mode tracks `PRAGMA data_version` changes and emits recovery references when state shifts. MySQL support is experimental (basic schema polling via the `mysql` CLI for table counts and row estimates).
 
 **Agent monitor** combines MCP proxy interception with fallback session-log tailing. If your agent talks MCP through uhoh, calls are classified before they execute. When a call matches dangerous patterns and pause mode is enabled, uhoh records a pending approval and waits for `uhoh agent approve` or timeout.
 
@@ -224,7 +223,7 @@ All events land in the unified ledger so you can inspect one timeline instead of
 ## Commands you'll use most
 
 1. `uhoh add [path]` registers a project and creates the first snapshot. A small binary marker file (magic header + 32 random bytes) is written to the project so folder moves can be detected. In git repos it goes into `.git/.uhoh`; in git worktrees (where `.git` is a file pointing to the real git dir) it follows the gitdir path. Non-git projects get `.uhoh` in the project root.
-2. `uhoh snapshots` shows the timeline. For each snapshot, you'll see per-file size and storage method: `reflink`, `hardlink`, `copy`, or `none`.
+2. `uhoh snapshots` shows the timeline. For each snapshot, you'll see per-file size and storage method: `reflink`, `copy`, or `none`.
 3. `uhoh diff` shows changes between snapshots (or snapshot vs working tree). Output is unified diff with syntax highlighting via syntect. Files larger than 2 MiB are skipped.
 4. `uhoh restore <id>` resets your working tree to a snapshot. Before any destructive changes, uhoh takes a pre-restore snapshot. Files are first written to a temporary staging directory, then moved into place. On Unix, executable bits are preserved and symlinks are restored. Use `--dry-run` to preview changes without touching files, or `--force` to skip the confirmation prompt when deleting more than 10 files. Concurrent restores to the same project are blocked.
 5. `uhoh mark / uhoh undo` gives you grouped undo for larger agent runs. Starting a new mark automatically closes any previously active operation. `uhoh undo` closes the current operation (if still active), finds the most recent completed operation, and restores to the snapshot just before it started.
@@ -264,7 +263,7 @@ Some settings are hot-reloaded by the daemon on its periodic tick without a rest
 
 ### Storage settings
 
-- `storage.max_copy_blob_bytes` (default 50 MB): maximum file size for a full copy into the blob store when reflink/hardlink aren't available. Restart required.
+- `storage.max_copy_blob_bytes` (default 50 MB): maximum file size for a full copy into the blob store when reflink isn't available. Restart required.
 - `storage.max_binary_blob_bytes` (default 1 MB): size cap for binary files specifically. Larger binaries get their hash recorded but content is not stored. Restart required.
 - `storage.max_text_blob_bytes` (default 50 MB): size cap for text files. Restart required.
 - `storage.storage_limit_fraction` (default 0.15): per-project blob storage limit as a fraction of the watched folder's total file size. When exceeded, the oldest unpinned snapshots are pruned. Restart required.
@@ -371,7 +370,7 @@ Database guardian is built for high-signal mistakes: dropped objects and large d
 
 ### What it watches
 
-For PostgreSQL, `uhoh db add postgres://...` installs `_uhoh_ddl_events` and `_uhoh_delete_counts` objects plus trigger plumbing so the daemon can detect dangerous operations quickly. In trigger mode (the default), per-table delete counters are incremented by row-level triggers and polled on each tick. A persistent LISTEN worker also subscribes to `uhoh_events` for near-real-time DDL notifications.
+For PostgreSQL, `uhoh db add postgres://...` installs `_uhoh_ddl_events` and `_uhoh_delete_counts` objects plus trigger plumbing so the daemon can detect dangerous operations quickly. In trigger mode (the default), per-table delete counters are incremented by row-level triggers and polled on each tick. A polling-based DDL event worker periodically queries `_uhoh_ddl_events` for near-real-time DDL detection.
 
 For SQLite, the guard tracks `PRAGMA data_version`, records change events, and rotates baseline/recovery artifacts under `~/.uhoh/db_guard/<guard-name>/`.
 
@@ -460,7 +459,7 @@ Every file in a snapshot records a `storage_method`:
 
 Binary and text files have separate size caps: `storage.max_binary_blob_bytes` (1 MB by default) and `storage.max_text_blob_bytes` (50 MB). Binary detection uses the first 8 KB of the file. The effective limit for any given file is the minimum of its type-specific cap and `storage.max_copy_blob_bytes`.
 
-You'll see the method in `uhoh snapshots`. `uhoh restore` only restores files with recoverable storage (`reflink`, `hardlink`, `copy`). Unstored files are listed with a warning.
+You'll see the method in `uhoh snapshots`. `uhoh restore` only restores files with recoverable storage (`reflink`, `copy`). Unstored files are listed with a warning.
 
 When blob storage for a project exceeds its limit (computed from `storage_limit_fraction` × project size, floored at `storage_min_bytes`), uhoh prunes the oldest unpinned snapshots until it's back under the cap. Actual blob deletion happens during the next GC pass.
 
@@ -600,7 +599,7 @@ On macOS this creates a launchd agent (`~/Library/LaunchAgents/com.uhoh.daemon.p
 
 ## Why SQLite and a blob store
 
-Atomic snapshots, fast lookups, and safe recovery. SQLite gives us transactional inserts and an easy way to answer "what changed" without parsing files on disk. Blobs live in the filesystem so we can use reflink/hardlink and avoid copying bytes when we don't have to.
+Atomic snapshots, fast lookups, and safe recovery. SQLite gives us transactional inserts and an easy way to answer "what changed" without parsing files on disk. Blobs live in the filesystem so we can use reflink and avoid copying bytes when we don't have to.
 
 The database runs in WAL mode for concurrent readers, uses a 5-second busy timeout, and has foreign keys enabled with cascading deletes (removing a project cleans up all its snapshots and file entries). The daemon periodically backs up the database and can VACUUM after large compaction runs to reclaim free pages.
 
