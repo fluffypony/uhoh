@@ -558,6 +558,7 @@
       files: [],
       selectedPath: null,
       pendingRestore: null,
+      wsConnected: false,
     };
 
     const TOKEN_HELP_TEXT = navigator.userAgent.includes('Windows')
@@ -691,6 +692,7 @@
       state.projects = data.projects || [];
       const select = document.getElementById('projectSelect');
       select.innerHTML = '';
+      select.disabled = state.projects.length === 0;
       state.projects.forEach((project, index) => {
         const opt = document.createElement('option');
         opt.value = project.project_hash;
@@ -702,9 +704,16 @@
         state.project = state.projects[0];
         await loadSnapshots();
       } else {
+        state.project = null;
+        state.snapshot = null;
+        state.previous = null;
+        state.files = [];
+        state.selectedPath = null;
         const content = document.getElementById('content');
         content.className = 'empty-state';
         content.textContent = 'No projects found';
+        renderTree([]);
+        renderTimeline();
       }
       setStatus('Ready', 'ok');
     }
@@ -1040,14 +1049,19 @@
         return;
       }
       setStatus('Running dry run');
-      const dryRun = await withAuth(() => api(`${API}/projects/${state.project.project_hash}/restore/${state.snapshot.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dry_run: true }),
-      }));
-      state.pendingRestore = state.snapshot.id;
-      showDryRun(dryRun);
-      setStatus('Dry run ready', 'ok');
+      try {
+        const dryRun = await withAuth(() => api(`${API}/projects/${state.project.project_hash}/restore/${state.snapshot.id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dry_run: true }),
+        }));
+        state.pendingRestore = state.snapshot.id;
+        showDryRun(dryRun);
+        setStatus('Dry run ready', 'ok');
+      } catch (e) {
+        hideDryRun();
+        setStatus('Dry run failed: ' + e.message, 'danger');
+      }
     }
 
     async function confirmRestore() {
@@ -1080,7 +1094,13 @@
       }
       if (query.startsWith('#')) {
         const q = query.slice(1);
-        const data = await withAuth(() => api(`${API}/search?q=${encodeURIComponent(q)}&project=${state.project.project_hash}`));
+        let data;
+        try {
+          data = await withAuth(() => api(`${API}/search?q=${encodeURIComponent(q)}&project=${state.project.project_hash}`));
+        } catch (e) {
+          setStatus('Search failed: ' + e.message, 'danger');
+          return;
+        }
         const tree = document.getElementById('tree');
         tree.innerHTML = '';
         (data.results || []).forEach((result) => {
@@ -1128,7 +1148,11 @@
         ? `${proto}//${location.host}/ws?token=${encodeURIComponent(token)}`
         : `${proto}//${location.host}/ws`;
       const ws = new WebSocket(wsUrl);
-      ws.onopen = () => { wsRetryDelay = 1000; };
+      ws.onopen = () => {
+        state.wsConnected = true;
+        wsRetryDelay = 1000;
+        setStatus('Live connected', 'ok');
+      };
       ws.onmessage = async (event) => {
         let data;
         try {
@@ -1136,7 +1160,10 @@
         } catch (_) {
           return;
         }
-        const isCurrentProject = state.project && data.project_hash === state.project.project_hash;
+        if (!state.project) {
+          return;
+        }
+        const isCurrentProject = data.project_hash === state.project.project_hash;
         switch (data.type) {
           case 'snapshot_created':
             if (isCurrentProject) {
@@ -1168,11 +1195,15 @@
         }
       };
       ws.onclose = () => {
+        state.wsConnected = false;
         setStatus('Reconnecting...', 'muted');
         wsRetryDelay = Math.min(wsRetryDelay * 2, 60000);
         setTimeout(connectWs, wsRetryDelay);
       };
-      ws.onerror = () => {};
+      ws.onerror = () => {
+        state.wsConnected = false;
+        setStatus('Connection error', 'danger');
+      };
     }
 
     function escapeHtml(text) {

@@ -262,6 +262,15 @@ pub fn spawn_detached_daemon() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        let log_path = crate::uhoh_dir().join("daemon.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("Failed to open daemon log: {}", log_path.display()))?;
+        let err_file = log_file.try_clone().with_context(|| {
+            format!("Failed to clone daemon log handle: {}", log_path.display())
+        })?;
         let mut cmd = std::process::Command::new(&exe);
         cmd.args(["start", "--service"]);
         // Detach from controlling terminal
@@ -273,8 +282,8 @@ pub fn spawn_detached_daemon() -> Result<()> {
                 Ok(())
             });
         }
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+        cmd.stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(err_file))
             .stdin(std::process::Stdio::null());
         cmd.spawn().context("Failed to spawn daemon")?;
     }
@@ -320,6 +329,17 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
         libc::kill(pid as i32, libc::SIGTERM);
     }
 
+    #[cfg(unix)]
+    {
+        // Wait briefly for clean shutdown before removing the PID file.
+        for _ in 0..50 {
+            if !crate::platform::is_uhoh_process_alive_with_start(pid, expected_start) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     #[cfg(windows)]
     {
         // Try graceful termination first
@@ -355,8 +375,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let (server_event_tx, _) = broadcast::channel::<crate::server::events::ServerEvent>(4096);
     let restore_in_progress = Arc::new(AtomicBool::new(false));
 
-    let event_ledger = EventLedger::new(database.clone())
-        .with_server_event_tx(server_event_tx.clone());
+    let event_ledger =
+        EventLedger::new(database.clone()).with_server_event_tx(server_event_tx.clone());
     let mut subsystem_manager_inner = SubsystemManager::new(5, Duration::from_secs(600));
     subsystem_manager_inner.register(Box::new(crate::db_guard::DbGuardSubsystem::new()));
     subsystem_manager_inner.register(Box::new(crate::agent::AgentSubsystem::new()));
@@ -879,7 +899,10 @@ fn restore_marker_active(uhoh_dir: &Path) -> bool {
             return false;
         }
     } else {
-        tracing::warn!("Removing unreadable restore marker: {}", marker_path.display());
+        tracing::warn!(
+            "Removing unreadable restore marker: {}",
+            marker_path.display()
+        );
         let _ = std::fs::remove_file(&marker_path);
         return false;
     }
@@ -926,21 +949,28 @@ fn handle_watch_event(
     }
 
     // Find which project this path belongs to (longest prefix match for nested projects)
-    let best_key = states.keys()
+    let best_key = states
+        .keys()
         .filter(|pp| path.starts_with(pp.as_str()))
         .max_by_key(|pp| pp.len())
         .cloned();
-    let Some(project_path_key) = best_key else { return };
-    let Some(state) = states.get_mut(&project_path_key) else { return };
+    let Some(project_path_key) = best_key else {
+        return;
+    };
+    let Some(state) = states.get_mut(&project_path_key) else {
+        return;
+    };
     let project_path = project_path_key.as_str();
 
     // Apply ignore rules to targeted file events
     if let Ok(rel) = path.strip_prefix(project_path) {
         let rel_str = rel.to_string_lossy();
         // Skip .git internals and .uhoh directory
-        if rel_str.starts_with(".git/") || rel_str.starts_with(".git\\")
+        if rel_str.starts_with(".git/")
+            || rel_str.starts_with(".git\\")
             || rel_str == ".git"
-            || rel_str.starts_with(".uhoh/") || rel_str.starts_with(".uhoh\\")
+            || rel_str.starts_with(".uhoh/")
+            || rel_str.starts_with(".uhoh\\")
             || rel_str == ".uhoh"
         {
             return;
@@ -961,9 +991,7 @@ fn handle_watch_event(
                 if manifest.contains(&rel_path) {
                     state.deleted_paths.insert(path.clone());
                 } else {
-                    let expanded = crate::emergency::expand_directory_deletion(
-                        &rel_path, manifest,
-                    );
+                    let expanded = crate::emergency::expand_directory_deletion(&rel_path, manifest);
                     for exp_rel in expanded {
                         if state.deleted_paths.len() >= MAX_DELETED_PATHS {
                             break;
@@ -1109,10 +1137,10 @@ async fn process_pending_snapshots(
     let concurrency = std::cmp::max(1, (logical / 2).max(1));
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
     let mut join: tokio::task::JoinSet<(
-        String,           // project_path key
-        Vec<PathBuf>,     // drained changes for requeue
+        String,       // project_path key
+        Vec<PathBuf>, // drained changes for requeue
         anyhow::Result<Option<SnapshotResult>>,
-        bool,             // was_emergency_spawn: true if dispatched as emergency
+        bool, // was_emergency_spawn: true if dispatched as emergency
     )> = tokio::task::JoinSet::new();
 
     // Collect emergency snapshots to spawn (we can't borrow states mutably while iterating)
@@ -1185,14 +1213,9 @@ async fn process_pending_snapshots(
                     );
 
                     // Pin the predecessor snapshot (pre-deletion state)
-                    if let Ok(Some(prev_rowid)) =
-                        database.latest_snapshot_rowid(&state.hash)
-                    {
+                    if let Ok(Some(prev_rowid)) = database.latest_snapshot_rowid(&state.hash) {
                         if let Err(e) = database.pin_snapshot(prev_rowid, true) {
-                            tracing::error!(
-                                "Failed to pin predecessor snapshot: {}",
-                                e
-                            );
+                            tracing::error!("Failed to pin predecessor snapshot: {}", e);
                         } else {
                             tracing::info!(
                                 "Pinned predecessor snapshot (rowid={}) for recovery",
@@ -1211,11 +1234,8 @@ async fn process_pending_snapshots(
                         "cooldown_suppressed": false,
                         "deleted_paths_sample": deleted_paths_sample,
                     });
-                    let mut ledger_event = crate::event_ledger::new_event(
-                        "fs",
-                        "emergency_delete_detected",
-                        severity,
-                    );
+                    let mut ledger_event =
+                        crate::event_ledger::new_event("fs", "emergency_delete_detected", severity);
                     ledger_event.project_hash = Some(state.hash.clone());
                     ledger_event.detail = Some(detail.to_string());
                     let _ = event_ledger.append(ledger_event);
@@ -1235,8 +1255,7 @@ async fn process_pending_snapshots(
                     );
 
                     // Drain pending changes for requeue on failure
-                    let drained: Vec<PathBuf> =
-                        state.pending_changes.drain().collect();
+                    let drained: Vec<PathBuf> = state.pending_changes.drain().collect();
                     state.deleted_paths.clear();
                     state.first_change_at = None;
                     state.last_change_at = None;
@@ -1279,11 +1298,8 @@ async fn process_pending_snapshots(
                         "cooldown_suppressed": true,
                         "cooldown_remaining_secs": cooldown_remaining_secs,
                     });
-                    let mut ledger_event = crate::event_ledger::new_event(
-                        "fs",
-                        "emergency_delete_detected",
-                        "info",
-                    );
+                    let mut ledger_event =
+                        crate::event_ledger::new_event("fs", "emergency_delete_detected", "info");
                     ledger_event.project_hash = Some(state.hash.clone());
                     ledger_event.detail = Some(detail.to_string());
                     let _ = event_ledger.append(ledger_event);
@@ -1463,7 +1479,12 @@ async fn process_pending_snapshots(
 
     while let Some(result) = join.join_next().await {
         match result {
-            Ok((project_path, _drained, Ok(Some(SnapshotResult::Created(id))), was_emergency_spawn)) => {
+            Ok((
+                project_path,
+                _drained,
+                Ok(Some(SnapshotResult::Created(id))),
+                was_emergency_spawn,
+            )) => {
                 if let Some(state) = states.get_mut(&project_path) {
                     state.last_snapshot = Instant::now();
                     // Set emergency cooldown on successful emergency snapshot
@@ -1479,10 +1500,8 @@ async fn process_pending_snapshots(
                             if row.trigger == "emergency" && !was_emergency_spawn {
                                 state.last_emergency_at = Some(Instant::now());
 
-                                let predecessor = database
-                                    .snapshot_before(&state.hash, id)
-                                    .ok()
-                                    .flatten();
+                                let predecessor =
+                                    database.snapshot_before(&state.hash, id).ok().flatten();
 
                                 // Pin predecessor for recovery (the snapshot before this one)
                                 if let Some(pred) = predecessor.as_ref() {
@@ -1502,9 +1521,12 @@ async fn process_pending_snapshots(
                                         let (d, _, _) = parse_emergency_message(&row.message);
                                         d
                                     });
-                                let baseline_from_predecessor = predecessor.as_ref().map(|p| p.file_count);
-                                let baseline_from_row = row.file_count.saturating_add(del_count as u64);
-                                let bl_count = baseline_from_predecessor.unwrap_or(baseline_from_row);
+                                let baseline_from_predecessor =
+                                    predecessor.as_ref().map(|p| p.file_count);
+                                let baseline_from_row =
+                                    row.file_count.saturating_add(del_count as u64);
+                                let bl_count =
+                                    baseline_from_predecessor.unwrap_or(baseline_from_row);
                                 let ratio = crate::emergency::deletion_ratio(del_count, bl_count);
                                 let _ = event_tx.send(
                                     crate::server::events::ServerEvent::EmergencyDeleteDetected {
@@ -1557,9 +1579,8 @@ async fn process_pending_snapshots(
 
                         // Refresh cached manifest from the new snapshot
                         if let Ok(files) = database.get_snapshot_files(rowid) {
-                            state.cached_prev_manifest = Some(
-                                files.iter().map(|f| f.path.clone()).collect(),
-                            );
+                            state.cached_prev_manifest =
+                                Some(files.iter().map(|f| f.path.clone()).collect());
                         }
                         if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
                             state.cached_prev_file_count = Some(row.file_count);
@@ -1858,7 +1879,7 @@ fn check_moved_folders(
             *count = count.saturating_add(1);
             // Exponential backoff with cap: scan every ~20 ticks (10 min at 30s intervals)
             let max_backoff = 20u32;
-            if *count > 32 && (*count % max_backoff) != 0 {
+            if *count > 20 && (*count % max_backoff) != 0 {
                 continue;
             }
 

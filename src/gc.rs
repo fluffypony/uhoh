@@ -8,6 +8,12 @@ use crate::db::Database;
 /// Applies a grace period: blobs younger than 10 minutes are never deleted
 /// (prevents race with in-progress snapshot creation).
 pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
+    // Coordinate with restore: skip GC while restore is actively rewriting files.
+    if uhoh_dir.join(".restore-in-progress").exists() {
+        tracing::info!("Skipping GC while restore is in progress");
+        return Ok(());
+    }
+
     let blob_root = uhoh_dir.join("blobs");
 
     // Clean up stale temp files first (unified with cas::cleanup_stale_temp_files)

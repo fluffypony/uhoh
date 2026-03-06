@@ -840,10 +840,13 @@ impl Database {
         let conn = self.conn();
 
         // Conservative query normalization for FTS5 parser safety.
-        // Strip all FTS5 special characters to prevent syntax errors.
+        // Strip operator/syntax characters and collapse to plain terms.
         let safe = query
             .replace(
-                ['"', '*', ':', '(', ')', '+', '-', '^', '{', '}', '\\', '\''],
+                [
+                    '"', '*', ':', '(', ')', '+', '-', '^', '{', '}', '[', ']', '\\', '\'', '|',
+                    '&', '!', '<', '>', '~', '$', '#', '@', ';',
+                ],
                 " ",
             )
             .split_whitespace()
@@ -854,7 +857,14 @@ impl Database {
             return Ok(Vec::new());
         }
 
-        let fts_query = format!("\"{safe}\"*");
+        let terms = safe
+            .split_whitespace()
+            .map(|t| format!("{}*", t))
+            .collect::<Vec<_>>();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fts_query = terms.join(" ");
         let mut out = Vec::new();
 
         if let Some(ph) = project_hash {

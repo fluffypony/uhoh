@@ -1895,6 +1895,29 @@ fn table_name_matches(candidate: &str, table: &str) -> bool {
     false
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{json_contains_table_name, table_name_matches};
+
+    #[test]
+    fn table_match_supports_schema_and_case() {
+        assert!(table_name_matches("public.Users", "users"));
+        assert!(table_name_matches("users", "users"));
+        assert!(!table_name_matches("orders", "users"));
+    }
+
+    #[test]
+    fn json_table_match_recurses_nested_objects() {
+        let detail = serde_json::json!({
+            "payload": {
+                "relation": "public.orders"
+            }
+        });
+        assert!(json_contains_table_name(&detail, "orders"));
+        assert!(!json_contains_table_name(&detail, "users"));
+    }
+}
+
 fn extract_detail_field(detail: &str, key: &str) -> Option<String> {
     if !detail.trim_start().starts_with('{') {
         return None;

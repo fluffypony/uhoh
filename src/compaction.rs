@@ -11,7 +11,10 @@ pub fn compact_project(
     project_hash: &str,
     config: &CompactionConfig,
 ) -> Result<u64> {
-    let snapshots = database.list_snapshots(project_hash)?;
+    let mut snapshots = database.list_snapshots(project_hash)?;
+    // Guard against timestamp clock skew by making retention winner selection
+    // deterministic on monotonic snapshot_id.
+    snapshots.sort_by(|a, b| b.snapshot_id.cmp(&a.snapshot_id));
     let now = Utc::now();
     let mut freed_bytes = 0u64;
     let emergency_retention = Duration::hours(config.emergency_expire_hours as i64);
@@ -25,7 +28,8 @@ pub fn compact_project(
     // Predecessor protection: protect the snapshot immediately preceding any
     // retained emergency snapshot. This ensures the pre-deletion state survives
     // as long as the emergency snapshot does.
-    let mut protected_predecessors: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut protected_predecessors: std::collections::HashSet<i64> =
+        std::collections::HashSet::new();
 
     // First pass: identify protected predecessors.
     for snapshot in &snapshots {
@@ -35,8 +39,7 @@ pub fn compact_project(
             let age = now.signed_duration_since(ts);
             if age < emergency_retention {
                 // Emergency still within retention: protect its predecessor
-                if let Ok(Some(pred)) =
-                    database.snapshot_before(project_hash, snapshot.snapshot_id)
+                if let Ok(Some(pred)) = database.snapshot_before(project_hash, snapshot.snapshot_id)
                 {
                     protected_predecessors.insert(pred.rowid);
                 }
@@ -152,7 +155,6 @@ pub fn compact_project(
 
     Ok(freed_bytes)
 }
-
 fn register_in_buckets(
     snapshot: &SnapshotRow,
     _now: &DateTime<Utc>,

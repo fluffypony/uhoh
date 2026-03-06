@@ -14,46 +14,45 @@ use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
 
 /// Build a connection string with resolved credentials injected.
-fn url_encode_param(s: &str) -> String {
-    // Percent-encode characters that are problematic in URL query parameters
-    s.replace('%', "%25")
-        .replace('&', "%26")
-        .replace('=', "%3D")
-        .replace('+', "%2B")
-        .replace('#', "%23")
-        .replace(' ', "%20")
-        .replace('?', "%3F")
-        .replace('@', "%40")
-}
-
 fn build_connect_dsn(connection_ref: &str) -> Result<String> {
     let creds = credentials::resolve_postgres_credentials(connection_ref)?;
-    let is_url = connection_ref.starts_with("postgres://")
-        || connection_ref.starts_with("postgresql://");
+    if connection_ref.starts_with("postgres://") || connection_ref.starts_with("postgresql://") {
+        let mut url = url::Url::parse(connection_ref)
+            .with_context(|| format!("Invalid Postgres connection reference: {connection_ref}"))?;
 
-    let mut dsn = connection_ref.to_string();
-    if let Some(ref pw) = creds.password {
-        if !dsn.contains("password=") && !dsn.contains("password%3D") {
-            if is_url {
-                // URL-form: use query parameter syntax with proper encoding
-                let sep = if dsn.contains('?') { "&" } else { "?" };
-                dsn.push_str(&format!("{}password={}", sep, url_encode_param(pw)));
-            } else {
-                dsn.push_str(&format!(" password={pw}"));
-            }
+        if let Some(ref user) = creds.username {
+            let _ = url.set_username(user);
         }
+        if let Some(ref pw) = creds.password {
+            let _ = url.set_password(Some(pw));
+        }
+
+        return Ok(url.to_string());
     }
+
+    let mut parts: Vec<String> = connection_ref
+        .split_whitespace()
+        .map(|p| p.to_string())
+        .collect();
+    let has_user = parts.iter().any(|p| {
+        p.split_once('=')
+            .is_some_and(|(k, _)| k.eq_ignore_ascii_case("user"))
+    });
+    let has_password = parts.iter().any(|p| {
+        p.split_once('=')
+            .is_some_and(|(k, _)| k.eq_ignore_ascii_case("password"))
+    });
     if let Some(ref user) = creds.username {
-        if !dsn.contains("user=") && !dsn.contains("user%3D") {
-            if is_url {
-                let sep = if dsn.contains('?') { "&" } else { "?" };
-                dsn.push_str(&format!("{}user={}", sep, url_encode_param(user)));
-            } else {
-                dsn.push_str(&format!(" user={user}"));
-            }
+        if !has_user {
+            parts.push(format!("user={user}"));
         }
     }
-    Ok(dsn)
+    if let Some(ref pw) = creds.password {
+        if !has_password {
+            parts.push(format!("password={pw}"));
+        }
+    }
+    Ok(parts.join(" "))
 }
 
 static PG_DDL_CURSOR: Lazy<Mutex<HashMap<String, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
@@ -92,6 +91,7 @@ pub fn tick_postgres_guard(
             &guard.connection_ref,
             &creds,
             ctx.config.db_guard.recovery_retention_days,
+            ctx.config.db_guard.max_baseline_size_mb,
         ) {
             let ts = chrono::Utc::now().to_rfc3339();
             let _ = ctx.database.set_db_guard_baseline_time(&guard.name, &ts);
@@ -105,9 +105,24 @@ pub fn tick_postgres_guard(
     }
 
     // Lightweight delete-counter polling (use resolved credentials).
-    let poll_dsn = build_connect_dsn(&guard.connection_ref).unwrap_or_else(|_| guard.connection_ref.clone());
+    // TLS is not wired yet in this guard; fail closed for explicitly TLS-required DSNs.
+    if connection_requires_tls(&guard.connection_ref) {
+        tracing::warn!(
+            "postgres guard '{}' configured with sslmode=require/verify-*, but this build only supports NoTls; skipping tick",
+            guard.name
+        );
+        return Ok(());
+    }
+    let poll_dsn =
+        build_connect_dsn(&guard.connection_ref).unwrap_or_else(|_| guard.connection_ref.clone());
     let poll_window_secs = tick_interval_secs.saturating_mul(2).max(1);
     if let Ok(deleted_rows) = poll_delete_count(&poll_dsn, poll_window_secs) {
+        let total_rows = poll_total_row_count(&poll_dsn).unwrap_or(0);
+        let pct = if total_rows > 0 {
+            deleted_rows as f64 / total_rows as f64
+        } else {
+            0.0
+        };
         if deleted_rows >= ctx.config.db_guard.mass_delete_row_threshold as i64 {
             let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
             if let Ok(artifact) = recovery::write_postgres_schema_recovery(
@@ -118,9 +133,47 @@ pub fn tick_postgres_guard(
                 "mass_delete",
                 ctx.config.db_guard.encrypt_recovery,
                 ctx.config.db_guard.recovery_retention_days,
+                ctx.config.db_guard.max_recovery_file_mb,
             ) {
                 let detail = serde_json::json!({
                     "deleted_rows": deleted_rows,
+                    "artifact": artifact.path,
+                    "blake3": artifact.blake3,
+                })
+                .to_string();
+                if let Err(err) = ctx.event_ledger.append(NewEventLedgerEntry {
+                    source: "db_guard".to_string(),
+                    event_type: "mass_delete".to_string(),
+                    severity: "critical".to_string(),
+                    project_hash: None,
+                    agent_name: None,
+                    guard_name: Some(guard.name.clone()),
+                    path: None,
+                    detail: Some(detail),
+                    pre_state_ref: Some(artifact.blake3),
+                    post_state_ref: None,
+                    prev_hash: None,
+                    causal_parent: None,
+                }) {
+                    tracing::error!("failed to append mass_delete event: {err}");
+                }
+            }
+        } else if pct >= ctx.config.db_guard.mass_delete_pct_threshold {
+            let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
+            if let Ok(artifact) = recovery::write_postgres_schema_recovery(
+                &ctx.uhoh_dir,
+                &guard.name,
+                &guard.connection_ref,
+                &creds,
+                "mass_delete_pct",
+                ctx.config.db_guard.encrypt_recovery,
+                ctx.config.db_guard.recovery_retention_days,
+                ctx.config.db_guard.max_recovery_file_mb,
+            ) {
+                let detail = serde_json::json!({
+                    "deleted_rows": deleted_rows,
+                    "total_rows": total_rows,
+                    "deleted_ratio": pct,
                     "artifact": artifact.path,
                     "blake3": artifact.blake3,
                 })
@@ -161,6 +214,7 @@ pub fn tick_postgres_guard(
                 "ddl",
                 ctx.config.db_guard.encrypt_recovery,
                 ctx.config.db_guard.recovery_retention_days,
+                ctx.config.db_guard.max_recovery_file_mb,
             ) {
                 let detail = serde_json::json!({
                     "notify_payload": payload,
@@ -269,6 +323,14 @@ fn poll_delete_count(connection_ref: &str, window_seconds: i64) -> Result<i64> {
         tokio::spawn(async move {
             let _ = connection.await;
         });
+        // Keep helper table bounded to avoid unbounded growth in monitored DBs.
+        let _ = client
+            .execute(
+                "DELETE FROM _uhoh_delete_counts
+                 WHERE ts < now() - interval '24 hours'",
+                &[],
+            )
+            .await;
         let row = match client
             .query_one(
                 "SELECT COALESCE(SUM(delete_count), 0)
@@ -292,6 +354,31 @@ fn poll_delete_count(connection_ref: &str, window_seconds: i64) -> Result<i64> {
     })
 }
 
+fn poll_total_row_count(connection_ref: &str) -> Result<i64> {
+    run_postgres_task(async move {
+        let (client, connection) = tokio_postgres::connect(connection_ref, NoTls)
+            .await
+            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let rows = client
+            .query(
+                "SELECT COALESCE(SUM(TABLE_ROWS::bigint), 0)
+                 FROM information_schema.tables
+                 WHERE table_schema = current_schema()
+                   AND TABLE_TYPE = 'BASE TABLE'",
+                &[],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+
+        let total = rows.first().map(|r| r.get::<_, i64>(0)).unwrap_or(0).max(0);
+        Ok(total)
+    })
+}
+
 fn poll_ddl_events(connection_ref: &str, max_rows: i64) -> Result<Vec<String>> {
     let last_seen_id = {
         let cache = PG_DDL_CURSOR
@@ -308,6 +395,15 @@ fn poll_ddl_events(connection_ref: &str, max_rows: i64) -> Result<Vec<String>> {
         tokio::spawn(async move {
             let _ = connection.await;
         });
+
+        // Keep helper table bounded to avoid unbounded growth in monitored DBs.
+        let _ = client
+            .execute(
+                "DELETE FROM _uhoh_ddl_events
+                 WHERE ts < now() - interval '24 hours'",
+                &[],
+            )
+            .await;
 
         let rows = client
             .query(
@@ -499,4 +595,20 @@ fn scrub_ref(connection_ref: &str) -> String {
         .last()
         .unwrap_or(connection_ref)
         .to_string()
+}
+
+fn connection_requires_tls(connection_ref: &str) -> bool {
+    if let Ok(url) = url::Url::parse(connection_ref) {
+        if matches!(url.scheme(), "postgres" | "postgresql") {
+            for (k, v) in url.query_pairs() {
+                if k.eq_ignore_ascii_case("sslmode") {
+                    let mode = v.to_ascii_lowercase();
+                    if mode == "require" || mode == "verify-ca" || mode == "verify-full" {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }

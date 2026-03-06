@@ -476,9 +476,6 @@ pub fn base58_to_id(s: &str) -> Option<u64> {
     let start = 8usize.saturating_sub(bytes.len());
     buf[start..].copy_from_slice(&bytes);
     let id = u64::from_be_bytes(buf);
-    if id == 0 {
-        return None;
-    }
     Some(id)
 }
 
@@ -528,8 +525,7 @@ fn encode_relpath_bytes(rel: &Path) -> String {
 /// Decode a manifest relative path back to a platform OsString.
 pub fn decode_relpath_to_os(s: &str) -> OsString {
     if let Some(rest) = s.strip_prefix("b64:") {
-        if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(rest)
-        {
+        if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(rest) {
             #[cfg(unix)]
             {
                 use std::os::unix::ffi::OsStringExt;

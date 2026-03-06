@@ -5,13 +5,13 @@ use std::path::PathBuf;
 
 pub fn uhoh_dir() -> PathBuf {
     // Keep a single definition consistent with main; both resolve to ~/.uhoh
-    dirs::home_dir()
+    let home = dirs::home_dir()
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-        .unwrap_or_else(|| {
-            eprintln!("Cannot determine home directory. Set HOME or ensure user profile exists.");
-            std::process::exit(1);
-        })
-        .join(".uhoh")
+        .or_else(|| std::env::current_dir().ok());
+    match home {
+        Some(base) => base.join(".uhoh"),
+        None => std::env::temp_dir().join("uhoh"),
+    }
 }
 
 pub fn install_service() -> Result<()> {
@@ -97,38 +97,14 @@ fn install_launchagent() -> Result<()> {
     let status = std::process::Command::new("launchctl")
         .args(["bootstrap", &format!("gui/{uid}")])
         .arg(&plist_path)
-        .status();
+        .status()
+        .context("Failed to execute launchctl bootstrap")?;
 
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            tracing::warn!(
-                "launchctl bootstrap exited with code {:?}, trying legacy load",
-                s.code()
-            );
-            let fallback = std::process::Command::new("launchctl")
-                .args(["load", "-w"])
-                .arg(&plist_path)
-                .status()?;
-            if !fallback.success() {
-                anyhow::bail!(
-                    "launchctl load failed with code {:?}",
-                    fallback.code()
-                );
-            }
-        }
-        Err(_) => {
-            let fallback = std::process::Command::new("launchctl")
-                .args(["load", "-w"])
-                .arg(&plist_path)
-                .status()?;
-            if !fallback.success() {
-                anyhow::bail!(
-                    "launchctl load failed with code {:?}",
-                    fallback.code()
-                );
-            }
-        }
+    if !status.success() {
+        anyhow::bail!(
+            "launchctl bootstrap failed with exit code {:?}",
+            status.code()
+        );
     }
 
     Ok(())
@@ -325,7 +301,8 @@ pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
         }
         // Normalize whitespace: %e can produce double spaces for single-digit days
         let normalized: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-        let parsed = chrono::NaiveDateTime::parse_from_str(&normalized, "%a %b %d %H:%M:%S %Y").ok()?;
+        let parsed =
+            chrono::NaiveDateTime::parse_from_str(&normalized, "%a %b %d %H:%M:%S %Y").ok()?;
         let dt = chrono::Local.from_local_datetime(&parsed).single()?;
         return Some(dt.timestamp() as u64);
     }

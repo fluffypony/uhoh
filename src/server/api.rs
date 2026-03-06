@@ -113,6 +113,43 @@ pub async fn list_snapshots(
     }
 }
 
+pub async fn get_snapshot(
+    State(state): State<AppState>,
+    Path((hash, snap_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let db = state.database.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let snap = db
+            .find_snapshot_by_base58(&hash, &snap_id)?
+            .ok_or_else(|| anyhow::anyhow!("Snapshot not found"))?;
+        Ok(json!({
+            "id": crate::cas::id_to_base58(snap.snapshot_id),
+            "rowid": snap.rowid,
+            "timestamp": snap.timestamp,
+            "trigger": snap.trigger,
+            "message": snap.message,
+            "pinned": snap.pinned,
+            "file_count": snap.file_count,
+            "ai_summary": snap.ai_summary,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn get_snapshot_files(
     State(state): State<AppState>,
     Path((hash, snap_id)): Path<(String, String)>,
@@ -121,6 +158,9 @@ pub async fn get_snapshot_files(
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
         let id = crate::cas::base58_to_id(&snap_id)
             .ok_or_else(|| anyhow::anyhow!("Invalid snapshot ID"))?;
+        if id == 0 {
+            anyhow::bail!("Snapshot ID '1' maps to reserved value 0; valid IDs start from '2'");
+        }
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
             .ok_or_else(|| anyhow::anyhow!("Snapshot not found"))?;
@@ -291,7 +331,9 @@ pub async fn get_diff(
                 &old_content,
                 &new_content,
                 &file.path,
-                true,
+                // UI currently renders plain escaped text lines, so disable
+                // backend syntax highlighting generation to avoid wasted CPU.
+                false,
             );
             diffs.push(serde_json::to_value(diff)?);
         }
@@ -430,6 +472,44 @@ pub async fn create_snapshot(
     .await;
     match result {
         Ok(Ok(value)) => (StatusCode::CREATED, Json(value)).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn set_snapshot_pin(
+    State(state): State<AppState>,
+    Path((hash, snap_id)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let pinned = body
+        .get("pinned")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let db = state.database.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let snap = db
+            .find_snapshot_by_base58(&hash, &snap_id)?
+            .ok_or_else(|| anyhow::anyhow!("Snapshot not found"))?;
+        db.pin_snapshot(snap.rowid, pinned)?;
+        Ok(json!({
+            "id": crate::cas::id_to_base58(snap.snapshot_id),
+            "pinned": pinned,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(value)) => Json(value).into_response(),
         Ok(Err(e)) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
@@ -630,21 +710,32 @@ pub async fn get_timeline(
 ) -> impl IntoResponse {
     let db = state.database.clone();
     let hash_for_response = hash.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        db.list_snapshot_summaries(&hash, params.from.as_deref(), params.to.as_deref())
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let summaries =
+            db.list_snapshot_summaries(&hash, params.from.as_deref(), params.to.as_deref())?;
+        let mut entries = Vec::with_capacity(summaries.len());
+        for s in &summaries {
+            let ai_summary = db
+                .get_snapshot_by_rowid(s.rowid)?
+                .and_then(|row| row.ai_summary);
+            entries.push((s.clone(), ai_summary));
+        }
+        Ok(entries)
     })
     .await;
     match result {
         Ok(Ok(summaries)) => {
             let mut manual = Vec::new();
             let mut auto_saves = Vec::new();
-            for s in &summaries {
+            for (s, ai_summary) in &summaries {
                 let entry = json!({
                     "id": crate::cas::id_to_base58(s.snapshot_id),
                     "timestamp": s.timestamp,
+                    "trigger": s.trigger,
                     "message": s.message,
                     "pinned": s.pinned,
                     "file_count": s.file_count,
+                    "ai_summary": ai_summary,
                 });
                 match s.trigger.as_str() {
                     "manual" | "mcp" | "api" => manual.push(entry),

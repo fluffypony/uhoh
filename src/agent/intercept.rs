@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
@@ -13,8 +14,9 @@ pub async fn run_session_tailers_async(
     ctx: &SubsystemContext,
     agents: &[AgentEntry],
 ) -> Result<()> {
-    let mut offsets: HashMap<String, u64> = HashMap::new();
+    let mut offsets: HashMap<String, u64> = load_offsets(&ctx.uhoh_dir).unwrap_or_default();
     loop {
+        let mut offsets_changed = false;
         for agent in agents {
             let profile_toml = crate::util::expand_home(&agent.profile_path);
             let profile_path = Path::new(&profile_toml);
@@ -31,10 +33,14 @@ pub async fn run_session_tailers_async(
                 continue;
             };
 
-            let entry = offsets.entry(agent.name.clone()).or_insert(0);
+            let key = offset_key(&agent.name, &session_path);
+            let entry = offsets.entry(key).or_insert(0);
             match async_tail_one_file(ctx, agent, &session_path, *entry).await {
                 Ok(new_offset) => {
-                    *entry = new_offset;
+                    if *entry != new_offset {
+                        *entry = new_offset;
+                        offsets_changed = true;
+                    }
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -46,8 +52,61 @@ pub async fn run_session_tailers_async(
                 }
             }
         }
+        if offsets_changed {
+            if let Err(err) = persist_offsets(&ctx.uhoh_dir, &offsets) {
+                tracing::warn!("Failed to persist agent tail offsets: {err}");
+            }
+        }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
+}
+
+fn offset_key(agent_name: &str, session_path: &Path) -> String {
+    format!("{}|{}", agent_name, session_path.display())
+}
+
+fn offsets_path(uhoh_dir: &Path) -> PathBuf {
+    uhoh_dir
+        .join("agents")
+        .join("runtime")
+        .join("tail_offsets.json")
+}
+
+fn load_offsets(uhoh_dir: &Path) -> Result<HashMap<String, u64>> {
+    let path = offsets_path(uhoh_dir);
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let parsed = serde_json::from_str::<HashMap<String, u64>>(&raw)?;
+    Ok(parsed)
+}
+
+fn persist_offsets(uhoh_dir: &Path, offsets: &HashMap<String, u64>) -> Result<()> {
+    let path = offsets_path(uhoh_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    let tmp = path.with_extension("json.tmp");
+    let data = serde_json::to_vec(offsets)?;
+    std::fs::write(&tmp, data)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, &path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 async fn async_tail_one_file(
@@ -109,9 +168,26 @@ async fn process_jsonl_event(
     if let Some(path) = target_path.as_deref() {
         let p = Path::new(path);
         if p.exists() {
-            let bytes = tokio::fs::read(p).await?;
-            let (hash, _) = crate::cas::store_blob(&ctx.uhoh_dir.join("blobs"), &bytes)?;
-            pre_state_ref = Some(hash);
+            match tokio::fs::read(p).await {
+                Ok(bytes) => match crate::cas::store_blob(&ctx.uhoh_dir.join("blobs"), &bytes) {
+                    Ok((hash, _)) => {
+                        pre_state_ref = Some(hash);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "failed to store pre-state blob for {}: {}",
+                            p.display(),
+                            err
+                        );
+                    }
+                },
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::debug!("pre-state source disappeared before read: {}", p.display());
+                }
+                Err(err) => {
+                    tracing::warn!("failed to read pre-state source {}: {}", p.display(), err);
+                }
+            }
         }
     }
 
