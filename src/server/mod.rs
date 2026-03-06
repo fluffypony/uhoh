@@ -31,7 +31,7 @@ pub struct AppState {
     pub config: crate::config::Config,
     pub event_tx: broadcast::Sender<ServerEvent>,
     pub restore_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    pub restore_locks: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    pub restore_locks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
 }
 
@@ -53,7 +53,7 @@ pub async fn start_server(
         config: full_config,
         event_tx,
         restore_in_progress,
-        restore_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+        restore_locks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         subsystem_manager,
     };
 
@@ -179,6 +179,5 @@ fn audit_source_label(source: &crate::subsystem::AuditSource) -> &'static str {
     match source {
         crate::subsystem::AuditSource::None => "none",
         crate::subsystem::AuditSource::Fanotify => "fanotify",
-        crate::subsystem::AuditSource::OpenBsm => "openbsm",
     }
 }

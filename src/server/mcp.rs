@@ -386,17 +386,13 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
     let event_tx = state.event_tx.clone();
 
     struct McpRestoreLockGuard {
-        locks: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+        locks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
         key: String,
     }
     impl Drop for McpRestoreLockGuard {
         fn drop(&mut self) {
-            let locks = self.locks.clone();
-            let key = self.key.clone();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    locks.lock().await.remove(&key);
-                });
+            if let Ok(mut guard) = self.locks.lock() {
+                guard.remove(&self.key);
             }
         }
     }
@@ -407,7 +403,10 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
             .clone()
             .or(hash.clone())
             .unwrap_or_else(|| "default".to_string());
-        let mut locks = restore_locks.lock().await;
+        let mut locks = match restore_locks.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if locks.contains(&lock_key) {
             return JsonRpcResponse::error(
                 id,

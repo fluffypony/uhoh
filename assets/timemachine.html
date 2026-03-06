@@ -670,6 +670,11 @@
       });
     }
 
+    function activeTabView() {
+      const active = document.querySelector('.tab-bar .tab.active');
+      return active ? active.textContent.trim() : 'Diff View';
+    }
+
     async function loadProjects() {
       setStatus('Loading projects');
       const data = await withAuth(() => api(`${API}/projects`));
@@ -719,6 +724,7 @@
         return;
       }
       await loadFiles();
+      await switchTab(activeTabView());
       setStatus(`Loaded ${state.snapshots.length} snapshots`, 'ok');
     }
 
@@ -726,7 +732,7 @@
       if (!state.project || !state.snapshot) {
         state.files = [];
         renderTree();
-        document.getElementById('content').innerHTML = '';
+        document.getElementById('content').innerHTML = '<div class="empty-state">No snapshots yet</div>';
         return;
       }
       const data = await withAuth(() => api(`${API}/projects/${state.project.project_hash}/snapshots/${state.snapshot.id}/files`));
@@ -810,20 +816,35 @@
           const data = await withAuth(() =>
             api(`${API}/projects/${state.project.project_hash}/timeline`)
           );
-          const entries = data.entries || data.snapshots || [];
-          if (entries.length === 0) {
+          const tracks = data.tracks || {};
+          const manual = tracks.manual || [];
+          const autoSaves = tracks.auto_saves || [];
+          if (manual.length === 0 && autoSaves.length === 0) {
             content.className = 'empty-state';
             content.textContent = 'No timeline entries';
             return;
           }
-          let out = '<div style="padding: 8px;">';
-          entries.forEach(s => {
+          const renderEntry = (s, label) => {
             const time = new Date(s.timestamp).toLocaleString();
-            const msg = s.message || s.trigger || 'Snapshot';
-            out += `<div class="code-line" style="cursor:pointer;padding:4px 0;" data-id="${escapeHtml(s.id)}">` +
+            const msg = s.message || label || 'Snapshot';
+            return `<div class="code-line" style="cursor:pointer;padding:4px 0;" data-id="${escapeHtml(s.id)}">` +
               `<span class="line-num" style="width:80px;color:var(--accent-purple)">${escapeHtml(s.id)}</span>` +
-              `<span class="line-code"><span style="color:var(--text-muted)">${escapeHtml(s.trigger || '')}</span> ${escapeHtml(msg)} <span style="color:var(--text-muted)">— ${time}</span></span></div>`;
-          });
+              `<span class="line-code"><span style="color:var(--text-muted)">${escapeHtml(label)}</span> ${escapeHtml(msg)} <span style="color:var(--text-muted)">— ${time}</span></span></div>`;
+          };
+
+          let out = '<div style="padding: 8px;">';
+          if (manual.length > 0) {
+            out += '<h3 style="margin:8px 0;">Manual Snapshots</h3>';
+            manual.forEach(s => {
+              out += renderEntry(s, 'manual');
+            });
+          }
+          if (autoSaves.length > 0) {
+            out += '<h3 style="margin:12px 0 8px;">Autosaves</h3>';
+            autoSaves.forEach(s => {
+              out += renderEntry(s, 'auto');
+            });
+          }
           out += '</div>';
           content.className = '';
           content.innerHTML = out;
@@ -989,6 +1010,7 @@
               try {
                 snap = await withAuth(() => api(`${API}/projects/${state.project.project_hash}/snapshots/${result.snapshot_id}`));
                 state.snapshots.push(snap);
+                state.snapshots.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
               } catch(e) {
                 console.error('Could not load snapshot:', e);
                 return;
@@ -996,9 +1018,11 @@
             }
             hideDryRun();
             state.snapshot = snap;
-            state.previous = state.snapshots[state.snapshots.indexOf(snap) + 1] || null;
+            const index = state.snapshots.findIndex((s) => s.id === snap.id);
+            state.previous = index >= 0 ? (state.snapshots[index + 1] || null) : null;
             renderTimeline();
             await loadFiles();
+            await switchTab(activeTabView());
           };
           tree.appendChild(row);
         });

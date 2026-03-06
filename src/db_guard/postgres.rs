@@ -127,7 +127,7 @@ pub fn tick_postgres_guard(
         }
     }
 
-    let listen_payloads = drain_listen_payloads(&guard.connection_ref)?;
+    let listen_payloads = drain_listen_payloads(&poll_dsn)?;
     let ddl_payloads = poll_ddl_events(&poll_dsn, 64).unwrap_or_default();
     let mut payloads = Vec::new();
     payloads.extend(listen_payloads);
@@ -190,7 +190,7 @@ pub fn reconcile_listen_workers(
     let required: HashSet<String> = guards
         .iter()
         .filter(|g| g.engine == "postgres")
-        .map(|g| g.connection_ref.clone())
+        .map(|g| build_connect_dsn(&g.connection_ref).unwrap_or_else(|_| g.connection_ref.clone()))
         .collect();
 
     let mut workers = PG_LISTEN_WORKERS

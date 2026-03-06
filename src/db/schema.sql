@@ -137,4 +137,4 @@ CREATE INDEX IF NOT EXISTS idx_event_ledger_session ON event_ledger(session_id);
 
 INSERT OR IGNORE INTO stats (key, value) VALUES ('blob_bytes', 0);
 
-PRAGMA user_version = 8;
+PRAGMA user_version = 1;

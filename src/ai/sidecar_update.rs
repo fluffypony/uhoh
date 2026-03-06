@@ -133,7 +133,7 @@ pub fn check_for_update(
         .or_else(|| {
             let fallback = match platform {
                 p if p.starts_with("linux-cuda") => "ubuntu-x64",
-                p if p.starts_with("win-cuda") => "win-vulkan-x64",
+                p if p.starts_with("win-cuda") => "win-cpu-x64",
                 _ => return None,
             };
             release.assets.iter().find(|asset| {

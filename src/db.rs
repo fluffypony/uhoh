@@ -621,9 +621,9 @@ impl Database {
             let size = row.get::<_, i64>(2)? as u64;
             let stored = row.get::<_, i32>(3)? != 0;
             let executable = row.get::<_, i32>(4)? != 0;
-            let mtime = row.get::<_, Option<i64>>(5).ok().flatten();
-            let storage_method = row.get::<_, i64>(6).unwrap_or(1);
-            let is_symlink = row.get::<_, i32>(7).unwrap_or(0) != 0;
+            let mtime = row.get::<_, Option<i64>>(5)?;
+            let storage_method = row.get::<_, i64>(6)?;
+            let is_symlink = row.get::<_, i32>(7)? != 0;
             Ok(FileEntryRow {
                 path,
                 hash,
@@ -652,7 +652,7 @@ impl Database {
             let hash: String = row.get(1)?;
             let size = row.get::<_, i64>(2)? as u64;
             let stored = row.get::<_, i32>(3)? != 0;
-            let storage_method = row.get::<_, i64>(4).unwrap_or(1);
+            let storage_method = row.get::<_, i64>(4)?;
             Ok(FileEntryRow {
                 path,
                 hash,

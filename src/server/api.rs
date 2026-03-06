@@ -477,25 +477,23 @@ pub async fn restore_snapshot(
     let target_path_for_task = target_path.clone();
 
     struct RestoreLockGuard {
-        locks: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+        locks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
         key: String,
     }
     impl Drop for RestoreLockGuard {
         fn drop(&mut self) {
-            let locks = self.locks.clone();
-            let key = self.key.clone();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    let mut guard = locks.lock().await;
-                    guard.remove(&key);
-                });
+            if let Ok(mut guard) = self.locks.lock() {
+                guard.remove(&self.key);
             }
         }
     }
 
     let mut lock_guard: Option<RestoreLockGuard> = None;
     if !dry_run {
-        let mut locks = restore_locks.lock().await;
+        let mut locks = match restore_locks.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if locks.contains(&restore_key) {
             return (
                 StatusCode::CONFLICT,

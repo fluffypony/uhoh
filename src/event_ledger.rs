@@ -10,7 +10,7 @@ use crate::db::{Database, EventLedgerEntry, EventLedgerTraceResult, NewEventLedg
 #[derive(Clone)]
 pub struct EventLedger {
     db: Arc<Database>,
-    queue_tx: mpsc::UnboundedSender<NewEventLedgerEntry>,
+    _queue_tx: mpsc::UnboundedSender<NewEventLedgerEntry>,
     queue_rx: Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<NewEventLedgerEntry>>>>,
     started: Arc<AtomicBool>,
 }
@@ -20,7 +20,7 @@ impl EventLedger {
         let (queue_tx, queue_rx) = mpsc::unbounded_channel();
         Self {
             db,
-            queue_tx,
+            _queue_tx: queue_tx,
             queue_rx: Arc::new(std::sync::Mutex::new(Some(queue_rx))),
             started: Arc::new(AtomicBool::new(false)),
         }

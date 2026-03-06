@@ -6,6 +6,9 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::server::mcp::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
+static RESTORE_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub fn run_stdio_mcp(config: &Config) -> Result<()> {
     let uhoh_dir = crate::uhoh_dir();
     let database = Database::open(&uhoh_dir.join("uhoh.db"))?;
@@ -319,47 +322,82 @@ fn handle_stdio_tool_call(
             let path = args.get("path").and_then(|v| v.as_str());
             let hash = args.get("project_hash").and_then(|v| v.as_str());
             match crate::resolve::resolve_project(database, path.or(hash), None) {
-                Ok(project) => match crate::restore::cmd_restore(
-                    uhoh_dir,
-                    database,
-                    &project,
-                    &snapshot_id,
-                    args.get("target_path").and_then(|v| v.as_str()),
-                    dry_run,
-                    true,
-                ) {
-                    Ok(outcome) => JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        result: Some(json!({
-                            "content": [{
-                                "type": "text",
-                                "text": if dry_run {
-                                    format!("Dry run complete for snapshot {snapshot_id}")
-                                } else {
-                                    format!("Snapshot {snapshot_id} restored successfully")
-                                }
-                            }],
-                            "restored": outcome.applied,
-                            "dry_run": dry_run,
-                            "files_modified": outcome.files_restored,
-                            "files_deleted": outcome.files_deleted,
-                            "files_to_modify": outcome.files_to_restore,
-                            "files_to_delete": outcome.files_to_delete,
-                        })),
-                        error: None,
-                        id,
-                    },
-                    Err(e) => JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        result: None,
-                        error: Some(JsonRpcError {
-                            code: -32000,
-                            message: e.to_string(),
-                            data: None,
-                        }),
-                        id,
-                    },
-                },
+                Ok(project) => {
+                    struct RestoreFlagGuard;
+                    impl Drop for RestoreFlagGuard {
+                        fn drop(&mut self) {
+                            RESTORE_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+
+                    let _restore_guard = if !dry_run {
+                        if RESTORE_IN_PROGRESS
+                            .compare_exchange(
+                                false,
+                                true,
+                                std::sync::atomic::Ordering::SeqCst,
+                                std::sync::atomic::Ordering::SeqCst,
+                            )
+                            .is_err()
+                        {
+                            return JsonRpcResponse {
+                                jsonrpc: "2.0".to_string(),
+                                result: None,
+                                error: Some(JsonRpcError {
+                                    code: -32000,
+                                    message: "Restore already in progress".to_string(),
+                                    data: None,
+                                }),
+                                id,
+                            };
+                        }
+                        Some(RestoreFlagGuard)
+                    } else {
+                        None
+                    };
+
+                    match crate::restore::cmd_restore(
+                        uhoh_dir,
+                        database,
+                        &project,
+                        &snapshot_id,
+                        args.get("target_path").and_then(|v| v.as_str()),
+                        dry_run,
+                        true,
+                    ) {
+                        Ok(outcome) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            result: Some(json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": if dry_run {
+                                        format!("Dry run complete for snapshot {snapshot_id}")
+                                    } else {
+                                        format!("Snapshot {snapshot_id} restored successfully")
+                                    }
+                                }],
+                                "restored": outcome.applied,
+                                "dry_run": dry_run,
+                                "files_modified": outcome.files_restored,
+                                "files_deleted": outcome.files_deleted,
+                                "files_to_modify": outcome.files_to_restore,
+                                "files_to_delete": outcome.files_to_delete,
+                            })),
+                            error: None,
+                            id,
+                        },
+                        Err(e) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            result: None,
+                            error: Some(JsonRpcError {
+                                code: -32000,
+                                message: e.to_string(),
+                                data: None,
+                            }),
+                            id,
+                        },
+                    }
+                }
                 Err(e) => JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
                     result: None,

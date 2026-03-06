@@ -1551,13 +1551,10 @@ tool_call_format = "jsonl"
                 anyhow::bail!("No base profile exists yet. Run `uhoh agent init` first.");
             }
 
-            let profile: toml::Value = toml::from_str(&std::fs::read_to_string(&default_profile)?)
-                .context("Failed to parse generic profile")?;
+            let _profile: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&default_profile)?)
+                    .context("Failed to parse generic profile")?;
             println!("Profile loaded: {}", default_profile.display());
-            // Profile fields (profile_version, tool_call_format) should be set at creation time
-            if profile.get("profile_version").is_none() || profile.get("tool_call_format").is_none() {
-                tracing::warn!("Profile is missing required fields. Re-run `uhoh agent init` to generate a complete profile.");
-            }
         }
     }
     Ok(())
