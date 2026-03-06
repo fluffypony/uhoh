@@ -112,7 +112,8 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
                                     "agent": { "type": "string" },
                                     "action": { "type": "string" },
                                     "path": { "type": "string" }
-                                }
+                                },
+                                "required": ["agent", "action"]
                             }
                         }
                     ]

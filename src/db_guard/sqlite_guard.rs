@@ -16,7 +16,11 @@ pub fn tick_sqlite_guard(
 ) -> Result<()> {
     let path = normalize_sqlite_path(&guard.connection_ref);
 
-    let conn = Connection::open(&path)?;
+    let conn = Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
     let data_version: i64 = conn.query_row("PRAGMA data_version", [], |row| row.get(0))?;
     let detail = serde_json::json!({"data_version": data_version}).to_string();
     let mut event = NewEventLedgerEntry {

@@ -120,13 +120,14 @@ pub fn cmd_gitstash(
     if let Some(mut sin) = upd.stdin.take() {
         use std::io::Write as _;
         for (path, blob_hash) in &tree_entries {
-            // Decode b64:-encoded paths back to filesystem paths for git
+            // Decode b64:-encoded paths back to filesystem paths for git,
+            // normalizing to forward slashes (git index requires forward slashes).
             let git_path = if path.starts_with("b64:") {
                 cas::decode_relpath_to_os(path)
                     .to_string_lossy()
-                    .to_string()
+                    .replace('\\', "/")
             } else {
-                path.clone()
+                path.replace('\\', "/")
             };
             // Path traversal guard
             let p = std::path::Path::new(&git_path);

@@ -957,6 +957,7 @@ fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Re
     block_on_runtime(async move {
         let client = connect_postgres_client(dsn).await?;
 
+        // Step 1: Create tables and indexes (standard permissions)
         client
             .batch_execute(
                 "
@@ -1009,14 +1010,34 @@ fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Re
                     END LOOP;
                 END;
                 $$ LANGUAGE plpgsql;
-
-                DROP EVENT TRIGGER IF EXISTS uhoh_ddl_drop;
-                CREATE EVENT TRIGGER uhoh_ddl_drop ON sql_drop
-                    EXECUTE FUNCTION _uhoh_ddl_handler();
                 ",
             )
             .await
             .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+
+        // Step 2: Create event trigger (requires superuser). Non-fatal if denied.
+        match client
+            .batch_execute(
+                "DROP EVENT TRIGGER IF EXISTS uhoh_ddl_drop;
+                 CREATE EVENT TRIGGER uhoh_ddl_drop ON sql_drop
+                     EXECUTE FUNCTION _uhoh_ddl_handler();",
+            )
+            .await
+        {
+            Ok(_) => tracing::info!("DDL event trigger installed"),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("permission denied") || msg.contains("must be superuser") {
+                    eprintln!(
+                        "Warning: Could not create event trigger (requires superuser). \
+                         DDL changes like DROP TABLE will not be tracked, but \
+                         row-level delete monitoring will still function."
+                    );
+                } else {
+                    return Err(anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&msg)));
+                }
+            }
+        }
 
         let tables = parse_watched_tables(tables_csv);
         if tables.is_empty() {
@@ -2081,6 +2102,15 @@ async fn run_zero_verb() -> Result<()> {
     }
 
     // Not registered: behave like `uhoh add` for this directory
+    // Guard against watching the uhoh data directory itself (inception loop)
+    let uhoh_home = uhoh::uhoh_dir();
+    if uhoh_home.starts_with(&cwd) {
+        anyhow::bail!(
+            "Refusing to watch parent directory of uhoh data directory. \
+             Please run uhoh from a project subdirectory."
+        );
+    }
+
     maybe_start_daemon(&uhoh)?;
     let project_path = cwd;
 

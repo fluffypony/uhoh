@@ -301,8 +301,10 @@ pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
         }
         // Normalize whitespace: %e can produce double spaces for single-digit days
         let normalized: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Use %e instead of %d to handle unpadded single-digit days after
+        // whitespace normalization collapses " 6" into "6".
         let parsed =
-            chrono::NaiveDateTime::parse_from_str(&normalized, "%a %b %d %H:%M:%S %Y").ok()?;
+            chrono::NaiveDateTime::parse_from_str(&normalized, "%a %b %e %H:%M:%S %Y").ok()?;
         let dt = chrono::Local.from_local_datetime(&parsed).single()?;
         return Some(dt.timestamp() as u64);
     }

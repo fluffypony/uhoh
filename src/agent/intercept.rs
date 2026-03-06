@@ -128,6 +128,11 @@ async fn async_tail_one_file(
         let mut line = String::new();
         let bytes = reader.read_line(&mut line).await?;
         if bytes == 0 {
+            // EOF hit — do not advance offset past incomplete data in carry
+            // so the next poll re-reads the partial line.
+            if !carry.is_empty() {
+                new_offset -= carry.len() as u64;
+            }
             break;
         }
         new_offset += bytes as u64;

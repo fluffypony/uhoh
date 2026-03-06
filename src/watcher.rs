@@ -41,6 +41,19 @@ pub fn start_watching(
                                 let _ = sender.send(WatchEvent::FileDeleted(p));
                             }
                         }
+                        EventKind::Modify(notify::event::ModifyKind::Name(
+                            notify::event::RenameMode::Both,
+                        )) => {
+                            // Rename: old path is a deletion, new path is a change
+                            if event.paths.len() >= 2 {
+                                let _ = sender.send(WatchEvent::FileDeleted(event.paths[0].clone()));
+                                let _ = sender.send(WatchEvent::FileChanged(event.paths[1].clone()));
+                            } else {
+                                for p in event.paths {
+                                    let _ = sender.send(WatchEvent::FileChanged(p));
+                                }
+                            }
+                        }
                         EventKind::Create(_) | EventKind::Modify(_) => {
                             for p in event.paths {
                                 let _ = sender.send(WatchEvent::FileChanged(p));

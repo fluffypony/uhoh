@@ -327,8 +327,16 @@ fn derive_encryption_material(uhoh_dir: &std::path::Path) -> Result<EncryptionMa
         }
 
         rand::thread_rng().fill_bytes(&mut salt);
-        let key = derive_argon2_key(&master, &salt)?;
-        master.zeroize();
+        let key = match derive_argon2_key(&master, &salt) {
+            Ok(k) => {
+                master.zeroize();
+                k
+            }
+            Err(e) => {
+                master.zeroize();
+                return Err(e);
+            }
+        };
         return Ok(EncryptionMaterial {
             key,
             kdf_id: ENC_KDF_ARGON2ID,

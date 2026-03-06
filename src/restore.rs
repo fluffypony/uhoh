@@ -16,7 +16,11 @@ struct RestoreSignalGuard {
 impl RestoreSignalGuard {
     fn install(uhoh_dir: &Path, project_hash: &str) -> Result<Self> {
         let path = uhoh_dir.join(RESTORE_IN_PROGRESS_FILE);
-        let payload = format!("project_hash={project_hash}\npid={}\n", std::process::id());
+        let pid = std::process::id();
+        let start_ticks = crate::platform::read_process_start_ticks(pid).unwrap_or(0);
+        let payload = format!(
+            "project_hash={project_hash}\npid={pid}\nstart_ticks={start_ticks}\n"
+        );
         // Use create_new(true) for atomic mutual exclusion: if another
         // restore is in progress, the file already exists and this fails.
         std::fs::OpenOptions::new()

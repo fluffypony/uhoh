@@ -292,11 +292,20 @@ pub fn spawn_detached_daemon() -> Result<()> {
     {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x00000008;
+        let log_path = crate::uhoh_dir().join("daemon.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("Failed to open daemon log: {}", log_path.display()))?;
+        let err_file = log_file.try_clone().with_context(|| {
+            format!("Failed to clone daemon log handle: {}", log_path.display())
+        })?;
         std::process::Command::new(&exe)
             .args(["start", "--service"])
             .creation_flags(DETACHED_PROCESS)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(err_file))
             .stdin(std::process::Stdio::null())
             .spawn()
             .context("Failed to spawn daemon")?;
@@ -449,11 +458,13 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
         .create(true)
         .truncate(false)
         .open(&pid_path)?;
-    #[cfg(unix)]
     {
         use fs4::FileExt;
-        // If another daemon holds the lock, this will fail
-        pid_file.try_lock_exclusive()?;
+        // If another daemon holds the lock, this will fail.
+        // fs4 supports file locking on all platforms.
+        pid_file
+            .try_lock_exclusive()
+            .context("Another uhoh daemon is already running (PID file locked)")?;
     }
     // Truncate and write PID
     #[cfg(unix)]
@@ -651,7 +662,13 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                         let now = Instant::now();
                         if let Some(ready_at) = next_recover_at {
                             if now < ready_at {
-                                tracing::warn!("Watcher died, backoff active — next attempt in {:?}", ready_at - now);
+                                // Re-queue after remaining backoff instead of dropping the event
+                                let remaining = ready_at - now;
+                                let tx = event_tx.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(remaining).await;
+                                    let _ = tx.send(WatchEvent::WatcherDied);
+                                });
                                 continue;
                             }
                         }
@@ -886,8 +903,12 @@ fn restore_marker_active(uhoh_dir: &Path) -> bool {
         if let Some(pid_line) = text.lines().find(|l| l.starts_with("pid=")) {
             if let Ok(pid) = pid_line.trim_start_matches("pid=").trim().parse::<u32>() {
                 parseable = true;
-                let start = crate::platform::read_process_start_ticks(pid);
-                if !crate::platform::is_uhoh_process_alive_with_start(pid, start) {
+                // Use start_ticks from marker file for PID-reuse-safe check
+                let expected_start = text
+                    .lines()
+                    .find(|l| l.starts_with("start_ticks="))
+                    .and_then(|l| l.trim_start_matches("start_ticks=").trim().parse::<u64>().ok());
+                if !crate::platform::is_uhoh_process_alive_with_start(pid, expected_start) {
                     let _ = std::fs::remove_file(&marker_path);
                     return false;
                 }

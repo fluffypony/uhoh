@@ -606,7 +606,7 @@ pub fn cleanup_stale_temp_files(blob_root: &Path, max_age: std::time::Duration) 
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with(".tmp.") || name.starts_with(".blob.") {
+                if name.starts_with(".tmp.") || name.starts_with(".blob.") || name.starts_with(".cblob.") {
                     if let Ok(meta) = std::fs::metadata(&path) {
                         if let Ok(mtime) = meta.modified() {
                             if let Ok(age) = now.duration_since(mtime) {
