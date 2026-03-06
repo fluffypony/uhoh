@@ -20,8 +20,22 @@ impl RestoreSignalGuard {
             "project_hash={project_hash}\npid={}\n",
             std::process::id()
         );
-        std::fs::write(&path, payload)
-            .with_context(|| format!("Failed to write restore marker: {}", path.display()))?;
+        // Use create_new(true) for atomic mutual exclusion: if another
+        // restore is in progress, the file already exists and this fails.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(payload.as_bytes())
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to create restore marker (another restore may be in progress): {}",
+                    path.display()
+                )
+            })?;
         Ok(Self { path })
     }
 }
@@ -453,10 +467,11 @@ pub fn cmd_restore(
             validate_restore_path(project_path, path)?;
             let dst = project_path.join(crate::cas::decode_relpath_to_os(path));
             if let Ok(meta) = dst.symlink_metadata() {
-                if meta.is_symlink() || meta.is_file() {
-                    let _ = std::fs::remove_file(&dst);
-                } else if meta.is_dir() {
+                if meta.is_dir() {
                     safe_remove_dir_tree_within(project_path, &dst)?;
+                } else {
+                    // Covers files, symlinks, FIFOs, sockets, etc.
+                    let _ = std::fs::remove_file(&dst);
                 }
             }
         }
@@ -468,10 +483,10 @@ pub fn cmd_restore(
                 check_no_symlink_parents(project_path, &final_dest)?;
             }
             if let Ok(meta) = final_dest.symlink_metadata() {
-                if meta.is_symlink() || meta.is_file() {
-                    let _ = std::fs::remove_file(&final_dest);
-                } else if meta.is_dir() {
+                if meta.is_dir() {
                     safe_remove_dir_tree_within(project_path, &final_dest)?;
+                } else {
+                    let _ = std::fs::remove_file(&final_dest);
                 }
             }
             std::fs::rename(&staged, &final_dest).with_context(|| {

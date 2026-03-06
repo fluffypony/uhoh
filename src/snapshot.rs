@@ -58,11 +58,10 @@ pub fn create_snapshot(
                 requires_full = true;
                 break;
             }
-            // If path doesn't exist, it may be a deleted directory —
-            // fall back to full scan to detect child deletions
-            if !p.exists() && !p.extension().is_some() {
-                // Heuristic: paths without extensions are likely directories.
-                // Check if any previous file was under this path.
+            // If path doesn't exist, check if any previous file was under this
+            // path (meaning it was a directory). Fall back to full scan to
+            // detect child deletions.
+            if !p.exists() {
                 if let Ok(rel) = p.strip_prefix(project_path) {
                     let prefix = cas::encode_relpath(rel);
                     let prefix_with_sep = format!("{}/", prefix);

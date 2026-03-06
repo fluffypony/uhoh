@@ -170,7 +170,8 @@ impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         let manager = SqliteConnectionManager::file(path);
         let pool = Pool::builder()
-            .max_size(8)
+            .max_size(16)
+            .connection_timeout(std::time::Duration::from_secs(30))
             .connection_customizer(Box::new(SqliteCustomizer))
             .build(manager)
             .with_context(|| format!("Failed to open database pool: {}", path.display()))?;

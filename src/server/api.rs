@@ -524,11 +524,8 @@ pub async fn restore_snapshot(
         }
 
         let _restore_guard = if !dry_run {
-            loop {
-                if !restore_in_progress.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+            if restore_in_progress.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("Another restore is already in progress");
             }
             Some(RestoreFlagGuard {
                 flag: restore_in_progress.clone(),

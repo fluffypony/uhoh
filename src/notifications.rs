@@ -34,7 +34,10 @@ impl NotificationPipeline {
     async fn process_event(&self, event: ServerEvent) {
         let event_type = event.kind();
         let summary = event.summary();
-        if !self.should_emit(&event_type).await {
+        // Include project/guard/agent identifiers in dedupe key to prevent
+        // one project's alert from suppressing another's during cooldown
+        let dedupe_key = Self::dedupe_key(&event);
+        if !self.should_emit(&dedupe_key).await {
             return;
         }
 
@@ -64,6 +67,31 @@ impl NotificationPipeline {
                 .json(&payload)
                 .send()
                 .await;
+        }
+    }
+
+    fn dedupe_key(event: &ServerEvent) -> String {
+        match event {
+            ServerEvent::SnapshotCreated { project_hash, .. } => {
+                format!("snapshot_created:{project_hash}")
+            }
+            ServerEvent::SnapshotRestored { project_hash, .. } => {
+                format!("snapshot_restored:{project_hash}")
+            }
+            ServerEvent::EmergencyDeleteDetected { project_hash, .. } => {
+                format!("emergency_delete_detected:{project_hash}")
+            }
+            ServerEvent::DbGuardAlert {
+                guard_name,
+                event_type,
+                ..
+            } => format!("db_guard_alert:{guard_name}:{event_type}"),
+            ServerEvent::AgentAlert {
+                agent_name,
+                event_type,
+                ..
+            } => format!("agent_alert:{agent_name}:{event_type}"),
+            other => other.kind(),
         }
     }
 

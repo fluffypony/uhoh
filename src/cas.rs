@@ -226,10 +226,10 @@ pub fn store_blob_from_file(
         return Ok((hash, actual_size, StorageMethod::Copy, 0));
     }
 
-    // For non-compressed case, reflink from original is safe to try
-    // (it's an optimization; the temp file is our fallback)
+    // Try reflink from the temp file (not the original) to avoid TOCTOU race:
+    // the original file may have changed since we hashed and wrote the temp copy.
     if !do_compress {
-        if reflink_copy::reflink(file_path, &blob_path).is_ok() {
+        if reflink_copy::reflink(&tmp_path, &blob_path).is_ok() {
             let _ = std::fs::remove_file(&tmp_path);
             set_blob_readonly(&blob_path);
             fsync_parent_dir(&blob_path);

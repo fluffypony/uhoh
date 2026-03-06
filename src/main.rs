@@ -1622,7 +1622,10 @@ fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
         );
     }
 
-    let (num_part, unit_part) = s.split_at(s.len() - 1);
+    // Split into numeric prefix and alphabetic suffix (supports multi-char units like "min")
+    let split_pos = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
+    let num_part = &s[..split_pos];
+    let unit_part = &s[split_pos..];
     let qty: i64 = num_part
         .parse()
         .with_context(|| format!("Invalid --since quantity '{}'", num_part))?;
@@ -1631,10 +1634,10 @@ fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
     }
 
     let delta = match unit_part.to_ascii_lowercase().as_str() {
-        "s" => chrono::Duration::seconds(qty),
-        "m" => chrono::Duration::minutes(qty),
-        "h" => chrono::Duration::hours(qty),
-        "d" => chrono::Duration::days(qty),
+        "s" | "sec" | "secs" => chrono::Duration::seconds(qty),
+        "m" | "min" | "mins" => chrono::Duration::minutes(qty),
+        "h" | "hr" | "hrs" | "hour" | "hours" => chrono::Duration::hours(qty),
+        "d" | "day" | "days" => chrono::Duration::days(qty),
         _ => anyhow::bail!(
             "Invalid --since unit '{}'. Use one of s, m, h, d",
             unit_part

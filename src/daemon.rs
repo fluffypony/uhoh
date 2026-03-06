@@ -1856,8 +1856,9 @@ fn check_moved_folders(
             // Try to relocate by scanning common parent directories for the .uhoh marker
             let count = failures.entry(project.hash.clone()).or_insert(0);
             *count = count.saturating_add(1);
-            // Exponential backoff: only scan on powers of two up to a cap
-            if *count > 32 && (*count & (*count - 1)) != 0 {
+            // Exponential backoff with cap: scan every ~20 ticks (10 min at 30s intervals)
+            let max_backoff = 20u32;
+            if *count > 32 && (*count % max_backoff) != 0 {
                 continue;
             }
 
