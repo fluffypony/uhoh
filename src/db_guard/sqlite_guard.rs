@@ -100,15 +100,6 @@ pub fn tick_sqlite_guard(
     if let Err(err) = ctx.event_ledger.append(event) {
         tracing::error!("failed to append sqlite guard event: {err}");
     }
-
-    // Keep lightweight event for compatibility with existing consumers.
-    let mut event = new_event("db_guard", "sqlite_tick", "info");
-    event.guard_name = Some(guard.name.clone());
-    event.path = Some(path.clone());
-    event.detail = Some(format!("watch_path={path}"));
-    if let Err(err) = ctx.event_ledger.append(event) {
-        tracing::error!("failed to append sqlite_tick compatibility event: {err}");
-    }
     Ok(())
 }
 

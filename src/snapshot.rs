@@ -539,9 +539,6 @@ pub fn create_snapshot(
         message.unwrap_or("")
     };
 
-    // Tree hashes removed to reduce per-snapshot overhead; left table exists for potential future use
-    let tree_hashes: Vec<(String, String)> = Vec::new();
-
     // Snapshot ID will be allocated inside the DB transaction
     let snapshot_id: u64 = 0;
     let timestamp = chrono::Utc::now().to_rfc3339();
@@ -556,7 +553,6 @@ pub fn create_snapshot(
         pinned,
         &files_for_manifest,
         &deleted_for_manifest,
-        &tree_hashes,
     )?;
 
     let file_paths_str = files_for_manifest
@@ -809,14 +805,14 @@ fn append_diff_chunk(
 
 pub fn mtime_to_i64(t: SystemTime) -> i64 {
     match t.duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_secs() as i64,
+        Ok(d) => d.as_millis() as i64,
         Err(e) => {
             let dur = e.duration();
-            let secs = dur.as_secs() as i64;
-            if dur.subsec_nanos() > 0 {
-                -(secs + 1)
+            let millis = dur.as_millis() as i64;
+            if dur.subsec_nanos() > 0 || dur.as_secs() > 0 {
+                -(millis + 1)
             } else {
-                -secs
+                -millis
             }
         }
     }
@@ -824,10 +820,10 @@ pub fn mtime_to_i64(t: SystemTime) -> i64 {
 
 pub fn i64_to_mtime(secs: i64) -> SystemTime {
     if secs >= 0 {
-        std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(secs as u64)
     } else {
-        let abs_secs = (secs as i128).unsigned_abs().min(u64::MAX as u128) as u64;
-        std::time::UNIX_EPOCH - std::time::Duration::from_secs(abs_secs)
+        let abs_millis = (secs as i128).unsigned_abs().min(u64::MAX as u128) as u64;
+        std::time::UNIX_EPOCH - std::time::Duration::from_millis(abs_millis)
     }
 }
 

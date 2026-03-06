@@ -529,7 +529,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Agent { action } => {
-            handle_agent_commands(&database, &action)?;
+            handle_agent_commands(&uhoh, &database, &action)?;
         }
 
         Commands::Trace { event_id } => {
@@ -756,9 +756,7 @@ async fn main() -> Result<()> {
                 let status = cmd
                     .status()
                     .with_context(|| format!("Failed to run command: {}", command[0]))?;
-                if !status.success() {
-                    std::process::exit(status.code().unwrap_or(1));
-                }
+                std::process::exit(status.code().unwrap_or(1));
             }
         }
     }
@@ -787,17 +785,8 @@ fn handle_db_commands(
             }
             let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
 
-            if engine == "postgres" && mode.eq_ignore_ascii_case("replication") {
-                anyhow::bail!(
-                    "Postgres replication mode is not implemented. Use 'triggers' mode instead."
-                );
-            }
-            if engine == "mysql"
-                && (mode.eq_ignore_ascii_case("cdc") || mode.eq_ignore_ascii_case("binlog"))
-            {
-                anyhow::bail!(
-                    "MySQL CDC/binlog mode is not implemented. Use 'triggers' mode instead."
-                );
+            if !mode.eq_ignore_ascii_case("triggers") {
+                anyhow::bail!("Only 'triggers' mode is supported");
             }
 
             if engine == "postgres" {
@@ -1329,13 +1318,17 @@ fn session_matches_event(entry: &db::EventLedgerEntry, session_id: &str) -> bool
         .unwrap_or(false)
 }
 
-fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Result<()> {
+fn handle_agent_commands(
+    uhoh_dir: &std::path::Path,
+    database: &db::Database,
+    action: &AgentAction,
+) -> Result<()> {
     match action {
         AgentAction::Add { name, profile } => {
             let profile_path = profile
                 .clone()
                 .unwrap_or_else(|| format!("~/.uhoh/agents/{name}.toml"));
-            let resolved_profile = expand_home_path(&profile_path);
+            let resolved_profile = uhoh::util::expand_home(&profile_path);
             if !std::path::Path::new(&resolved_profile).exists() {
                 anyhow::bail!("Agent profile not found: {resolved_profile}");
             }
@@ -1422,8 +1415,10 @@ fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Resul
                         anyhow::bail!("Event #{} does not belong to session {}", id, session_id);
                     }
                 }
-                database.event_ledger_mark_resolved(*id)?;
-                println!("Marked event #{} as resolved", id);
+                let ledger_db = std::sync::Arc::new(db::Database::open(&uhoh_dir.join("uhoh.db"))?);
+                let ledger = uhoh::event_ledger::EventLedger::new(ledger_db);
+                uhoh::agent::resolve_event(database, &ledger, uhoh_dir, *id)?;
+                println!("Reverted event #{} and marked it as resolved", id);
             } else {
                 anyhow::bail!("Provide event id or --cascade");
             }
@@ -1497,6 +1492,10 @@ fn handle_agent_commands(database: &db::Database, action: &AgentAction) -> Resul
                     }
                 }
             }
+            #[cfg(not(unix))]
+            {
+                anyhow::bail!("Agent resume is not supported on this platform");
+            }
             println!("No paused agent pid available to resume");
         }
         AgentAction::Setup => {
@@ -1543,13 +1542,17 @@ tool_call_format = "jsonl"
         AgentAction::UpdateProfiles => {
             let profile_dir = uhoh::uhoh_dir().join("agents");
             std::fs::create_dir_all(&profile_dir)?;
-            let source = profile_dir.join("generic.toml");
-            let target = profile_dir.join("generic.updated.toml");
-            if source.exists() {
-                std::fs::copy(&source, &target)?;
-                println!("Updated profile cache: {}", target.display());
-            } else {
-                println!("No base profile exists yet. Run `uhoh agent init` first.");
+            let default_profile = profile_dir.join("generic.toml");
+            if !default_profile.exists() {
+                anyhow::bail!("No base profile exists yet. Run `uhoh agent init` first.");
+            }
+
+            let profile: toml::Value = toml::from_str(&std::fs::read_to_string(&default_profile)?)
+                .context("Failed to parse generic profile")?;
+            println!("Profile loaded: {}", default_profile.display());
+            // Profile fields (profile_version, tool_call_format) should be set at creation time
+            if profile.get("profile_version").is_none() || profile.get("tool_call_format").is_none() {
+                tracing::warn!("Profile is missing required fields. Re-run `uhoh agent init` to generate a complete profile.");
             }
         }
     }
@@ -1574,14 +1577,6 @@ fn extract_detail_field(detail: &str, key: &str) -> Option<String> {
     json.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
 
-fn expand_home_path(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
-}
 
 fn normalize_timeline_source(source: &str) -> Result<String> {
     let source = source.trim().to_ascii_lowercase();

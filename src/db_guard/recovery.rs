@@ -266,8 +266,7 @@ pub fn decrypt_recovery_payload(payload: &[u8], uhoh_dir: &std::path::Path) -> R
     if payload.starts_with(ENC_MAGIC_V2) {
         return decrypt_v2(payload, uhoh_dir);
     }
-    // Legacy V1 encryption format removed
-    Ok(payload.to_vec())
+    anyhow::bail!("Invalid or corrupted recovery payload: unrecognized encryption format")
 }
 
 fn maybe_encrypt(plaintext: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {

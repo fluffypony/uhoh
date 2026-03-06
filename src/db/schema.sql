@@ -3,14 +3,7 @@
 CREATE TABLE IF NOT EXISTS projects (
     hash TEXT PRIMARY KEY,
     current_path TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    next_snapshot_id INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS project_history (
-    project_hash TEXT NOT NULL REFERENCES projects(hash) ON DELETE CASCADE,
-    old_path TEXT NOT NULL,
-    changed_at TEXT NOT NULL
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -47,13 +40,6 @@ CREATE TABLE IF NOT EXISTS snapshot_deleted (
     stored INTEGER NOT NULL DEFAULT 1,
     storage_method INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (snapshot_rowid, path)
-);
-
-CREATE TABLE IF NOT EXISTS snapshot_tree (
-    snapshot_rowid INTEGER NOT NULL REFERENCES snapshots(rowid) ON DELETE CASCADE,
-    dir_path TEXT NOT NULL,
-    tree_hash TEXT NOT NULL,
-    PRIMARY KEY (snapshot_rowid, dir_path)
 );
 
 CREATE TABLE IF NOT EXISTS pending_ai_summaries (

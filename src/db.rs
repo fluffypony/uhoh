@@ -26,7 +26,7 @@ impl CustomizeConnection<Connection, rusqlite::Error> for SqliteCustomizer {
 type DbConn = PooledConnection<SqliteConnectionManager>;
 
 mod ledger;
-mod schema;
+
 mod snapshots;
 
 #[derive(Debug, Clone)]
@@ -346,7 +346,6 @@ impl Database {
         pinned: bool,
         files: &[SnapFileEntry],
         deleted: &[DeletedFile],
-        tree_hashes: &[TreeHash],
     ) -> Result<(i64, u64)> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -373,7 +372,6 @@ impl Database {
             pinned,
             files,
             deleted,
-            tree_hashes,
         )?;
 
         tx.commit()?;
@@ -614,7 +612,7 @@ impl Database {
     pub fn get_snapshot_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT path, hash, size, stored, executable, mtime, storage_method, COALESCE(is_symlink, 0)
+            "SELECT path, hash, size, stored, executable, mtime, storage_method, is_symlink
              FROM snapshot_files WHERE snapshot_rowid = ?1",
         )?;
         let rows = stmt.query_map(params![snapshot_rowid], |row| {
@@ -625,7 +623,7 @@ impl Database {
             let executable = row.get::<_, i32>(4)? != 0;
             let mtime = row.get::<_, Option<i64>>(5).ok().flatten();
             let storage_method = row.get::<_, i64>(6).unwrap_or(1);
-            let is_symlink = row.get::<_, Option<i32>>(7).ok().flatten().unwrap_or(0) != 0;
+            let is_symlink = row.get::<_, i32>(7).unwrap_or(0) != 0;
             Ok(FileEntryRow {
                 path,
                 hash,
@@ -1661,4 +1659,3 @@ pub struct SnapFileEntry {
     pub is_symlink: bool,
 }
 pub type DeletedFile = (String, String, u64, bool, i64); // (path, hash, size, stored, storage_method)
-pub type TreeHash = (String, String); // (dir_path, tree_hash)

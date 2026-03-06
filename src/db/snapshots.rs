@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 
-use crate::db::{DeletedFile, SnapFileEntry, TreeHash};
+use crate::db::{DeletedFile, SnapFileEntry};
 
 pub fn create_snapshot_tx(
     tx: &impl std::ops::Deref<Target = Connection>,
@@ -13,7 +13,6 @@ pub fn create_snapshot_tx(
     pinned: bool,
     files: &[SnapFileEntry],
     deleted: &[DeletedFile],
-    tree_hashes: &[TreeHash],
 ) -> Result<i64> {
     tx.execute(
         "INSERT INTO snapshots (project_hash, snapshot_id, timestamp, trigger, message, pinned)
@@ -73,16 +72,6 @@ pub fn create_snapshot_tx(
                 *stored as i32,
                 storage_method
             ])?;
-        }
-    }
-
-    {
-        let mut tree_stmt = tx.prepare(
-            "INSERT INTO snapshot_tree (snapshot_rowid, dir_path, tree_hash)
-             VALUES (?1, ?2, ?3)",
-        )?;
-        for (dir_path, tree_hash) in tree_hashes {
-            tree_stmt.execute(params![rowid, dir_path, tree_hash])?;
         }
     }
 
