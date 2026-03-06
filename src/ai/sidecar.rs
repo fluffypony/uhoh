@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
@@ -57,7 +57,8 @@ pub(crate) struct GlobalSidecar {
 
 pub(crate) static GLOBAL_SIDECAR: Lazy<Mutex<Option<GlobalSidecar>>> =
     Lazy::new(|| Mutex::new(None));
-static SIDECAR_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
+static SIDECAR_IDLE_SECS: AtomicU64 = AtomicU64::new(300);
+static SIDECAR_MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn lock_global_sidecar() -> std::sync::MutexGuard<'static, Option<GlobalSidecar>> {
     match GLOBAL_SIDECAR.lock() {
@@ -71,6 +72,40 @@ fn lock_global_sidecar() -> std::sync::MutexGuard<'static, Option<GlobalSidecar>
 
 pub fn sidecar_running() -> bool {
     lock_global_sidecar().is_some()
+}
+
+fn ensure_idle_monitor_thread() {
+    if SIDECAR_MONITOR_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let idle_secs = SIDECAR_IDLE_SECS.load(Ordering::SeqCst).max(60);
+
+            let mut kill = false;
+            {
+                let guard = lock_global_sidecar();
+                if let Some(ref gs) = *guard {
+                    if gs.last_used.elapsed().as_secs() >= idle_secs {
+                        kill = true;
+                    }
+                }
+            }
+
+            if kill {
+                let mut guard = lock_global_sidecar();
+                if let Some(mut gs) = guard.take() {
+                    let _ = gs.child.kill();
+                    let _ = gs.child.wait();
+                }
+            }
+        }
+    });
 }
 
 /// Get or spawn a persistent sidecar and return its port.
@@ -187,48 +222,9 @@ pub fn get_or_spawn_port_with_ctx(
         });
     }
 
-    // Bump instance id so any old monitor thread exits promptly
-    let my_instance_id = SIDECAR_INSTANCE_ID.fetch_add(1, Ordering::SeqCst) + 1;
     let idle = idle_shutdown_secs.max(60);
-    std::thread::spawn(move || {
-        // Sleep in 1-second increments so the thread exits quickly on instance change
-        let mut elapsed_secs = 0u64;
-        loop {
-            std::thread::sleep(Duration::from_secs(1));
-            elapsed_secs += 1;
-
-            // Exit immediately if a newer sidecar instance was spawned
-            let current_id = SIDECAR_INSTANCE_ID.load(Ordering::SeqCst);
-            if current_id != my_instance_id {
-                return;
-            }
-
-            // Only check idle timeout every 5 seconds to avoid excessive locking
-            if elapsed_secs % 5 != 0 {
-                continue;
-            }
-
-            let mut kill = false;
-            {
-                let guard = lock_global_sidecar();
-                if let Some(ref gs) = *guard {
-                    if gs.last_used.elapsed().as_secs() >= idle {
-                        kill = true;
-                    }
-                } else {
-                    return;
-                }
-            }
-            if kill {
-                let mut guard = lock_global_sidecar();
-                if let Some(mut gs) = guard.take() {
-                    let _ = gs.child.kill();
-                    let _ = gs.child.wait();
-                }
-                return;
-            }
-        }
-    });
+    SIDECAR_IDLE_SECS.store(idle, Ordering::SeqCst);
+    ensure_idle_monitor_thread();
 
     Ok(port)
 }
@@ -269,23 +265,25 @@ fn detect_backend(uhoh_dir: &Path) -> Result<Backend> {
     // Prefer MLX on Apple Silicon macOS when available
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        // Check the managed venv first (installed by mlx_update.rs)
-        let venv_python = uhoh_dir.join("venv/mlx/bin/python3");
-        let mlx_python = if venv_python.exists() {
-            venv_python
-        } else {
-            PathBuf::from("python3")
-        };
+        // Prefer managed venv python (installed by mlx_update.rs), then fall back.
+        let candidates = [
+            uhoh_dir.join("venv/mlx/bin/python3"),
+            uhoh_dir.join("venv/mlx/bin/python"),
+            PathBuf::from("python3"),
+            PathBuf::from("python"),
+        ];
 
-        if Command::new(&mlx_python)
-            .args(["-c", "import mlx_lm; print('ok')"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            return Ok(Backend::MlxLm { python: mlx_python });
+        for mlx_python in candidates {
+            if Command::new(&mlx_python)
+                .args(["-c", "import mlx_lm; print('ok')"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                return Ok(Backend::MlxLm { python: mlx_python });
+            }
         }
     }
     // Fallback to llama-server shipped in ~/.uhoh/sidecar (no PATH)

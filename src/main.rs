@@ -1846,6 +1846,7 @@ tool_call_format = "jsonl"
                 std::fs::write(&profile_path, rendered).with_context(|| {
                     format!("Failed to write profile: {}", profile_path.display())
                 })?;
+                database.update_agent_profile_version(&agent.name, agent.profile_version + 1)?;
                 updated += 1;
             }
 

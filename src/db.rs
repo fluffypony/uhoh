@@ -865,6 +865,7 @@ impl Database {
             return Ok(Vec::new());
         }
         let fts_query = terms.join(" ");
+
         let mut out = Vec::new();
 
         if let Some(ph) = project_hash {
@@ -1673,6 +1674,15 @@ impl Database {
     pub fn remove_agent(&self, name: &str) -> Result<()> {
         let conn = self.conn();
         conn.execute("DELETE FROM agents WHERE name = ?1", params![name])?;
+        Ok(())
+    }
+
+    pub fn update_agent_profile_version(&self, name: &str, profile_version: i64) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE agents SET profile_version = ?1 WHERE name = ?2",
+            params![profile_version, name],
+        )?;
         Ok(())
     }
 }
