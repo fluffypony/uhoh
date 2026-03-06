@@ -13,6 +13,31 @@ use crate::db_guard::recovery;
 use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
 
+/// Build a connection string with resolved credentials injected.
+fn build_connect_dsn(connection_ref: &str) -> Result<String> {
+    let creds = credentials::resolve_postgres_credentials(connection_ref)?;
+    let mut dsn = connection_ref.to_string();
+    if let Some(ref pw) = creds.password {
+        if !dsn.contains("password=") && !dsn.contains("password%3D") {
+            if dsn.contains('?') {
+                dsn.push_str(&format!("&password={pw}"));
+            } else {
+                dsn.push_str(&format!(" password={pw}"));
+            }
+        }
+    }
+    if let Some(ref user) = creds.username {
+        if !dsn.contains("user=") && !dsn.contains("user%3D") {
+            if dsn.contains('?') {
+                dsn.push_str(&format!("&user={user}"));
+            } else {
+                dsn.push_str(&format!(" user={user}"));
+            }
+        }
+    }
+    Ok(dsn)
+}
+
 static PG_DDL_CURSOR: Lazy<Mutex<HashMap<String, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 struct ListenWorker {
     queue: std::sync::Arc<Mutex<Vec<String>>>,
@@ -61,9 +86,10 @@ pub fn tick_postgres_guard(
         }
     }
 
-    // Lightweight delete-counter polling.
+    // Lightweight delete-counter polling (use resolved credentials).
+    let poll_dsn = build_connect_dsn(&guard.connection_ref).unwrap_or_else(|_| guard.connection_ref.clone());
     let poll_window_secs = tick_interval_secs.saturating_mul(2).max(1);
-    if let Ok(deleted_rows) = poll_delete_count(&guard.connection_ref, poll_window_secs) {
+    if let Ok(deleted_rows) = poll_delete_count(&poll_dsn, poll_window_secs) {
         if deleted_rows >= ctx.config.db_guard.mass_delete_row_threshold as i64 {
             let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
             if let Ok(artifact) = recovery::write_postgres_schema_recovery(
@@ -102,7 +128,7 @@ pub fn tick_postgres_guard(
     }
 
     let listen_payloads = drain_listen_payloads(&guard.connection_ref)?;
-    let ddl_payloads = poll_ddl_events(&guard.connection_ref, 64).unwrap_or_default();
+    let ddl_payloads = poll_ddl_events(&poll_dsn, 64).unwrap_or_default();
     let mut payloads = Vec::new();
     payloads.extend(listen_payloads);
     payloads.extend(ddl_payloads);
@@ -225,7 +251,7 @@ fn poll_delete_count(connection_ref: &str, window_seconds: i64) -> Result<i64> {
         tokio::spawn(async move {
             let _ = connection.await;
         });
-        let row = client
+        let row = match client
             .query_one(
                 "SELECT COALESCE(SUM(delete_count), 0)
                  FROM _uhoh_delete_counts
@@ -233,7 +259,16 @@ fn poll_delete_count(connection_ref: &str, window_seconds: i64) -> Result<i64> {
                 &[&window_seconds.to_string()],
             )
             .await
-            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+        {
+            Ok(row) => row,
+            Err(e) => {
+                let scrubbed = credentials::scrub_error_message(&e.to_string());
+                if scrubbed.contains("does not exist") {
+                    return Ok(0);
+                }
+                return Err(anyhow::anyhow!(scrubbed));
+            }
+        };
         let value: i64 = row.get(0);
         Ok(value)
     })

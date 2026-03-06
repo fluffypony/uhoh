@@ -766,12 +766,14 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 }
             }
             _ = update_check_interval.tick() => {
-                let uhoh_dir_clone = uhoh_dir.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = crate::update::check_and_apply_update(&uhoh_dir_clone).await {
-                        tracing::debug!("Update check failed: {}", e);
-                    }
-                });
+                if config.update.auto_check {
+                    let uhoh_dir_clone = uhoh_dir.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::update::check_and_apply_update(&uhoh_dir_clone).await {
+                            tracing::debug!("Update check failed: {}", e);
+                        }
+                    });
+                }
             }
             _ = shutdown_rx.recv() => {
                 tracing::info!("Shutdown signal received");

@@ -156,9 +156,13 @@ pub fn cmd_gitstash(
 
     // Step 4: Create a proper two-parent stash structure (HEAD + index commit)
     let msg = format!("uhoh: snapshot {} ({})", id_str, snap.timestamp);
-    // Create index commit first
+    // Create index commit first (with fallback identity for unconfigured git)
     let index_commit_out = Command::new("git")
         .current_dir(project_path)
+        .env("GIT_AUTHOR_NAME", "uhoh")
+        .env("GIT_AUTHOR_EMAIL", "uhoh@localhost")
+        .env("GIT_COMMITTER_NAME", "uhoh")
+        .env("GIT_COMMITTER_EMAIL", "uhoh@localhost")
         .args([
             "commit-tree",
             &tree_hash,
@@ -184,6 +188,10 @@ pub fn cmd_gitstash(
     // Create the stash commit with two parents
     let stash_commit_out = Command::new("git")
         .current_dir(project_path)
+        .env("GIT_AUTHOR_NAME", "uhoh")
+        .env("GIT_AUTHOR_EMAIL", "uhoh@localhost")
+        .env("GIT_COMMITTER_NAME", "uhoh")
+        .env("GIT_COMMITTER_EMAIL", "uhoh@localhost")
         .args([
             "commit-tree",
             &tree_hash,

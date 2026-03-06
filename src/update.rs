@@ -20,6 +20,10 @@ struct GithubAsset {
 
 pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
     let key_is_placeholder = UPDATE_PUBLIC_KEY.iter().all(|&b| b == 0);
+    if key_is_placeholder {
+        tracing::debug!("Auto-update disabled: no signing key configured");
+        return Ok(());
+    }
     let current_version = env!("CARGO_PKG_VERSION");
     println!("Current version: {current_version}");
 
