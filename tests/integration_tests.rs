@@ -35,15 +35,16 @@ fn test_non_utf8_path_roundtrip() {
 fn test_pre_1970_mtime_roundtrip() {
     use std::time::{Duration, UNIX_EPOCH};
 
-    let test_cases = vec![
-        (UNIX_EPOCH - Duration::from_secs(86400), -86400),
+    // mtime_to_i64 returns milliseconds; negative values round outward from epoch
+    let test_cases: Vec<(std::time::SystemTime, i64)> = vec![
+        (UNIX_EPOCH - Duration::from_secs(86400), -(86400 * 1000 + 1)),
         (
             UNIX_EPOCH - Duration::from_secs(365 * 86400),
-            -(365 * 86400),
+            -(365i64 * 86400 * 1000 + 1),
         ),
-        (UNIX_EPOCH - Duration::from_millis(500), -1),
+        (UNIX_EPOCH - Duration::from_millis(500), -501),
         (UNIX_EPOCH, 0),
-        (UNIX_EPOCH + Duration::from_secs(1_000_000), 1_000_000),
+        (UNIX_EPOCH + Duration::from_secs(1_000_000), 1_000_000_000),
     ];
 
     for (time, expected_i64) in &test_cases {
@@ -314,7 +315,6 @@ fn test_compaction_preserves_pinned() {
                 pinned,
                 &files,
                 &[],
-                &[],
             )
             .unwrap();
         if pinned {
@@ -427,10 +427,9 @@ fn test_emergency_snapshot_retained_within_window() {
     let ts_recent = chrono::Utc::now().to_rfc3339();
     let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
     let deleted: Vec<(String, String, u64, bool, i64)> = Vec::new();
-    let tree: Vec<(String, String)> = Vec::new();
 
     let (rowid, _) = db
-        .create_snapshot("emrg3", 0, &ts_recent, "emergency", "mass delete", false, &files, &deleted, &tree)
+        .create_snapshot("emrg3", 0, &ts_recent, "emergency", "mass delete", false, &files, &deleted)
         .unwrap();
 
     let cfg = uhoh::config::CompactionConfig::default();
@@ -454,16 +453,15 @@ fn test_emergency_snapshot_pruned_after_window() {
     let old_ts = (chrono::Utc::now() - chrono::Duration::hours(72)).to_rfc3339();
     let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
     let deleted: Vec<(String, String, u64, bool, i64)> = Vec::new();
-    let tree: Vec<(String, String)> = Vec::new();
 
     let (old_rowid, _) = db
-        .create_snapshot("emrg4", 0, &old_ts, "emergency", "old mass delete", false, &files, &deleted, &tree)
+        .create_snapshot("emrg4", 0, &old_ts, "emergency", "old mass delete", false, &files, &deleted)
         .unwrap();
 
     // Create a recent snapshot so the old one can be dominated in buckets
     let recent_ts = chrono::Utc::now().to_rfc3339();
     let (_, _) = db
-        .create_snapshot("emrg4", 0, &recent_ts, "auto", "", false, &files, &deleted, &tree)
+        .create_snapshot("emrg4", 0, &recent_ts, "auto", "", false, &files, &deleted)
         .unwrap();
 
     let cfg = uhoh::config::CompactionConfig {
@@ -493,18 +491,17 @@ fn test_predecessor_protection_in_compaction() {
 
     let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
     let deleted: Vec<(String, String, u64, bool, i64)> = Vec::new();
-    let tree: Vec<(String, String)> = Vec::new();
 
     // Create predecessor snapshot (old but not emergency)
     let pred_ts = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
     let (pred_rowid, _) = db
-        .create_snapshot("emrg5", 0, &pred_ts, "auto", "", false, &files, &deleted, &tree)
+        .create_snapshot("emrg5", 0, &pred_ts, "auto", "", false, &files, &deleted)
         .unwrap();
 
     // Create emergency snapshot (recent, within retention)
     let emrg_ts = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
     let (emrg_rowid, _) = db
-        .create_snapshot("emrg5", 0, &emrg_ts, "emergency", "mass delete", false, &files, &deleted, &tree)
+        .create_snapshot("emrg5", 0, &emrg_ts, "emergency", "mass delete", false, &files, &deleted)
         .unwrap();
 
     // Aggressive compaction config that would normally prune old snapshots

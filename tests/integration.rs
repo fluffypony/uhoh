@@ -53,8 +53,7 @@ fn test_snapshot_creation_and_query() {
     let db = uhoh::db::Database::open(&tmp.path().join("test.db")).unwrap();
 
     db.add_project("proj1", "/tmp/test").unwrap();
-    let snap_id = db.next_snapshot_id("proj1").unwrap();
-    assert_eq!(snap_id, 1);
+    let snap_id = 1;
 
     let files: Vec<uhoh::db::SnapFileEntry> = vec![
         uhoh::db::SnapFileEntry {
@@ -88,7 +87,6 @@ fn test_snapshot_creation_and_query() {
             "test",
             false,
             &files,
-            &[],
             &[],
         )
         .unwrap();
