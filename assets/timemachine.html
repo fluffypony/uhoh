@@ -703,6 +703,7 @@
       const hash = e.target.value;
       hideDryRun();
       state.project = state.projects.find((p) => p.project_hash === hash) || null;
+      state.selectedPath = null;
       await loadSnapshots();
     }
 
