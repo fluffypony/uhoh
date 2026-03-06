@@ -71,10 +71,20 @@ pub fn create_snapshot(
             );
         }
 
-        // Build set of relative changed file paths
+        // Build set of non-ignored file paths via walker for filtering changed_paths
+        // This ensures incremental snapshots respect .gitignore rules
+        let walked_set: HashSet<PathBuf> = crate::ignore_rules::build_walker(project_path)
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_some_and(|ft| ft.is_file() || ft.is_symlink()))
+            .map(|e| e.into_path())
+            .collect();
         let mut rel_changed: HashSet<String> = HashSet::new();
         for p in paths {
             if !p.starts_with(project_path) {
+                continue;
+            }
+            // Skip paths not in the walker's output (i.e., ignored by .gitignore)
+            if !walked_set.contains(p) {
                 continue;
             }
             if let Ok(rel) = p.strip_prefix(project_path) {
@@ -103,16 +113,16 @@ pub fn create_snapshot(
                     let executable = cas::is_executable(&abs_path);
                     let is_symlink = meta.file_type().is_symlink();
                     if let Some(cached) = prev_files.get(rel_path) {
-                        let fs_mtime_secs = mtime_to_i64(mtime);
-                        let cached_secs = mtime_to_i64(cached.mtime);
-                        if cached.size == size && cached_secs == fs_mtime_secs {
+                        let fs_mtime_ms = mtime_to_i64(mtime);
+                        let cached_mtime_ms = mtime_to_i64(cached.mtime);
+                        if cached.size == size && cached_mtime_ms == fs_mtime_ms {
                             files_for_manifest.push(crate::db::SnapFileEntry {
                                 path: rel_path.clone(),
                                 hash: cached.hash.clone(),
                                 size: cached.size,
                                 stored: cached.stored,
                                 executable: cached.executable,
-                                mtime: Some(cached_secs),
+                                mtime: Some(cached_mtime_ms),
                                 storage_method: cached.storage_method,
                                 is_symlink: cached.is_symlink,
                             });
@@ -359,16 +369,16 @@ pub fn create_snapshot(
             let executable = cas::is_executable(abs_path);
             let is_symlink = meta.file_type().is_symlink();
             if let Some(cached) = prev_files.get(rel_path) {
-                let fs_mtime_secs = mtime_to_i64(mtime);
-                let cached_secs = mtime_to_i64(cached.mtime);
-                if cached.size == size && cached_secs == fs_mtime_secs {
+                let fs_mtime_ms = mtime_to_i64(mtime);
+                let cached_mtime_ms = mtime_to_i64(cached.mtime);
+                if cached.size == size && cached_mtime_ms == fs_mtime_ms {
                     files_for_manifest.push(crate::db::SnapFileEntry {
                         path: rel_path.clone(),
                         hash: cached.hash.clone(),
                         size: cached.size,
                         stored: cached.stored,
                         executable: cached.executable,
-                        mtime: Some(cached_secs),
+                        mtime: Some(cached_mtime_ms),
                         storage_method: cached.storage_method,
                         is_symlink: cached.is_symlink,
                     });

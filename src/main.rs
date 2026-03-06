@@ -1503,7 +1503,11 @@ fn handle_agent_commands(
             std::fs::create_dir_all(&agents_dir)?;
             let template_path = agents_dir.join("default.toml");
             if !template_path.exists() {
-                std::fs::write(&template_path, "# Default agent profile\n# Edit this file to configure agent monitoring.\n\n[agent]\nname = \"default\"\n")?;
+                std::fs::write(&template_path, r#"profile_version = 1
+name = "default"
+session_log_pattern = ""
+tool_call_format = "jsonl"
+"#)?;
             }
             println!("Agent profiles initialized at {}", agents_dir.display());
             println!("Edit {} to configure agent monitoring.", template_path.display());

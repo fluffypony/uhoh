@@ -44,7 +44,7 @@ fn detect_platform_asset_substring() -> Result<&'static str> {
             if has_nvidia_gpu() {
                 Ok("win-cuda")
             } else {
-                Ok("win-vulkan-x64")
+                Ok("win-cpu-x64")
             }
         }
         ("windows", "aarch64") => Ok("win-arm64"),
@@ -292,7 +292,8 @@ pub fn download_and_install(
 }
 
 pub fn check_mlx_lm_version() -> Option<String> {
-    let output = std::process::Command::new("python3")
+    let default_python = if cfg!(windows) { "python" } else { "python3" };
+    let output = std::process::Command::new(default_python)
         .args(["-c", "import mlx_lm; print(mlx_lm.__version__)"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

@@ -777,6 +777,10 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
             }
             _ = shutdown_rx.recv() => {
                 tracing::info!("Shutdown signal received");
+                // Flush event ledger before shutdown
+                if let Err(e) = event_ledger.flush() {
+                    tracing::warn!("Failed to flush event ledger on shutdown: {}", e);
+                }
                 // Attempt to shutdown AI sidecar if running
                 crate::ai::sidecar::shutdown_global_sidecar();
                 if let Some(handle) = &server_handle {
@@ -1023,6 +1027,13 @@ async fn run_tick_maintenance(
     };
 
     check_moved_folders(&db_projects, database, watcher_handle, project_states);
+
+    // Clean up stale temp files in blob store (from crashed processes)
+    crate::cas::cleanup_stale_temp_files(
+        &uhoh_dir.join("blobs"),
+        std::time::Duration::from_secs(3600),
+    );
+
     check_for_new_projects(
         &db_projects,
         watcher_handle,
@@ -1233,7 +1244,7 @@ async fn process_pending_snapshots(
                     state.deleted_paths.clear();
                     state.first_change_at = None;
                     state.last_change_at = None;
-                    state.last_emergency_at = Some(Instant::now());
+                    // Cooldown is set after snapshot succeeds (in join results below)
                     state.overflow_occurred = false;
 
                     // Collect for spawning after the loop (include drained for requeue)
@@ -1459,6 +1470,10 @@ async fn process_pending_snapshots(
             Ok((project_path, _drained, Ok(Some(SnapshotResult::Created(id))), was_emergency_spawn)) => {
                 if let Some(state) = states.get_mut(&project_path) {
                     state.last_snapshot = Instant::now();
+                    // Set emergency cooldown on successful emergency snapshot
+                    if was_emergency_spawn {
+                        state.last_emergency_at = Some(Instant::now());
+                    }
                     if let Ok(Some(rowid)) = database.latest_snapshot_rowid(&state.hash) {
                         if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
                             // Check for dynamic trigger upgrade (safety net in snapshot.rs).
