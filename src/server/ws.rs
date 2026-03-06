@@ -3,6 +3,7 @@ use axum::{
         ws::{Message, WebSocket},
         State, WebSocketUpgrade,
     },
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -10,10 +11,24 @@ use futures_util::{SinkExt, StreamExt};
 use super::AppState;
 
 pub async fn websocket_handler(
+    headers: HeaderMap,
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+) -> Result<impl IntoResponse, StatusCode> {
+    // Validate Origin header to prevent cross-site WebSocket hijacking
+    if let Some(origin) = headers.get("origin") {
+        if let Ok(origin_str) = origin.to_str() {
+            let allowed = origin_str.starts_with("http://127.0.0.1")
+                || origin_str.starts_with("http://localhost")
+                || origin_str.starts_with("https://127.0.0.1")
+                || origin_str.starts_with("https://localhost");
+            if !allowed {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+    }
+
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state)))
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {

@@ -35,7 +35,7 @@ fn test_non_utf8_path_roundtrip() {
 fn test_pre_1970_mtime_roundtrip() {
     use std::time::{Duration, UNIX_EPOCH};
 
-    // mtime_to_i64 returns milliseconds; negative values round outward from epoch
+    // mtime_to_millis returns milliseconds; negative values round outward from epoch
     let test_cases: Vec<(std::time::SystemTime, i64)> = vec![
         (UNIX_EPOCH - Duration::from_secs(86400), -(86400 * 1000 + 1)),
         (
@@ -48,18 +48,18 @@ fn test_pre_1970_mtime_roundtrip() {
     ];
 
     for (time, expected_i64) in &test_cases {
-        let converted = uhoh::snapshot::mtime_to_i64(*time);
+        let converted = uhoh::snapshot::mtime_to_millis(*time);
         assert_eq!(converted, *expected_i64);
 
-        let back = uhoh::snapshot::i64_to_mtime(converted);
+        let back = uhoh::snapshot::millis_to_mtime(converted);
         if *expected_i64 < 0 {
             assert!(back < UNIX_EPOCH);
         }
     }
 
-    let _ = uhoh::snapshot::i64_to_mtime(i64::MIN + 1);
-    let _ = uhoh::snapshot::i64_to_mtime(0);
-    let _ = uhoh::snapshot::i64_to_mtime(i64::MAX);
+    let _ = uhoh::snapshot::millis_to_mtime(i64::MIN + 1);
+    let _ = uhoh::snapshot::millis_to_mtime(0);
+    let _ = uhoh::snapshot::millis_to_mtime(i64::MAX);
 }
 
 #[cfg(unix)]

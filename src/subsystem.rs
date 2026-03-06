@@ -14,7 +14,6 @@ use crate::event_ledger::EventLedger;
 pub enum AuditSource {
     None,
     Fanotify,
-    OpenBsm,
 }
 
 #[derive(Debug, Clone)]

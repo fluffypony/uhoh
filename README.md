@@ -163,13 +163,13 @@ When enabled, the daemon starts a unified localhost server (default `127.0.0.1:2
 |---|---|---|
 | `/` | GET | Time Machine UI |
 | `/api/v1/projects` | GET | List registered projects |
-| `/api/v1/projects/:hash/snapshots` | GET | List snapshots (paginated) |
-| `/api/v1/projects/:hash/snapshots` | POST | Create a snapshot |
-| `/api/v1/projects/:hash/snapshots/:id/files` | GET | File tree for a snapshot |
-| `/api/v1/projects/:hash/snapshots/:id/diff` | GET | Diff against previous or specified snapshot |
-| `/api/v1/projects/:hash/snapshots/:id/file/*path` | GET | Raw file content from a snapshot |
-| `/api/v1/projects/:hash/restore/:id` | POST | Restore (dry-run or apply) |
-| `/api/v1/projects/:hash/timeline` | GET | Snapshot timeline with track grouping |
+| `/api/v1/projects/{hash}/snapshots` | GET | List snapshots (paginated) |
+| `/api/v1/projects/{hash}/snapshots` | POST | Create a snapshot |
+| `/api/v1/projects/{hash}/snapshots/{id}/files` | GET | File tree for a snapshot |
+| `/api/v1/projects/{hash}/snapshots/{id}/diff` | GET | Diff against previous or specified snapshot |
+| `/api/v1/projects/{hash}/snapshots/{id}/file/{*path}` | GET | Raw file content from a snapshot |
+| `/api/v1/projects/{hash}/restore/{id}` | POST | Restore (dry-run or apply) |
+| `/api/v1/projects/{hash}/timeline` | GET | Snapshot timeline with track grouping |
 | `/api/v1/search` | GET | Full-text search across snapshots (`?q=...&project=...`) |
 | `/ws` | GET | WebSocket live events |
 | `/mcp` | POST | MCP Streamable HTTP JSON-RPC endpoint |
@@ -342,7 +342,7 @@ Credential resolution is mode-aware. Daemon paths resolve from env vars (`UHOH_P
 
 Build with `--features keyring` to enable OS keychain integration for CLI credential resolution and storage.
 
-Optional subsystems are feature-gated to keep default builds lean: `audit-trail`, `landlock-sandbox`, `pg-replication`, `mysql-cdc`, and `keyring`.
+Optional subsystems are feature-gated to keep default builds lean: `audit-trail`, `landlock-sandbox`, and `keyring`.
 
 ### Update settings
 
@@ -484,7 +484,7 @@ If enabled, uhoh builds a compact diff (up to `max_context_tokens` × 4 characte
 uhoh supports two inference backends:
 
 - **llama.cpp** (`llama-server`): place the binary in `~/.uhoh/sidecar/llama-server`. PATH is intentionally not searched, for security.
-- **MLX** (`mlx_lm`): preferred automatically on Apple Silicon macOS when the `mlx_lm` Python package is importable. uhoh checks by running `python3 -c "import mlx_lm"`.
+- **MLX** (`mlx_lm`): preferred automatically on Apple Silicon macOS when the `mlx_lm` Python package is importable. uhoh auto-manages the MLX virtualenv under `~/.uhoh/venv/mlx` and performs a lightweight runtime check using the configured venv interpreter.
 
 The sidecar process is kept alive as a persistent global instance, bound to a random high port on 127.0.0.1, and shut down after the configured idle timeout. Startup retries up to 5 times with different ports, and waits up to 30 seconds for the health endpoint to respond.
 
@@ -567,7 +567,7 @@ On macOS this creates a launchd agent (`~/Library/LaunchAgents/com.uhoh.daemon.p
 - `uhoh start [--service]` / `uhoh stop` / `uhoh restart`
 - `uhoh service-install` / `uhoh service-remove`
 - `uhoh mcp` — run MCP server over STDIO
-- `uhoh db add <dsn> [--tables ...] [--name ...] [--mode triggers|replication]`
+- `uhoh db add <dsn> [--tables ...] [--name ...] [--mode triggers]`
 - `uhoh db remove <name>` / `uhoh db list`
 - `uhoh db events [name] [--table ...]`
 - `uhoh db recover <event-id> [--apply]`

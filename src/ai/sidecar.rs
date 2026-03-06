@@ -151,34 +151,46 @@ pub fn get_or_spawn_port_with_ctx(
         });
     }
 
-    // Bump instance id so any old monitor thread exits
+    // Bump instance id so any old monitor thread exits promptly
     let my_instance_id = SIDECAR_INSTANCE_ID.fetch_add(1, Ordering::SeqCst) + 1;
     let idle = idle_shutdown_secs.max(60);
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(30));
-        // If a newer sidecar instance was spawned, exit this monitor thread
-        let current_id = SIDECAR_INSTANCE_ID.load(Ordering::SeqCst);
-        if current_id != my_instance_id {
-            return;
-        }
-        let mut kill = false;
-        {
-            let guard = lock_global_sidecar();
-            if let Some(ref gs) = *guard {
-                if gs.last_used.elapsed().as_secs() >= idle {
-                    kill = true;
-                }
-            } else {
+    std::thread::spawn(move || {
+        // Sleep in 1-second increments so the thread exits quickly on instance change
+        let mut elapsed_secs = 0u64;
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            elapsed_secs += 1;
+
+            // Exit immediately if a newer sidecar instance was spawned
+            let current_id = SIDECAR_INSTANCE_ID.load(Ordering::SeqCst);
+            if current_id != my_instance_id {
                 return;
             }
-        }
-        if kill {
-            let mut guard = lock_global_sidecar();
-            if let Some(mut gs) = guard.take() {
-                let _ = gs.child.kill();
-                let _ = gs.child.wait();
+
+            // Only check idle timeout every 5 seconds to avoid excessive locking
+            if elapsed_secs % 5 != 0 {
+                continue;
             }
-            return;
+
+            let mut kill = false;
+            {
+                let guard = lock_global_sidecar();
+                if let Some(ref gs) = *guard {
+                    if gs.last_used.elapsed().as_secs() >= idle {
+                        kill = true;
+                    }
+                } else {
+                    return;
+                }
+            }
+            if kill {
+                let mut guard = lock_global_sidecar();
+                if let Some(mut gs) = guard.take() {
+                    let _ = gs.child.kill();
+                    let _ = gs.child.wait();
+                }
+                return;
+            }
         }
     });
 

@@ -90,17 +90,42 @@ fn install_launchagent() -> Result<()> {
 
     // Use modern launchctl API
     let uid = unsafe { libc::getuid() };
-    std::process::Command::new("launchctl")
+    let status = std::process::Command::new("launchctl")
         .args(["bootstrap", &format!("gui/{uid}")])
         .arg(&plist_path)
-        .status()
-        .or_else(|_| {
-            // Fallback to legacy API
-            std::process::Command::new("launchctl")
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            tracing::warn!(
+                "launchctl bootstrap exited with code {:?}, trying legacy load",
+                s.code()
+            );
+            let fallback = std::process::Command::new("launchctl")
                 .args(["load", "-w"])
                 .arg(&plist_path)
-                .status()
-        })?;
+                .status()?;
+            if !fallback.success() {
+                anyhow::bail!(
+                    "launchctl load failed with code {:?}",
+                    fallback.code()
+                );
+            }
+        }
+        Err(_) => {
+            let fallback = std::process::Command::new("launchctl")
+                .args(["load", "-w"])
+                .arg(&plist_path)
+                .status()?;
+            if !fallback.success() {
+                anyhow::bail!(
+                    "launchctl load failed with code {:?}",
+                    fallback.code()
+                );
+            }
+        }
+    }
 
     Ok(())
 }
@@ -112,20 +137,13 @@ fn remove_launchagent() -> Result<()> {
         .join("Library/LaunchAgents/com.uhoh.daemon.plist");
 
     let uid = unsafe { libc::getuid() };
-    std::process::Command::new("launchctl")
+    let _ = std::process::Command::new("launchctl")
         .args([
             "bootout",
             &format!("gui/{uid}"),
             &plist_path.to_string_lossy(),
         ])
-        .status()
-        .or_else(|_| {
-            std::process::Command::new("launchctl")
-                .args(["unload", "-w"])
-                .arg(&plist_path)
-                .status()
-        })
-        .ok();
+        .status();
 
     std::fs::remove_file(&plist_path).ok();
     Ok(())

@@ -41,7 +41,14 @@ impl Drop for FanotifyFd {
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) -> Result<()> {
-    let monitor_root = std::env::current_dir().context("Unable to resolve current directory")?;
+    // Use the first active project root from the database instead of cwd,
+    // which is typically / or ~ when running as a daemon.
+    let projects = ctx.database.list_projects().unwrap_or_default();
+    let monitor_root = projects
+        .first()
+        .map(|p| std::path::PathBuf::from(&p.current_path))
+        .or_else(|| std::env::current_dir().ok())
+        .context("No project roots found and unable to resolve current directory")?;
     let fan_fd_raw = unsafe {
         libc::fanotify_init(
             (libc::FAN_CLASS_CONTENT

@@ -57,7 +57,35 @@ function Main {
     $TempFile = Join-Path $env:TEMP ("uhoh-install-" + [System.IO.Path]::GetRandomFileName() + ".exe")
     Invoke-WebRequest -Uri $DownloadUrl -OutFile $TempFile -UseBasicParsing
 
+    # Verify download hash BEFORE executing the untrusted binary.
+    # Use PowerShell's Get-FileHash and DNS TXT record for independent verification.
+    Write-Host "Verifying downloaded binary hash..."
+    $FileHash = (Get-FileHash -Path $TempFile -Algorithm SHA256).Hash.ToLower()
+    Write-Host ("  SHA256: {0}" -f $FileHash)
+    try {
+        $DnsResult = Resolve-DnsName -Name "sha256.release.uhoh.it" -Type TXT -ErrorAction Stop
+        $DnsHash = ($DnsResult | Where-Object { $_.Type -eq "TXT" } | Select-Object -First 1).Strings -join ""
+        $DnsHash = $DnsHash.Trim().ToLower()
+        if ($DnsHash -and ($FileHash -ne $DnsHash)) {
+            Remove-Item $TempFile -ErrorAction SilentlyContinue
+            throw "Binary hash does not match DNS record! Expected: $DnsHash, Got: $FileHash"
+        } elseif ($DnsHash) {
+            Write-Host "  Hash verified against DNS record." -ForegroundColor Green
+        } else {
+            Write-Host "  DNS record empty; skipping pre-install hash check." -ForegroundColor Yellow
+        }
+    } catch [System.ComponentModel.Win32Exception] {
+        Write-Host "  DNS lookup unavailable; skipping pre-install hash check." -ForegroundColor Yellow
+    }
+
     # Install
+    try {
+        & uhoh stop | Out-Null
+    } catch {
+        try {
+            taskkill /F /IM uhoh.exe | Out-Null
+        } catch {}
+    }
     if (Test-Path $ExePath) { Remove-Item $ExePath -Force }
     Move-Item -Path $TempFile -Destination $ExePath -Force
     Write-Host ("Binary installed to {0}" -f $ExePath) -ForegroundColor Green

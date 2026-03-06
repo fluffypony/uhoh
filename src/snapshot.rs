@@ -606,6 +606,7 @@ pub fn create_snapshot(
     // AI summary: attempt now if allowed, else enqueue for later
     if ai::should_run_ai(&config.ai) {
         let uhoh_dir_cl = uhoh_dir.to_path_buf();
+        let db_handle = database.clone_handle();
         let cfg_cloned = config.clone();
         let files_added: Vec<String> = new_files
             .iter()
@@ -763,9 +764,7 @@ pub fn create_snapshot(
                 &files,
             ) {
                 Ok(text) if !text.is_empty() => {
-                    if let Ok(db) = crate::db::Database::open(&uhoh_dir_cl.join("uhoh.db")) {
-                        let _ = db.set_ai_summary(db_rowid, &text);
-                    }
+                    let _ = db_handle.set_ai_summary(db_rowid, &text);
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!("AI summary generation failed: {}", e),
@@ -851,15 +850,6 @@ pub fn millis_to_mtime(millis: i64) -> SystemTime {
         let abs_millis = (millis as i128).unsigned_abs().min(u64::MAX as u128) as u64;
         std::time::UNIX_EPOCH - std::time::Duration::from_millis(abs_millis)
     }
-}
-
-// Backward-compatible aliases for older call sites and tests.
-pub fn mtime_to_i64(t: SystemTime) -> i64 {
-    mtime_to_millis(t)
-}
-
-pub fn i64_to_mtime(millis: i64) -> SystemTime {
-    millis_to_mtime(millis)
 }
 
 #[cfg(test)]

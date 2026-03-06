@@ -16,7 +16,6 @@ pub enum StorageMethod {
     None = 0,
     Copy = 1,
     Reflink = 2,
-    Hardlink = 3,
 }
 
 impl StorageMethod {
@@ -30,7 +29,6 @@ impl StorageMethod {
         match v {
             1 => StorageMethod::Copy,
             2 => StorageMethod::Reflink,
-            3 => StorageMethod::Hardlink,
             _ => StorageMethod::None,
         }
     }
@@ -39,7 +37,6 @@ impl StorageMethod {
             StorageMethod::None => "none",
             StorageMethod::Copy => "copy",
             StorageMethod::Reflink => "reflink",
-            StorageMethod::Hardlink => "hardlink",
         }
     }
 }
@@ -519,10 +516,7 @@ fn encode_relpath_bytes(rel: &Path) -> String {
 /// Decode a manifest relative path back to a platform OsString.
 pub fn decode_relpath_to_os(s: &str) -> OsString {
     if let Some(rest) = s.strip_prefix("b64:") {
-        // Try URL-safe first (new encoding), then standard (legacy compatibility)
-        if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(rest)
-            .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(rest))
+        if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(rest)
         {
             #[cfg(unix)]
             {

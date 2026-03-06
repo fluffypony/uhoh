@@ -1,2 +1,12 @@
 This directory contains optional AI features used by uhoh for local-only change summaries.
-They are disabled by default and require an external sidecar (llama.cpp's llama-server).
+
+AI remains disabled by default. When enabled, uhoh can auto-download/update sidecar
+binaries under `~/.uhoh/sidecar`, auto-download selected model files under
+`~/.uhoh/models`, and (on Apple Silicon macOS) auto-manage an MLX virtualenv under
+`~/.uhoh/venv/mlx`.
+
+Inference backends:
+- llama.cpp `llama-server` (preferred default backend)
+- MLX (`mlx_lm.server`) on supported Apple Silicon macOS setups
+
+Both backends are health-checked via `/v1/models` and run on loopback only.

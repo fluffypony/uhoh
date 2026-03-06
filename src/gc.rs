@@ -10,30 +10,9 @@ use crate::db::Database;
 pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
     let blob_root = uhoh_dir.join("blobs");
 
-    // Clean up stale temp files first
-    let tmp_dir = blob_root.join("tmp");
-    if tmp_dir.exists() {
-        let now = std::time::SystemTime::now();
-        let max_age = std::time::Duration::from_secs(3600);
-        if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with(".tmp.") {
-                        if let Ok(meta) = std::fs::metadata(&p) {
-                            if let Ok(mtime) = meta.modified() {
-                                if let Ok(age) = now.duration_since(mtime) {
-                                    if age > max_age {
-                                        let _ = std::fs::remove_file(&p);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Clean up stale temp files first (unified with cas::cleanup_stale_temp_files)
+    let max_age = std::time::Duration::from_secs(3600);
+    crate::cas::cleanup_stale_temp_files(&blob_root, max_age);
 
     // Get all referenced hashes
     let referenced = database.all_referenced_blob_hashes()?;
@@ -55,18 +34,8 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
             let name = blob_entry.file_name();
             let name_str = name.to_string_lossy();
 
-            // Skip temp files
-            if name_str.starts_with(".tmp.") {
-                // clean up stale temp files in prefix dirs (>10 min)
-                if let Ok(meta) = blob_entry.metadata() {
-                    if let Ok(modified) = meta.modified() {
-                        if let Ok(age) = modified.elapsed() {
-                            if age > std::time::Duration::from_secs(600) {
-                                let _ = std::fs::remove_file(blob_entry.path());
-                            }
-                        }
-                    }
-                }
+            // Skip temp files (cleaned up by cas::cleanup_stale_temp_files above)
+            if name_str.starts_with(".tmp.") || name_str.starts_with(".blob.") {
                 continue;
             }
 

@@ -72,7 +72,7 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
 
     let refs = allow_paths
         .iter()
-        .map(|path| expand_home(path))
+        .map(|path| crate::util::expand_home(path))
         .filter_map(|path| {
             let candidate = std::path::PathBuf::from(&path);
             if candidate.exists() {
@@ -102,17 +102,8 @@ pub fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) -> anyhow
 
 #[cfg(not(target_os = "linux"))]
 pub fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
-    anyhow::bail!("Landlock is only supported on Linux")
-}
-
-#[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
-fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
+    tracing::warn!("Sandboxing is only available on Linux. Running without sandbox.");
+    Ok(())
 }
 
 #[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]

@@ -42,7 +42,7 @@ pub fn load_agent_profile(path: &std::path::Path) -> Result<AgentProfile> {
 }
 
 pub fn resolve_session_log_path(pattern: &str) -> Result<Option<std::path::PathBuf>> {
-    let expanded = expand_home(pattern);
+    let expanded = crate::util::expand_home(pattern);
     let mut matches = Vec::new();
     for entry in glob::glob(&expanded)? {
         let path = match entry {
@@ -80,13 +80,4 @@ pub fn validate_profile_path(path: &std::path::Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
 }

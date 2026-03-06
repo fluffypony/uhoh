@@ -24,6 +24,7 @@ pub mod server;
 pub mod snapshot;
 pub mod subsystem;
 pub mod update;
+pub mod util;
 pub mod watcher;
 
 // Single source of truth for ~/.uhoh directory
