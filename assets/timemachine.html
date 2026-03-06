@@ -598,26 +598,14 @@
       return headers;
     }
 
-    function withAuth(retryFn) {
-      return retryFn().catch(async (error) => {
-        if (!String(error.message || '').includes('401')) {
-          throw error;
-        }
-        const token = prompt('Bearer token from ~/.uhoh/server.token');
-        if (!token) {
-          throw error;
-        }
-        window.localStorage.setItem('uhoh_token', token.trim());
-        return retryFn();
-      });
-    }
-
     async function api(path, options = {}) {
       const headers = authHeaders(options.headers || {});
       const res = await fetch(path, Object.assign({}, options, { headers }));
       if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Request failed: ${res.status}`);
+        const text = await res.text().catch(() => '');
+        const err = new Error(`${res.status} ${text}`);
+        err.status = res.status;
+        throw err;
       }
       const contentType = res.headers.get('content-type') || '';
       if (contentType.includes('application/json')) {
@@ -626,11 +614,42 @@
       return res.text();
     }
 
+    function withAuth(fn) {
+      return fn().catch(async (error) => {
+        if (error.status !== 401) throw error;
+        const token = prompt('Enter bearer token from ~/.uhoh/server.token:');
+        if (!token) throw error;
+        window.localStorage.setItem('uhoh_token', token.trim());
+        return fn();
+      });
+    }
+
+    function humanSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+      if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+      return (bytes / 1073741824).toFixed(1) + ' GB';
+    }
+
     async function init() {
       bindEvents();
       updateClock();
       setInterval(updateClock, 1000);
-      await loadProjects();
+      try {
+        await loadProjects();
+      } catch(e) {
+        if (e.status === 401) {
+          const token = prompt('Enter bearer token from ~/.uhoh/server.token:');
+          if (token) {
+            window.localStorage.setItem('uhoh_token', token.trim());
+            await loadProjects();
+          } else {
+            throw e;
+          }
+        } else {
+          throw e;
+        }
+      }
       connectWs();
     }
 
@@ -641,11 +660,19 @@
       document.getElementById('restoreBtn').addEventListener('click', restoreSnapshot);
       document.getElementById('searchInput').addEventListener('input', onSearch);
       document.getElementById('confirmRestoreBtn').addEventListener('click', confirmRestore);
+
+      document.querySelectorAll('.tab-bar .tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+          document.querySelectorAll('.tab-bar .tab').forEach(t => t.classList.remove('active'));
+          tab.classList.add('active');
+          switchTab(tab.textContent.trim());
+        });
+      });
     }
 
     async function loadProjects() {
       setStatus('Loading projects');
-      const data = await api(`${API}/projects`);
+      const data = await withAuth(() => api(`${API}/projects`));
       state.projects = data.projects || [];
       const select = document.getElementById('projectSelect');
       select.innerHTML = '';
@@ -679,20 +706,30 @@
         return;
       }
       setStatus('Loading snapshots');
-      const data = await api(`${API}/projects/${state.project.project_hash}/snapshots?limit=200`);
+      const data = await withAuth(() => api(`${API}/projects/${state.project.project_hash}/snapshots?limit=200`));
       state.snapshots = data.snapshots || [];
       state.snapshot = state.snapshots[0] || null;
       state.previous = state.snapshots[1] || null;
       renderTimeline();
+      if (!state.snapshot) {
+        state.selectedPath = null;
+        renderTree([]);
+        document.getElementById('content').innerHTML = '<div class="empty-state">No snapshots yet</div>';
+        setStatus('No snapshots', 'muted');
+        return;
+      }
       await loadFiles();
       setStatus(`Loaded ${state.snapshots.length} snapshots`, 'ok');
     }
 
     async function loadFiles() {
       if (!state.project || !state.snapshot) {
+        state.files = [];
+        renderTree();
+        document.getElementById('content').innerHTML = '';
         return;
       }
-      const data = await api(`${API}/projects/${state.project.project_hash}/snapshots/${state.snapshot.id}/files`);
+      const data = await withAuth(() => api(`${API}/projects/${state.project.project_hash}/snapshots/${state.snapshot.id}/files`));
       state.files = data.flat_files || [];
       renderTree();
       if (state.files.length === 0) {
@@ -702,16 +739,17 @@
       }
     }
 
-    function renderTree() {
+    function renderTree(overrideFiles) {
       const tree = document.getElementById('tree');
       tree.innerHTML = '';
+      const allFiles = overrideFiles !== undefined ? overrideFiles : state.files;
       const search = document.getElementById('searchInput').value.toLowerCase().trim();
-      const files = state.files.filter((f) => !search || f.path.toLowerCase().includes(search));
+      const files = allFiles.filter((f) => !search || f.path.toLowerCase().includes(search));
 
       files.forEach((file) => {
         const row = document.createElement('div');
         row.className = 'tree-item' + (state.selectedPath === file.path ? ' selected' : '');
-        row.innerHTML = `<svg class="icon" viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6z"></path></svg><span>${escapeHtml(file.path)}</span><small>${file.size}b</small>`;
+        row.innerHTML = `<svg class="icon" viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6z"></path></svg><span>${escapeHtml(file.path)}</span><small>${humanSize(file.size)}</small>`;
         row.onclick = () => selectFile(file.path);
         tree.appendChild(row);
       });
@@ -727,7 +765,73 @@
     async function selectFile(path) {
       state.selectedPath = path;
       renderTree();
-      await renderDiff(path);
+      const activeTab = document.querySelector('.tab-bar .tab.active');
+      const view = activeTab ? activeTab.textContent.trim() : 'Diff View';
+      await switchTab(view);
+    }
+
+    async function switchTab(view) {
+      const content = document.getElementById('content');
+      if (view === 'Diff View') {
+        if (state.selectedPath) {
+          await renderDiff(state.selectedPath);
+        } else {
+          content.className = 'empty-state';
+          content.textContent = 'Select a file to inspect changes';
+        }
+      } else if (view === 'Raw Source') {
+        if (!state.project || !state.snapshot || !state.selectedPath) {
+          content.className = 'empty-state';
+          content.textContent = 'Select a file to view source';
+          return;
+        }
+        try {
+          const text = await withAuth(() =>
+            api(`${API}/projects/${state.project.project_hash}/snapshots/${state.snapshot.id}/file/${state.selectedPath}`)
+          );
+          const raw = typeof text === 'string' ? text : JSON.stringify(text, null, 2);
+          let out = '';
+          raw.split('\n').forEach((line, i) => {
+            out += `<div class="code-line"><span class="line-num">${i + 1}</span><span class="line-code">${escapeHtml(line)}</span></div>`;
+          });
+          content.className = '';
+          content.innerHTML = out || '<div class="empty-state">Empty file</div>';
+        } catch(e) {
+          content.className = 'empty-state';
+          content.textContent = 'Failed to load file: ' + e.message;
+        }
+      } else if (view === 'Timeline') {
+        if (!state.project) {
+          content.className = 'empty-state';
+          content.textContent = 'Select a project';
+          return;
+        }
+        try {
+          const data = await withAuth(() =>
+            api(`${API}/projects/${state.project.project_hash}/timeline`)
+          );
+          const entries = data.entries || data.snapshots || [];
+          if (entries.length === 0) {
+            content.className = 'empty-state';
+            content.textContent = 'No timeline entries';
+            return;
+          }
+          let out = '<div style="padding: 8px;">';
+          entries.forEach(s => {
+            const time = new Date(s.timestamp).toLocaleString();
+            const msg = s.message || s.trigger || 'Snapshot';
+            out += `<div class="code-line" style="cursor:pointer;padding:4px 0;" data-id="${escapeHtml(s.id)}">` +
+              `<span class="line-num" style="width:80px;color:var(--accent-purple)">${escapeHtml(s.id)}</span>` +
+              `<span class="line-code"><span style="color:var(--text-muted)">${escapeHtml(s.trigger || '')}</span> ${escapeHtml(msg)} <span style="color:var(--text-muted)">— ${time}</span></span></div>`;
+          });
+          out += '</div>';
+          content.className = '';
+          content.innerHTML = out;
+        } catch(e) {
+          content.className = 'empty-state';
+          content.textContent = 'Failed to load timeline: ' + e.message;
+        }
+      }
     }
 
     async function renderDiff(path) {
@@ -739,7 +843,7 @@
       if (state.previous) {
         params.set('against', state.previous.id);
       }
-      const data = await api(`${API}/projects/${state.project.project_hash}/snapshots/${state.snapshot.id}/diff?${params.toString()}`);
+      const data = await withAuth(() => api(`${API}/projects/${state.project.project_hash}/snapshots/${state.snapshot.id}/diff?${params.toString()}`));
       const diffs = data.diffs || [];
       if (diffs.length === 0) {
         const content = document.getElementById('content');
@@ -749,7 +853,6 @@
       }
 
       let out = '';
-      let lineNo = 1;
       diffs.forEach((diff) => {
         if (diff.binary) {
           out += `<div class="empty-state">binary file: ${escapeHtml(diff.path)}</div>`;
@@ -763,7 +866,8 @@
           (hunk.lines || []).forEach((line) => {
             const changeType = line.change_type === 'add' ? 'diff-add' : line.change_type === 'remove' ? 'diff-rem' : '';
             const prefix = line.change_type === 'add' ? '+' : line.change_type === 'remove' ? '-' : ' ';
-            out += `<div class="code-line ${changeType}"><span class="line-num">${lineNo++}</span><span class="line-code">${escapeHtml(prefix + (line.content || ''))}</span></div>`;
+            const lineNum = line.change_type === 'remove' ? (line.old_line || '') : (line.new_line || '');
+            out += `<div class="code-line ${changeType}"><span class="line-num">${lineNum}</span><span class="line-code">${escapeHtml(prefix + (line.content || ''))}</span></div>`;
           });
         });
       });
@@ -872,22 +976,29 @@
       }
       if (query.startsWith('#')) {
         const q = query.slice(1);
-        const data = await api(`${API}/search?q=${encodeURIComponent(q)}&project=${state.project.project_hash}`);
+        const data = await withAuth(() => api(`${API}/search?q=${encodeURIComponent(q)}&project=${state.project.project_hash}`));
         const tree = document.getElementById('tree');
         tree.innerHTML = '';
         (data.results || []).forEach((result) => {
           const row = document.createElement('div');
           row.className = 'tree-item';
           row.innerHTML = `<svg class="icon" viewBox="0 0 24 24"><path d="M12 3 1 9l11 6 9-4.91V17h2V9z"></path><path d="m3 11 9 4.91L21 11v2l-9 4.91L3 13z"></path></svg><span>${escapeHtml(result.snapshot_id)}</span><small>${escapeHtml(result.match_context || '')}</small>`;
-          row.onclick = () => {
-            const snap = state.snapshots.find((s) => s.id === result.snapshot_id);
-            if (snap) {
-              hideDryRun();
-              state.snapshot = snap;
-              state.previous = state.snapshots[state.snapshots.indexOf(snap) + 1] || null;
-              renderTimeline();
-              loadFiles();
+          row.onclick = async () => {
+            let snap = state.snapshots.find((s) => s.id === result.snapshot_id);
+            if (!snap) {
+              try {
+                snap = await withAuth(() => api(`${API}/projects/${state.project.project_hash}/snapshots/${result.snapshot_id}`));
+                state.snapshots.push(snap);
+              } catch(e) {
+                console.error('Could not load snapshot:', e);
+                return;
+              }
             }
+            hideDryRun();
+            state.snapshot = snap;
+            state.previous = state.snapshots[state.snapshots.indexOf(snap) + 1] || null;
+            renderTimeline();
+            await loadFiles();
           };
           tree.appendChild(row);
         });
@@ -902,9 +1013,11 @@
       setStatus('Refreshed', 'ok');
     }
 
+    let wsRetryDelay = 1000;
     function connectWs() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${proto}//${location.host}/ws`);
+      ws.onopen = () => { wsRetryDelay = 1000; };
       ws.onmessage = async (event) => {
         let data;
         try {
@@ -912,13 +1025,39 @@
         } catch (_) {
           return;
         }
-        if (data.type === 'snapshot_created' && state.project && data.project_hash === state.project.project_hash) {
-          setStatus('New snapshot created', 'ok');
-          await loadSnapshots();
+        if (!state.project) return;
+        const isCurrentProject = data.project_hash === state.project.project_hash;
+        switch (data.type) {
+          case 'snapshot_created':
+            if (isCurrentProject) {
+              setStatus('New snapshot created', 'ok');
+              await loadSnapshots();
+            }
+            break;
+          case 'snapshot_restored':
+            if (isCurrentProject) {
+              setStatus('Snapshot restored', 'ok');
+              await loadSnapshots();
+            }
+            break;
+          case 'emergency_delete_detected':
+            if (isCurrentProject) {
+              setStatus('Emergency delete detected!', 'danger');
+              await loadSnapshots();
+            }
+            break;
+          case 'ai_summary_completed':
+            if (isCurrentProject) {
+              await loadSnapshots();
+            }
+            break;
         }
       };
-      ws.onclose = () => setTimeout(connectWs, 5000);
-      ws.onerror = () => ws.close();
+      ws.onclose = () => {
+        wsRetryDelay = Math.min(wsRetryDelay * 2, 60000);
+        setTimeout(connectWs, wsRetryDelay);
+      };
+      ws.onerror = () => {};
     }
 
     function escapeHtml(text) {
