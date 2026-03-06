@@ -267,7 +267,8 @@ fn cli_health_endpoint_alias_and_auth_middleware_exemption_present() {
     assert!(source.contains(".route(\"/health\", get(health_check))"));
 
     let auth = std::fs::read_to_string("src/server/auth.rs").expect("read auth middleware");
-    assert!(auth.contains("path == \"/health\" || path == \"/api/v1/health\""));
+    assert!(auth.contains("path == \"/health\""));
+    assert!(auth.contains("path == \"/api/v1/health\""));
 }
 
 #[test]
