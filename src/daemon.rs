@@ -788,10 +788,10 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
         }
     }
 
-    // Cleanup
+    // Cleanup: remove transient state files. Keep server.token so
+    // it persists across restarts (browser localStorage tokens stay valid).
     std::fs::remove_file(&pid_path).ok();
     std::fs::remove_file(uhoh_dir.join("server.port")).ok();
-    std::fs::remove_file(uhoh_dir.join("server.token")).ok();
     tracing::info!("Daemon stopped.");
     Ok(())
 }
