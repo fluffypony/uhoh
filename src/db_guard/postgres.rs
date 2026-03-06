@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
+use rustls::RootCertStore;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
 use tokio_postgres::NoTls;
+use tokio_postgres_rustls::MakeRustlsConnect;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::DbGuardEntry;
@@ -105,14 +107,6 @@ pub fn tick_postgres_guard(
     }
 
     // Lightweight delete-counter polling (use resolved credentials).
-    // TLS is not wired yet in this guard; fail closed for explicitly TLS-required DSNs.
-    if connection_requires_tls(&guard.connection_ref) {
-        tracing::warn!(
-            "postgres guard '{}' configured with sslmode=require/verify-*, but this build only supports NoTls; skipping tick",
-            guard.name
-        );
-        return Ok(());
-    }
     let poll_dsn =
         build_connect_dsn(&guard.connection_ref).unwrap_or_else(|_| guard.connection_ref.clone());
     let poll_window_secs = tick_interval_secs.saturating_mul(2).max(1);
@@ -317,12 +311,7 @@ pub fn shutdown_all_listen_workers() {
 
 fn poll_delete_count(connection_ref: &str, window_seconds: i64) -> Result<i64> {
     run_postgres_task(async move {
-        let (client, connection) = tokio_postgres::connect(connection_ref, NoTls)
-            .await
-            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        let client = pg_connect_spawn(connection_ref).await?;
         // Keep helper table bounded to avoid unbounded growth in monitored DBs.
         let _ = client
             .execute(
@@ -356,12 +345,7 @@ fn poll_delete_count(connection_ref: &str, window_seconds: i64) -> Result<i64> {
 
 fn poll_total_row_count(connection_ref: &str) -> Result<i64> {
     run_postgres_task(async move {
-        let (client, connection) = tokio_postgres::connect(connection_ref, NoTls)
-            .await
-            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        let client = pg_connect_spawn(connection_ref).await?;
 
         let rows = client
             .query(
@@ -388,19 +372,13 @@ fn poll_ddl_events(connection_ref: &str, max_rows: i64) -> Result<Vec<String>> {
     };
 
     let result = run_postgres_task(async move {
-        let (client, connection) = tokio_postgres::connect(connection_ref, NoTls)
-            .await
-            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
-
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        let client = pg_connect_spawn(connection_ref).await?;
 
         // Keep helper table bounded to avoid unbounded growth in monitored DBs.
         let _ = client
             .execute(
                 "DELETE FROM _uhoh_ddl_events
-                 WHERE ts < now() - interval '24 hours'",
+                 WHERE occurred_at < now() - interval '24 hours'",
                 &[],
             )
             .await;
@@ -459,13 +437,13 @@ async fn run_listen_worker(
             return;
         }
 
-        let (client, connection) = match tokio_postgres::connect(&connection_ref, NoTls).await {
-            Ok(pair) => pair,
+        let client = match pg_connect_spawn(&connection_ref).await {
+            Ok(client) => client,
             Err(err) => {
                 tracing::warn!(
                     "postgres LISTEN connect failed for {}: {}",
                     scrub_ref(&connection_ref),
-                    credentials::scrub_error_message(&err.to_string())
+                    err
                 );
                 if sleep_or_cancel(backoff, &shutdown).await {
                     return;
@@ -488,15 +466,11 @@ async fn run_listen_worker(
             continue;
         }
 
-        let connection_task = tokio::spawn(async move {
-            let _ = connection.await;
-        });
         backoff = std::time::Duration::from_secs(1);
 
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => {
-                    connection_task.abort();
                     return;
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
@@ -538,7 +512,6 @@ async fn run_listen_worker(
                                 scrub_ref(&connection_ref),
                                 credentials::scrub_error_message(&err.to_string())
                             );
-                            connection_task.abort();
                             break;
                         }
                     }
@@ -589,6 +562,49 @@ where
     }
 }
 
+fn native_rustls_connector() -> Result<MakeRustlsConnect> {
+    let mut roots = RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    if !native.errors.is_empty() {
+        let first = &native.errors[0];
+        tracing::warn!("native certificate load issue: {first}");
+    }
+    for cert in native.certs {
+        if let Err(err) = roots.add(cert) {
+            tracing::warn!("skipping invalid native certificate: {err}");
+        }
+    }
+    if roots.is_empty() {
+        anyhow::bail!("No trusted root certificates available for Postgres TLS connection")
+    }
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(MakeRustlsConnect::new(config))
+}
+
+async fn pg_connect_spawn(connection_ref: &str) -> Result<tokio_postgres::Client> {
+    if connection_requires_tls(connection_ref) {
+        let tls = native_rustls_connector()?;
+        let (client, connection) = tokio_postgres::connect(connection_ref, tls)
+            .await
+            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        return Ok(client);
+    }
+
+    let (client, connection) = tokio_postgres::connect(connection_ref, NoTls)
+        .await
+        .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    Ok(client)
+}
+
 fn scrub_ref(connection_ref: &str) -> String {
     connection_ref
         .split('@')
@@ -610,5 +626,18 @@ fn connection_requires_tls(connection_ref: &str) -> bool {
             }
         }
     }
+
+    // keyword-value DSN format, e.g. "host=... user=... sslmode=require"
+    for part in connection_ref.split_whitespace() {
+        if let Some((k, v)) = part.split_once('=') {
+            if k.eq_ignore_ascii_case("sslmode") {
+                let mode = v.trim_matches('"').trim_matches('\'').to_ascii_lowercase();
+                if mode == "require" || mode == "verify-ca" || mode == "verify-full" {
+                    return true;
+                }
+            }
+        }
+    }
+
     false
 }

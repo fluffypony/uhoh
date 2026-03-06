@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use rustls::RootCertStore;
 #[cfg(all(unix, target_os = "linux"))]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -953,19 +954,8 @@ fn handle_db_commands(
 }
 
 fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Result<()> {
-    if postgres_connection_requires_tls(dsn) {
-        anyhow::bail!(
-            "Postgres DSN requires TLS (sslmode=require/verify-*), but CLI guard tooling currently supports NoTls only"
-        );
-    }
     block_on_runtime(async move {
-        let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
-            .await
-            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        let client = connect_postgres_client(dsn).await?;
 
         client
             .batch_execute(
@@ -1095,18 +1085,8 @@ async fn install_delete_counter_trigger(
 }
 
 fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Result<()> {
-    if postgres_connection_requires_tls(dsn) {
-        anyhow::bail!(
-            "Postgres DSN requires TLS (sslmode=require/verify-*), but CLI guard tooling currently supports NoTls only"
-        );
-    }
     block_on_runtime(async move {
-        let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
-            .await
-            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        let client = connect_postgres_client(dsn).await?;
 
         let tables = parse_watched_tables(tables_csv);
         if tables.is_empty() {
@@ -1187,18 +1167,8 @@ fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Resul
 }
 
 fn test_postgres_monitoring_infrastructure(dsn: &str) -> Result<()> {
-    if postgres_connection_requires_tls(dsn) {
-        anyhow::bail!(
-            "Postgres DSN requires TLS (sslmode=require/verify-*), but CLI guard tooling currently supports NoTls only"
-        );
-    }
     block_on_runtime(async move {
-        let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
-            .await
-            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        let client = connect_postgres_client(dsn).await?;
 
         match client
             .query_one("SELECT 1 FROM _uhoh_ddl_events LIMIT 1", &[])
@@ -1265,7 +1235,62 @@ fn postgres_connection_requires_tls(connection_ref: &str) -> bool {
             }
         }
     }
+
+    // keyword-value DSN format, e.g. "host=... user=... sslmode=require"
+    for part in connection_ref.split_whitespace() {
+        if let Some((k, v)) = part.split_once('=') {
+            if k.eq_ignore_ascii_case("sslmode") {
+                let mode = v.trim_matches('"').trim_matches('\'').to_ascii_lowercase();
+                if mode == "require" || mode == "verify-ca" || mode == "verify-full" {
+                    return true;
+                }
+            }
+        }
+    }
+
     false
+}
+
+fn postgres_native_rustls_connector() -> Result<tokio_postgres_rustls::MakeRustlsConnect> {
+    let mut roots = RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    if !native.errors.is_empty() {
+        warn!("native certificate load issue: {}", native.errors[0]);
+    }
+    for cert in native.certs {
+        if let Err(err) = roots.add(cert) {
+            warn!("skipping invalid native certificate: {err}");
+        }
+    }
+    if roots.is_empty() {
+        anyhow::bail!("No trusted root certificates available for Postgres TLS connection")
+    }
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(tokio_postgres_rustls::MakeRustlsConnect::new(config))
+}
+
+async fn connect_postgres_client(dsn: &str) -> Result<tokio_postgres::Client> {
+    if postgres_connection_requires_tls(dsn) {
+        let tls = postgres_native_rustls_connector()?;
+        let (client, connection) = tokio_postgres::connect(dsn, tls)
+            .await
+            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        return Ok(client);
+    }
+
+    let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
+        .await
+        .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    Ok(client)
 }
 
 fn quote_pg_ident(input: &str) -> Result<String> {
@@ -1435,20 +1460,9 @@ fn apply_sqlite_recovery(connection_ref: &str, sql: &str) -> Result<()> {
 }
 
 fn apply_postgres_recovery(connection_ref: &str, sql: &str) -> Result<()> {
-    if postgres_connection_requires_tls(connection_ref) {
-        anyhow::bail!(
-            "Postgres DSN requires TLS (sslmode=require/verify-*), but recovery apply currently supports NoTls only"
-        );
-    }
-
     let dsn = build_connect_dsn_with_resolved_credentials(connection_ref)?;
     block_on_runtime(async move {
-        let (client, connection) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls)
-            .await
-            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        let client = connect_postgres_client(&dsn).await?;
         client
             .batch_execute(sql)
             .await

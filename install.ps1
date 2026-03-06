@@ -62,6 +62,7 @@ function Main {
     Write-Host "Verifying downloaded binary hash..."
     $FileHash = (Get-FileHash -Path $TempFile -Algorithm SHA256).Hash.ToLower()
     Write-Host ("  SHA256: {0}" -f $FileHash)
+    $VerifiedPreInstall = $false
     try {
         $DnsResult = Resolve-DnsName -Name "sha256.release.uhoh.it" -Type TXT -ErrorAction Stop
         $DnsHash = ($DnsResult | Where-Object { $_.Type -eq "TXT" } | Select-Object -First 1).Strings -join ""
@@ -71,11 +72,18 @@ function Main {
             throw "Binary hash does not match DNS record! Expected: $DnsHash, Got: $FileHash"
         } elseif ($DnsHash) {
             Write-Host "  Hash verified against DNS record." -ForegroundColor Green
+            $VerifiedPreInstall = $true
         } else {
-            Write-Host "  DNS record empty; skipping pre-install hash check." -ForegroundColor Yellow
+            Remove-Item $TempFile -ErrorAction SilentlyContinue
+            throw "DNS hash record is empty; refusing to install unverified binary."
         }
-    } catch [System.ComponentModel.Win32Exception] {
-        Write-Host "  DNS lookup unavailable; skipping pre-install hash check." -ForegroundColor Yellow
+    } catch {
+        Remove-Item $TempFile -ErrorAction SilentlyContinue
+        throw "Pre-install verification failed: $($_.Exception.Message)"
+    }
+    if (-not $VerifiedPreInstall) {
+        Remove-Item $TempFile -ErrorAction SilentlyContinue
+        throw "Pre-install verification did not complete; refusing install."
     }
 
     # Install
