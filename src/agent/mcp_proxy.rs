@@ -423,7 +423,6 @@ async fn wait_for_approval(
 ) -> Result<bool> {
     let pending = pending_approval_path(uhoh_dir, approval_id);
     let approved = approved_path(uhoh_dir, approval_id);
-    let runtime = runtime_dir(uhoh_dir);
     let timeout = std::time::Duration::from_secs(timeout_seconds.max(1));
     let deadline = std::time::Instant::now() + timeout;
     loop {
