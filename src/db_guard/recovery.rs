@@ -8,7 +8,7 @@ use zeroize::Zeroize;
 
 use super::credentials::CredentialMaterial;
 
-const ENC_MAGIC_V2: &[u8; 8] = b"UHOHENC2";
+const ENC_MAGIC: &[u8; 8] = b"UHOHENC2";
 const ENC_KDF_BLAKE3: u8 = 0;
 const ENC_KDF_ARGON2ID: u8 = 1;
 const ENC_V2_HEADER_LEN: usize = 8 + 1 + 16 + 12;
@@ -287,7 +287,7 @@ fn enforce_max_payload_size(payload: &[u8], max_mb: u64, label: &str) -> Result<
 }
 
 pub fn decrypt_recovery_payload(payload: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {
-    if payload.starts_with(ENC_MAGIC_V2) {
+    if payload.starts_with(ENC_MAGIC) {
         return decrypt_v2(payload, uhoh_dir);
     }
     anyhow::bail!("Invalid or corrupted recovery payload: unrecognized encryption format")
@@ -299,7 +299,7 @@ fn maybe_encrypt(plaintext: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>
     let mut nonce_buf = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_buf);
     let nonce = Nonce::from_slice(&nonce_buf);
-    let mut out = ENC_MAGIC_V2.to_vec();
+    let mut out = ENC_MAGIC.to_vec();
     out.push(material.kdf_id);
     out.extend_from_slice(&material.salt);
     out.extend_from_slice(&nonce_buf);
@@ -448,7 +448,7 @@ fn derive_argon2_key(master: &str, salt: &[u8; 16]) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-fn load_or_create_machine_key(uhoh_dir: &std::path::Path) -> Result<[u8; 32]> {
+pub(crate) fn load_or_create_machine_key(uhoh_dir: &std::path::Path) -> Result<[u8; 32]> {
     let key_path = uhoh_dir.join(MACHINE_KEY_FILE);
     if key_path.exists() {
         let raw = std::fs::read_to_string(&key_path)

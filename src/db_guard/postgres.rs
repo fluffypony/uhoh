@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use rustls::RootCertStore;
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use once_cell::sync::Lazy;
 use tokio_postgres::NoTls;
@@ -16,7 +16,7 @@ use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
 
 /// Build a connection string with resolved credentials injected.
-fn build_connect_dsn(connection_ref: &str) -> Result<String> {
+pub(crate) fn build_connect_dsn(connection_ref: &str) -> Result<String> {
     let creds = credentials::resolve_postgres_credentials(connection_ref)?;
     if connection_ref.starts_with("postgres://") || connection_ref.starts_with("postgresql://") {
         let mut url = url::Url::parse(connection_ref)
@@ -537,7 +537,7 @@ async fn sleep_or_cancel(duration: std::time::Duration, shutdown: &CancellationT
     }
 }
 
-fn run_postgres_task<T, F>(fut: F) -> Result<T>
+pub(crate) fn run_postgres_task<T, F>(fut: F) -> Result<T>
 where
     F: std::future::Future<Output = Result<T>>,
 {
@@ -551,31 +551,94 @@ where
     rt.block_on(fut)
 }
 
-fn native_rustls_connector() -> Result<MakeRustlsConnect> {
-    let mut roots = RootCertStore::empty();
-    let native = rustls_native_certs::load_native_certs();
-    if !native.errors.is_empty() {
-        let first = &native.errors[0];
-        tracing::warn!("native certificate load issue: {first}");
-    }
-    for cert in native.certs {
-        if let Err(err) = roots.add(cert) {
-            tracing::warn!("skipping invalid native certificate: {err}");
-        }
-    }
-    if roots.is_empty() {
-        anyhow::bail!("No trusted root certificates available for Postgres TLS connection")
+/// Certificate verifier that accepts any server certificate (for sslmode=require).
+#[derive(Debug)]
+struct NoVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
 
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+        ]
+    }
+}
+
+fn native_rustls_connector_for_sslmode(sslmode: &str) -> Result<MakeRustlsConnect> {
+    let config = match sslmode {
+        "verify-ca" | "verify-full" => {
+            let mut roots = RootCertStore::empty();
+            let native = rustls_native_certs::load_native_certs();
+            if !native.errors.is_empty() {
+                let first = &native.errors[0];
+                tracing::warn!("native certificate load issue: {first}");
+            }
+            for cert in native.certs {
+                if let Err(err) = roots.add(cert) {
+                    tracing::warn!("skipping invalid native certificate: {err}");
+                }
+            }
+            if roots.is_empty() {
+                anyhow::bail!(
+                    "No trusted root certificates available for Postgres TLS connection"
+                )
+            }
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+        }
+        _ => {
+            // sslmode=require: encrypt but don't verify server certificate
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerifier))
+                .with_no_client_auth()
+        }
+    };
     Ok(MakeRustlsConnect::new(config))
 }
 
-async fn pg_connect_spawn(connection_ref: &str) -> Result<tokio_postgres::Client> {
+pub async fn pg_connect_spawn(connection_ref: &str) -> Result<tokio_postgres::Client> {
     if connection_requires_tls(connection_ref) {
-        let tls = native_rustls_connector()?;
+        let sslmode = extract_sslmode(connection_ref).unwrap_or("require");
+        let tls = native_rustls_connector_for_sslmode(sslmode)?;
         let (client, connection) = tokio_postgres::connect(connection_ref, tls)
             .await
             .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
@@ -594,6 +657,34 @@ async fn pg_connect_spawn(connection_ref: &str) -> Result<tokio_postgres::Client
     Ok(client)
 }
 
+fn extract_sslmode(connection_ref: &str) -> Option<&'static str> {
+    if let Ok(url) = url::Url::parse(connection_ref) {
+        for (k, v) in url.query_pairs() {
+            if k.eq_ignore_ascii_case("sslmode") {
+                let mode = v.to_ascii_lowercase();
+                return Some(match mode.as_str() {
+                    "verify-ca" => "verify-ca",
+                    "verify-full" => "verify-full",
+                    _ => "require",
+                });
+            }
+        }
+    }
+    for part in connection_ref.split_whitespace() {
+        if let Some((k, v)) = part.split_once('=') {
+            if k.eq_ignore_ascii_case("sslmode") {
+                let mode = v.trim_matches('"').trim_matches('\'').to_ascii_lowercase();
+                return Some(match mode.as_str() {
+                    "verify-ca" => "verify-ca",
+                    "verify-full" => "verify-full",
+                    _ => "require",
+                });
+            }
+        }
+    }
+    None
+}
+
 fn scrub_ref(connection_ref: &str) -> String {
     connection_ref
         .split('@')
@@ -602,7 +693,7 @@ fn scrub_ref(connection_ref: &str) -> String {
         .to_string()
 }
 
-fn connection_requires_tls(connection_ref: &str) -> bool {
+pub(crate) fn connection_requires_tls(connection_ref: &str) -> bool {
     if let Ok(url) = url::Url::parse(connection_ref) {
         if matches!(url.scheme(), "postgres" | "postgresql") {
             for (k, v) in url.query_pairs() {

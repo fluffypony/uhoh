@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use rustls::RootCertStore;
+// RootCertStore no longer needed here — TLS connector is shared from db_guard::postgres
 #[cfg(all(unix, target_os = "linux"))]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -690,7 +690,7 @@ async fn main() -> Result<()> {
                         let profile_path =
                             std::env::var("UHOH_AGENT_PROFILE").unwrap_or_else(|_| {
                                 format!(
-                                    "{}/.uhoh/agents/default.toml",
+                                    "{}/.uhoh/agents/generic.toml",
                                     dirs::home_dir().unwrap_or_default().display()
                                 )
                             });
@@ -801,12 +801,9 @@ fn handle_db_commands(
                 anyhow::bail!("Supported modes: {}", valid_modes.join(", "));
             }
 
-            if engine == "postgres" {
-                install_postgres_monitoring_infrastructure(dsn, tables_csv.as_str())?;
-            }
-
             let connection_ref = uhoh::db_guard::scrub_dsn(dsn);
-            database.add_db_guard(&guard_name, engine, &connection_ref, &tables_csv, mode)?;
+
+            // Persist credentials first (fail fast if UHOH_MASTER_KEY is missing)
             if let Some(creds) = extract_dsn_credentials(dsn) {
                 uhoh::db_guard::store_encrypted_credential(&connection_ref, &creds)
                     .with_context(|| {
@@ -827,6 +824,13 @@ fn handle_db_commands(
                     }
                 }
             }
+
+            // Install remote infrastructure only after credentials are safely persisted
+            if engine == "postgres" {
+                install_postgres_monitoring_infrastructure(dsn, tables_csv.as_str())?;
+            }
+
+            database.add_db_guard(&guard_name, engine, &connection_ref, &tables_csv, mode)?;
             println!("Added db guard '{guard_name}' ({engine})");
         }
         DbAction::Remove { name } => {
@@ -1244,75 +1248,9 @@ fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
         .collect()
 }
 
-fn postgres_connection_requires_tls(connection_ref: &str) -> bool {
-    if let Ok(url) = Url::parse(connection_ref) {
-        if matches!(url.scheme(), "postgres" | "postgresql") {
-            for (k, v) in url.query_pairs() {
-                if k.eq_ignore_ascii_case("sslmode") {
-                    let mode = v.to_ascii_lowercase();
-                    if mode == "require" || mode == "verify-ca" || mode == "verify-full" {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    // keyword-value DSN format, e.g. "host=... user=... sslmode=require"
-    for part in connection_ref.split_whitespace() {
-        if let Some((k, v)) = part.split_once('=') {
-            if k.eq_ignore_ascii_case("sslmode") {
-                let mode = v.trim_matches('"').trim_matches('\'').to_ascii_lowercase();
-                if mode == "require" || mode == "verify-ca" || mode == "verify-full" {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
-fn postgres_native_rustls_connector() -> Result<tokio_postgres_rustls::MakeRustlsConnect> {
-    let mut roots = RootCertStore::empty();
-    let native = rustls_native_certs::load_native_certs();
-    if !native.errors.is_empty() {
-        warn!("native certificate load issue: {}", native.errors[0]);
-    }
-    for cert in native.certs {
-        if let Err(err) = roots.add(cert) {
-            warn!("skipping invalid native certificate: {err}");
-        }
-    }
-    if roots.is_empty() {
-        anyhow::bail!("No trusted root certificates available for Postgres TLS connection")
-    }
-
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok(tokio_postgres_rustls::MakeRustlsConnect::new(config))
-}
-
+// Postgres TLS/connection helpers are shared from db_guard::postgres (pub(crate)).
 async fn connect_postgres_client(dsn: &str) -> Result<tokio_postgres::Client> {
-    if postgres_connection_requires_tls(dsn) {
-        let tls = postgres_native_rustls_connector()?;
-        let (client, connection) = tokio_postgres::connect(dsn, tls)
-            .await
-            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        return Ok(client);
-    }
-
-    let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
-        .await
-        .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    Ok(client)
+    uhoh::db_guard::pg_connect_spawn(dsn).await
 }
 
 fn quote_pg_ident(input: &str) -> Result<String> {
@@ -2192,6 +2130,16 @@ async fn run_doctor(
                 println!("Restored database from {}", src.display());
                 let _ = std::fs::remove_file(uhoh_dir.join("uhoh.db-wal"));
                 let _ = std::fs::remove_file(uhoh_dir.join("uhoh.db-shm"));
+                // Rebuild FTS5 search index after database restore
+                if let Ok(conn) = rusqlite::Connection::open(uhoh_dir.join("uhoh.db")) {
+                    if let Err(e) = conn.execute_batch(
+                        "INSERT INTO search_index(search_index) VALUES('rebuild');",
+                    ) {
+                        tracing::warn!("FTS5 index rebuild after restore failed: {e}");
+                    } else {
+                        println!("FTS5 search index rebuilt.");
+                    }
+                }
             } else {
                 eprintln!("No backups found to restore.");
             }

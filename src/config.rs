@@ -711,6 +711,9 @@ impl Config {
             if config.storage.max_text_blob_bytes == 0 {
                 anyhow::bail!("storage.max_text_blob_bytes must be > 0");
             }
+            if config.storage.max_copy_blob_bytes == 0 {
+                anyhow::bail!("storage.max_copy_blob_bytes must be > 0");
+            }
             if config.watch.max_debounce_secs == 0 {
                 anyhow::bail!("watch.max_debounce_secs must be > 0");
             }

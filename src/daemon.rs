@@ -1079,6 +1079,31 @@ async fn run_tick_maintenance(
         std::time::Duration::from_secs(3600),
     );
 
+    // Clean up stale restore staging directories left by crashed restores
+    for project in &db_projects {
+        if let Ok(entries) = std::fs::read_dir(&project.current_path) {
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".uhoh-restore-tmp-")
+                {
+                    if let Ok(meta) = entry.metadata() {
+                        let stale = meta
+                            .modified()
+                            .ok()
+                            .and_then(|m| m.elapsed().ok())
+                            .map(|age| age > Duration::from_secs(3600))
+                            .unwrap_or(false);
+                        if stale {
+                            let _ = std::fs::remove_dir_all(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     check_for_new_projects(
         &db_projects,
         watcher_handle,

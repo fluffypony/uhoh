@@ -25,6 +25,7 @@ pub use credentials::CredentialMaterial;
 pub use recovery::decrypt_recovery_payload;
 pub use recovery::write_postgres_schema_baseline;
 pub use recovery::write_sqlite_baseline;
+pub use postgres::pg_connect_spawn;
 
 const GUARD_TICK_INTERVAL_SECS: i64 = 30;
 

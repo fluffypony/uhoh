@@ -155,7 +155,8 @@ pub fn get_or_spawn_port_with_ctx(
 
     // Spawn new sidecar
     let backend = requested_backend;
-    // Use OS-assigned ephemeral port to avoid TOCTOU race
+    // Bind to port 0, read assigned port, release, and pass to subprocess.
+    // Inherent TOCTOU gap mitigated by retrying up to 5 times.
     let (child, port) = {
         let mut last_err: Option<anyhow::Error> = None;
         let mut out: Option<(Child, u16)> = None;

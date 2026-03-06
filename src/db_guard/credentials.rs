@@ -267,20 +267,31 @@ where
 fn encrypt_credentials_map(
     map: &std::collections::BTreeMap<String, CredentialMaterial>,
 ) -> Result<Vec<u8>> {
-    let mut master = std::env::var("UHOH_MASTER_KEY")
-        .context("UHOH_MASTER_KEY is required to write encrypted credentials")?;
-    if master.trim().is_empty() {
-        anyhow::bail!("UHOH_MASTER_KEY is required to write encrypted credentials");
-    }
-
     let mut salt = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut salt);
-    let (kdf_id, key) = if let Some(mut hex_key) = decode_hex_key(&master) {
-        let k = blake3::derive_key(CRED_CONTEXT, &hex_key);
-        hex_key.zeroize();
-        (CRED_KDF_BLAKE3, k)
+
+    let (kdf_id, key) = if let Ok(mut master) = std::env::var("UHOH_MASTER_KEY") {
+        if master.trim().is_empty() {
+            anyhow::bail!("UHOH_MASTER_KEY is set but empty");
+        }
+        let result = if let Some(mut hex_key) = decode_hex_key(&master) {
+            let k = blake3::derive_key(CRED_CONTEXT, &hex_key);
+            hex_key.zeroize();
+            (CRED_KDF_BLAKE3, k)
+        } else {
+            (CRED_KDF_ARGON2ID, derive_argon2_key(&master, &salt)?)
+        };
+        master.zeroize();
+        result
     } else {
-        (CRED_KDF_ARGON2ID, derive_argon2_key(&master, &salt)?)
+        // Fall back to machine-local key (same behavior as recovery.rs)
+        tracing::warn!(
+            "UHOH_MASTER_KEY is not set; using machine-local fallback key for credential encryption"
+        );
+        let mut machine_key = super::recovery::load_or_create_machine_key(&crate::uhoh_dir())?;
+        let k = blake3::derive_key(CRED_CONTEXT, &machine_key);
+        machine_key.zeroize();
+        (CRED_KDF_BLAKE3, k)
     };
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
@@ -322,7 +333,6 @@ fn encrypt_credentials_map(
         out.extend_from_slice(&entry.ciphertext);
     }
 
-    master.zeroize();
     Ok(out)
 }
 
@@ -350,18 +360,30 @@ fn decrypt_credentials_map(
         cursor += 12;
     }
 
-    let mut master = std::env::var("UHOH_MASTER_KEY")
-        .context("UHOH_MASTER_KEY is required to read encrypted credentials")?;
-    let mut key = match kdf_id {
-        CRED_KDF_BLAKE3 => {
-            let mut hex_key = decode_hex_key(&master)
-                .ok_or_else(|| anyhow::anyhow!("UHOH_MASTER_KEY must be 64-char hex"))?;
-            let derived = blake3::derive_key(CRED_CONTEXT, &hex_key);
-            hex_key.zeroize();
-            derived
-        }
-        CRED_KDF_ARGON2ID => derive_argon2_key(&master, &salt)?,
-        _ => anyhow::bail!("Unsupported credentials file KDF"),
+    let mut key = if let Ok(mut master) = std::env::var("UHOH_MASTER_KEY") {
+        let k = match kdf_id {
+            CRED_KDF_BLAKE3 => {
+                let mut hex_key = decode_hex_key(&master)
+                    .ok_or_else(|| anyhow::anyhow!("UHOH_MASTER_KEY must be 64-char hex"))?;
+                let derived = blake3::derive_key(CRED_CONTEXT, &hex_key);
+                hex_key.zeroize();
+                derived
+            }
+            CRED_KDF_ARGON2ID => derive_argon2_key(&master, &salt)?,
+            _ => anyhow::bail!("Unsupported credentials file KDF"),
+        };
+        master.zeroize();
+        k
+    } else if kdf_id == CRED_KDF_BLAKE3 {
+        // Fall back to machine-local key (matches encrypt_credentials_map fallback)
+        let mut machine_key = super::recovery::load_or_create_machine_key(&crate::uhoh_dir())?;
+        let k = blake3::derive_key(CRED_CONTEXT, &machine_key);
+        machine_key.zeroize();
+        k
+    } else {
+        anyhow::bail!(
+            "UHOH_MASTER_KEY is required to decrypt Argon2-based credentials"
+        );
     };
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
@@ -405,7 +427,6 @@ fn decrypt_credentials_map(
             .context("Failed to parse decrypted credential entry payload")?;
         out.insert(key_name, material);
     }
-    master.zeroize();
     key.zeroize();
     Ok(out)
 }
