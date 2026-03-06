@@ -270,19 +270,35 @@ async fn intercept_tool_call(
             )
             .await?;
             if !approved {
-                let mut timeout_event = new_event("agent", "dangerous_action_timeout", "warn");
-                timeout_event.path = path.clone();
-                timeout_event.detail = Some(
+                // Determine if this was a timeout or explicit denial
+                let pending_path = pending_approval_path(uhoh_dir, &approval_id);
+                let was_denied = !pending_path.exists();
+                let (event_type, reason) = if was_denied {
+                    (
+                        "dangerous_action_denied",
+                        format!("Dangerous tool call '{}' was explicitly denied", tool),
+                    )
+                } else {
+                    (
+                        "dangerous_action_timeout",
+                        format!(
+                            "Dangerous tool call '{}' was not approved within {} seconds",
+                            tool, config.agent.pause_timeout_seconds
+                        ),
+                    )
+                };
+                let mut block_event = new_event("agent", event_type, "warn");
+                block_event.path = path.clone();
+                block_event.detail = Some(
                     serde_json::json!({
                         "approval_id": approval_id,
                         "tool": tool,
-                        "timeout_seconds": config.agent.pause_timeout_seconds,
                         "action": "blocked",
                     })
                     .to_string(),
                 );
-                if let Err(err) = ledger.append(timeout_event) {
-                    tracing::error!("failed to append dangerous_action_timeout event: {err}");
+                if let Err(err) = ledger.append(block_event) {
+                    tracing::error!("failed to append {event_type} event: {err}");
                 }
 
                 let call_id = call
@@ -291,10 +307,7 @@ async fn intercept_tool_call(
                     .unwrap_or(serde_json::Value::Null);
                 return Ok(InterceptResult::Block {
                     id: call_id,
-                    reason: format!(
-                        "Dangerous tool call '{}' was not approved within {} seconds",
-                        tool, config.agent.pause_timeout_seconds
-                    ),
+                    reason,
                 });
             }
         }
@@ -330,6 +343,9 @@ fn is_dangerous_tool_call(tool: &str, path: Option<&str>, patterns: &[String]) -
         }
         if let Some(raw) = p.strip_prefix("path:") {
             let raw = raw.trim();
+            if raw.is_empty() {
+                return false;
+            }
             // Use path suffix matching so "Cargo.toml" matches "/home/user/project/Cargo.toml"
             let file_path = std::path::Path::new(&*path_l);
             let pattern_path = std::path::Path::new(raw);
