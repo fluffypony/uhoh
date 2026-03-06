@@ -452,20 +452,12 @@ pub fn cmd_restore(
         for path in &to_delete {
             validate_restore_path(project_path, path)?;
             let dst = project_path.join(crate::cas::decode_relpath_to_os(path));
-            if let Ok(meta) = std::fs::symlink_metadata(&dst) {
-                if meta.file_type().is_symlink() {
-                    anyhow::bail!(
-                        "Refusing to delete symlink path during restore: {}",
-                        dst.display()
-                    );
+            if let Ok(meta) = dst.symlink_metadata() {
+                if meta.is_symlink() || meta.is_file() {
+                    let _ = std::fs::remove_file(&dst);
+                } else if meta.is_dir() {
+                    safe_remove_dir_tree_within(project_path, &dst)?;
                 }
-            }
-            if dst.is_file() {
-                let _ = std::fs::remove_file(&dst);
-            } else if dst.is_dir() {
-                safe_remove_dir_tree_within(project_path, &dst)?;
-            } else {
-                let _ = std::fs::remove_file(&dst);
             }
         }
         for (path, _, _, _) in &to_restore {
@@ -475,12 +467,12 @@ pub fn cmd_restore(
                 std::fs::create_dir_all(parent)?;
                 check_no_symlink_parents(project_path, &final_dest)?;
             }
-            if final_dest.is_file() {
-                let _ = std::fs::remove_file(&final_dest);
-            } else if final_dest.is_dir() {
-                safe_remove_dir_tree_within(project_path, &final_dest)?;
-            } else {
-                let _ = std::fs::remove_file(&final_dest);
+            if let Ok(meta) = final_dest.symlink_metadata() {
+                if meta.is_symlink() || meta.is_file() {
+                    let _ = std::fs::remove_file(&final_dest);
+                } else if meta.is_dir() {
+                    safe_remove_dir_tree_within(project_path, &final_dest)?;
+                }
             }
             std::fs::rename(&staged, &final_dest).with_context(|| {
                 format!(

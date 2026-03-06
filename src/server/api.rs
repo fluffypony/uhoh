@@ -331,9 +331,10 @@ pub async fn get_file_content(
     let uhoh_dir = state.uhoh_dir.clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
         let project = resolve::resolve_project(&db, Some(&hash), None)?;
+        let clean_path = file_path.trim_start_matches('/');
         resolve::validate_path_within_project(
             std::path::Path::new(&project.current_path),
-            &file_path,
+            clean_path,
         )?;
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
@@ -341,7 +342,7 @@ pub async fn get_file_content(
         let file = db
             .get_snapshot_files(snap.rowid)?
             .into_iter()
-            .find(|f| f.path == file_path)
+            .find(|f| f.path == clean_path)
             .ok_or_else(|| anyhow::anyhow!("File not found in snapshot"))?;
         if !file.stored {
             anyhow::bail!("File content is not stored for this snapshot entry");
@@ -467,9 +468,26 @@ pub async fn restore_snapshot(
     let restore_locks = state.restore_locks.clone();
     let event_tx = state.event_tx.clone();
     let restore_key = hash.clone();
-    let hash_for_unlock = hash.clone();
     let target_path_for_task = target_path.clone();
 
+    struct RestoreLockGuard {
+        locks: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+        key: String,
+    }
+    impl Drop for RestoreLockGuard {
+        fn drop(&mut self) {
+            let locks = self.locks.clone();
+            let key = self.key.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let mut guard = locks.lock().await;
+                    guard.remove(&key);
+                });
+            }
+        }
+    }
+
+    let mut lock_guard: Option<RestoreLockGuard> = None;
     if !dry_run {
         let mut locks = restore_locks.lock().await;
         if locks.contains(&restore_key) {
@@ -480,6 +498,10 @@ pub async fn restore_snapshot(
                 .into_response();
         }
         locks.insert(restore_key.clone());
+        lock_guard = Some(RestoreLockGuard {
+            locks: restore_locks.clone(),
+            key: restore_key.clone(),
+        });
     }
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
@@ -542,11 +564,7 @@ pub async fn restore_snapshot(
     })
     .await;
 
-    if !dry_run {
-        let mut locks = restore_locks.lock().await;
-        locks.remove(&restore_key);
-        locks.remove(&hash_for_unlock);
-    }
+    drop(lock_guard);
 
     match result {
         Ok(Ok(value)) => Json(value).into_response(),

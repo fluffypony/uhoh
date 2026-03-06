@@ -26,7 +26,6 @@ impl CustomizeConnection<Connection, rusqlite::Error> for SqliteCustomizer {
 type DbConn = PooledConnection<SqliteConnectionManager>;
 
 mod ledger;
-mod migrations;
 mod schema;
 mod snapshots;
 
@@ -206,12 +205,8 @@ impl Database {
     fn migrate(&self) -> Result<()> {
         let conn = self.conn();
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-        let version: i32 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap_or(0);
-
-        migrations::apply_migrations(&conn, version)?;
-
+        // All DDL uses CREATE TABLE/INDEX IF NOT EXISTS, safe to run every startup
+        conn.execute_batch(include_str!("db/schema.sql"))?;
         Ok(())
     }
 
@@ -301,22 +296,6 @@ impl Database {
     pub fn update_project_path(&self, hash: &str, new_path: &str) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let old_path: Option<String> = tx
-            .query_row(
-                "SELECT current_path FROM projects WHERE hash = ?1",
-                params![hash],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(old) = old_path {
-            if old != new_path {
-                tx.execute(
-                    "INSERT INTO project_history (project_hash, old_path, changed_at) VALUES (?1, ?2, ?3)",
-                    params![hash, old, now],
-                )?;
-            }
-        }
         tx.execute(
             "UPDATE projects SET current_path = ?1 WHERE hash = ?2",
             params![new_path, hash],
@@ -355,23 +334,6 @@ impl Database {
 
     // === Snapshots ===
 
-    pub fn next_snapshot_id(&self, project_hash: &str) -> Result<u64> {
-        // Kept for tests; prefer create_snapshot_with_alloc to avoid races
-        let mut conn = self.conn();
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let id: u64 = tx.query_row(
-            "SELECT next_snapshot_id FROM projects WHERE hash = ?1",
-            params![project_hash],
-            |row| row.get(0),
-        )?;
-        tx.execute(
-            "UPDATE projects SET next_snapshot_id = ?1 WHERE hash = ?2",
-            params![id + 1, project_hash],
-        )?;
-        tx.commit()?;
-        Ok(id)
-    }
-
     /// Create a snapshot in a single transaction (atomic).
     #[allow(clippy::too_many_arguments)]
     pub fn create_snapshot(
@@ -392,13 +354,9 @@ impl Database {
         // Allocate snapshot_id inside the same transaction if zero passed
         let snapshot_id = if snapshot_id == 0 {
             let id: u64 = tx.query_row(
-                "SELECT next_snapshot_id FROM projects WHERE hash = ?1",
+                "SELECT COALESCE(MAX(snapshot_id), 0) + 1 FROM snapshots WHERE project_hash = ?1",
                 params![project_hash],
                 |row| row.get(0),
-            )?;
-            tx.execute(
-                "UPDATE projects SET next_snapshot_id = ?1 WHERE hash = ?2",
-                params![id + 1, project_hash],
             )?;
             id
         } else {

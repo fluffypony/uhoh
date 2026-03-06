@@ -20,8 +20,10 @@ use notify::{RecursiveMode, Watcher as _};
 struct DaemonMaintenanceSubsystem {
     compaction_index: usize,
     last_backup: Option<std::time::Instant>,
+    backup_interval: std::time::Duration,
     sidecar_check_interval: std::time::Duration,
     last_sidecar_check: Option<std::time::Instant>,
+    vacuum_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DaemonMaintenanceSubsystem {
@@ -29,10 +31,14 @@ impl DaemonMaintenanceSubsystem {
         Self {
             compaction_index: 0,
             last_backup: None,
+            backup_interval: std::time::Duration::from_secs(
+                config.update.check_interval_hours * 3600,
+            ),
             sidecar_check_interval: std::time::Duration::from_secs(
                 config.sidecar_update.check_interval_hours * 3600,
             ),
             last_sidecar_check: None,
+            vacuum_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -57,6 +63,7 @@ impl DaemonMaintenanceSubsystem {
             let gc_uhoh_dir = ctx.uhoh_dir.clone();
             let cfg = ctx.config.compaction.clone();
             let idx = self.compaction_index;
+            let vacuum_flag = self.vacuum_in_flight.clone();
             let projects = db_projects.clone();
             tokio::spawn(async move {
                 let freed = tokio::task::spawn_blocking(move || {
@@ -84,14 +91,22 @@ impl DaemonMaintenanceSubsystem {
                             if let Err(err) = crate::gc::run_gc(&gc_uhoh_dir_cl, &db) {
                                 tracing::warn!("GC run after compaction failed: {err}");
                             }
-                            let (tx, rx) = std::sync::mpsc::channel();
-                            std::thread::spawn(move || {
-                                let _ = tx.send(db.vacuum());
-                            });
-                            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                                Ok(Ok(())) => {}
-                                Ok(Err(err)) => tracing::warn!("VACUUM failed: {}", err),
-                                Err(_) => tracing::warn!("VACUUM timed out after 30 seconds"),
+                            if vacuum_flag
+                                .compare_exchange(
+                                    false,
+                                    true,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                )
+                                .is_ok()
+                            {
+                                let vacuum_res = db.vacuum();
+                                vacuum_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                                if let Err(err) = vacuum_res {
+                                    tracing::warn!("VACUUM failed: {}", err);
+                                }
+                            } else {
+                                tracing::debug!("Skipping VACUUM: prior run still in-flight");
                             }
                         }
                     }));
@@ -100,11 +115,11 @@ impl DaemonMaintenanceSubsystem {
             self.compaction_index = self.compaction_index.wrapping_add(1);
         }
 
-        let backup_interval =
+        self.backup_interval =
             std::time::Duration::from_secs(ctx.config.update.check_interval_hours * 3600);
         let do_backup = self
             .last_backup
-            .map(|t| t.elapsed() >= backup_interval)
+            .map(|t| t.elapsed() >= self.backup_interval)
             .unwrap_or(true);
         if do_backup {
             let backups_dir = ctx.uhoh_dir.join("backups");
@@ -383,7 +398,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let _daemon_mutex = {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
-        let name: Vec<u16> = OsStr::new("Global\\uhoh-daemon\0").encode_wide().collect();
+        let dir_hash = blake3::hash(uhoh_dir.to_string_lossy().as_bytes())
+            .to_hex()
+            .to_string();
+        let mutex_name = format!("Local\\uhoh-{}\0", &dir_hash[..16]);
+        let name: Vec<u16> = OsStr::new(&mutex_name).encode_wide().collect();
         unsafe {
             let handle = winapi::um::synchapi::CreateMutexW(
                 std::ptr::null_mut(),
@@ -405,7 +424,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
 
     // Write PID file with exclusive lock to avoid races
     let pid_path = uhoh_dir.join("daemon.pid");
-    let pid_file = std::fs::OpenOptions::new()
+    let mut pid_file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
@@ -424,17 +443,14 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
         let start_ticks =
             crate::platform::read_process_start_ticks(std::process::id()).unwrap_or(0);
         let record = format!("{} {}\n", std::process::id(), start_ticks);
-        let mut f = &pid_file;
+        let f = &mut pid_file;
         let _ = f.write_all(record.as_bytes());
         let _ = f.sync_all();
     }
     #[cfg(not(unix))]
     {
-        use fs4::FileExt;
         use std::io::{Seek, SeekFrom, Write};
-        // Lock PID file on Windows too to prevent multiple daemons
-        pid_file.try_lock_exclusive()?;
-        let mut f = &pid_file;
+        let f = &mut pid_file;
         let _ = f.set_len(0);
         let _ = f.seek(SeekFrom::Start(0));
         let start_ticks =
@@ -664,15 +680,14 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 #[cfg(windows)]
                 {
                     let mut args: Vec<String> = std::env::args().collect();
-                    let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
                     if let Some(pos) = args.iter().position(|a| a == "--takeover") {
-                        // Remove flag and its PID argument if present
                         let _ = args.remove(pos);
                         if pos < args.len() { let _ = args.remove(pos); }
                     }
+                    let rest: Vec<String> = if args.len() > 1 { args[1..].to_vec() } else { Vec::new() };
                     if let Some(ref exe) = exe_path {
                         let _child = std::process::Command::new(exe)
-                            .args(rest)
+                            .args(&rest)
                             .arg("--takeover")
                             .arg(std::process::id().to_string())
                             .spawn();
@@ -735,16 +750,15 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     {
                         if let Ok(exe) = std::env::current_exe() {
                             let mut args: Vec<String> = std::env::args().collect();
-                            let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
                             if let Some(pos) = args.iter().position(|a| a == "--takeover") {
-                                // Remove existing --takeover and its value if present
                                 let _ = args.remove(pos);
                                 if pos < args.len() { let _ = args.remove(pos); }
                             }
                             args.push("--takeover".into());
                             args.push(std::process::id().to_string());
+                            let rest: Vec<String> = if args.len() > 1 { args[1..].to_vec() } else { Vec::new() };
                             let _ = std::process::Command::new(exe)
-                                .args(rest)
+                                .args(&rest)
                                 .spawn();
                         }
                     }
@@ -829,10 +843,27 @@ fn restore_marker_active(uhoh_dir: &Path) -> bool {
         return false;
     }
 
+    const MAX_MARKER_AGE_SECS: u64 = 3600;
+    if let Ok(meta) = std::fs::metadata(&marker_path) {
+        if let Ok(modified) = meta.modified() {
+            if modified
+                .elapsed()
+                .map(|d| d > Duration::from_secs(MAX_MARKER_AGE_SECS))
+                .unwrap_or(false)
+            {
+                tracing::warn!("Removing stale restore marker: {}", marker_path.display());
+                let _ = std::fs::remove_file(&marker_path);
+                return false;
+            }
+        }
+    }
+
     // If marker is stale (originating process died), remove it and treat as inactive.
     if let Ok(text) = std::fs::read_to_string(&marker_path) {
+        let mut parseable = false;
         if let Some(pid_line) = text.lines().find(|l| l.starts_with("pid=")) {
             if let Ok(pid) = pid_line.trim_start_matches("pid=").trim().parse::<u32>() {
+                parseable = true;
                 let start = crate::platform::read_process_start_ticks(pid);
                 if !crate::platform::is_uhoh_process_alive_with_start(pid, start) {
                     let _ = std::fs::remove_file(&marker_path);
@@ -840,6 +871,15 @@ fn restore_marker_active(uhoh_dir: &Path) -> bool {
                 }
             }
         }
+        if !parseable {
+            tracing::warn!("Removing corrupt restore marker: {}", marker_path.display());
+            let _ = std::fs::remove_file(&marker_path);
+            return false;
+        }
+    } else {
+        tracing::warn!("Removing unreadable restore marker: {}", marker_path.display());
+        let _ = std::fs::remove_file(&marker_path);
+        return false;
     }
 
     true
@@ -883,58 +923,56 @@ fn handle_watch_event(
         return;
     }
 
-    // Find which project this path belongs to
-    for (project_path, state) in states.iter_mut() {
-        if path.starts_with(project_path) {
-            // Apply ignore rules to targeted file events (B30)
+    // Find which project this path belongs to (longest prefix match for nested projects)
+    let best_key = states.keys()
+        .filter(|pp| path.starts_with(pp.as_str()))
+        .max_by_key(|pp| pp.len())
+        .cloned();
+    let Some(project_path_key) = best_key else { return };
+    let Some(state) = states.get_mut(&project_path_key) else { return };
+    let project_path = project_path_key.as_str();
+
+    // Apply ignore rules to targeted file events
+    if let Ok(rel) = path.strip_prefix(project_path) {
+        let rel_str = rel.to_string_lossy();
+        // Skip .git internals and .uhoh directory
+        if rel_str.starts_with(".git/") || rel_str.starts_with(".git\\")
+            || rel_str == ".git"
+            || rel_str.starts_with(".uhoh/") || rel_str.starts_with(".uhoh\\")
+            || rel_str == ".uhoh"
+        {
+            return;
+        }
+    }
+    state.pending_changes.insert(path.clone());
+    let now = Instant::now();
+    if state.first_change_at.is_none() {
+        state.first_change_at = Some(now);
+    }
+    state.last_change_at = Some(now);
+
+    // Track deletions separately for emergency detection
+    if is_delete && state.deleted_paths.len() < MAX_DELETED_PATHS {
+        if let Some(ref manifest) = state.cached_prev_manifest {
             if let Ok(rel) = path.strip_prefix(project_path) {
-                let rel_str = rel.to_string_lossy();
-                // Skip .git internals and .uhoh directory
-                if rel_str.starts_with(".git/") || rel_str.starts_with(".git\\")
-                    || rel_str == ".git"
-                    || rel_str.starts_with(".uhoh/") || rel_str.starts_with(".uhoh\\")
-                    || rel_str == ".uhoh"
-                {
-                    return;
-                }
-            }
-            state.pending_changes.insert(path.clone());
-            let now = Instant::now();
-            if state.first_change_at.is_none() {
-                state.first_change_at = Some(now);
-            }
-            state.last_change_at = Some(now);
-
-            // Track deletions separately for emergency detection
-            if is_delete && state.deleted_paths.len() < MAX_DELETED_PATHS {
-                if let Some(ref manifest) = state.cached_prev_manifest {
-                    if let Ok(rel) = path.strip_prefix(project_path) {
-                        let rel_path = crate::cas::encode_relpath(rel);
-                        if manifest.contains(&rel_path) {
-                            // Direct file match
-                            state.deleted_paths.insert(path.clone());
-                        } else {
-                            // Check if this is a directory deletion: expand to all
-                            // manifest entries under this prefix
-                            let expanded = crate::emergency::expand_directory_deletion(
-                                &rel_path, manifest,
-                            );
-                            for exp_rel in expanded {
-                                if state.deleted_paths.len() >= MAX_DELETED_PATHS {
-                                    break;
-                                }
-                                let exp_abs = PathBuf::from(project_path).join(&exp_rel);
-                                state.deleted_paths.insert(exp_abs);
-                            }
-                        }
-                    }
-                } else {
-                    // No cached manifest: insert raw for heuristic counting
+                let rel_path = crate::cas::encode_relpath(rel);
+                if manifest.contains(&rel_path) {
                     state.deleted_paths.insert(path.clone());
+                } else {
+                    let expanded = crate::emergency::expand_directory_deletion(
+                        &rel_path, manifest,
+                    );
+                    for exp_rel in expanded {
+                        if state.deleted_paths.len() >= MAX_DELETED_PATHS {
+                            break;
+                        }
+                        let exp_abs = PathBuf::from(project_path).join(&exp_rel);
+                        state.deleted_paths.insert(exp_abs);
+                    }
                 }
             }
-
-            break;
+        } else {
+            state.deleted_paths.insert(path.clone());
         }
     }
 }
@@ -1309,7 +1347,13 @@ async fn process_pending_snapshots(
             let cfg = config.clone();
             let changed: Vec<PathBuf> = state.pending_changes.drain().collect();
             let changed_for_requeue = changed.clone();
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::warn!("Semaphore closed while scheduling snapshot task");
+                    continue;
+                }
+            };
             // Move minimal state needed; clear after join completes below
             let db_for_task = database.clone();
             let project_path_key = project_path.clone();
@@ -1361,7 +1405,13 @@ async fn process_pending_snapshots(
         let uhoh_dir_buf = uhoh_dir.to_path_buf();
         let cfg = config.clone();
         let db_for_task = database.clone();
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let permit = match semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!("Semaphore closed while scheduling emergency snapshot task");
+                continue;
+            }
+        };
         let changed_for_requeue = drained_changes;
         join.spawn(async move {
             let proj_hash_for_log = project_hash.clone();
@@ -1691,12 +1741,22 @@ async fn process_ai_summary_queue(
                 deleted: deleted.clone(),
                 modified: modified.clone(),
             };
-            match crate::ai::summary::generate_summary_blocking(
-                uhoh_dir,
-                &config.clone(),
-                &diff_chunks,
-                &files,
-            ) {
+            let uhoh_dir_for_ai = uhoh_dir.to_path_buf();
+            let cfg_for_ai = config.clone();
+            let diff_for_ai = diff_chunks.clone();
+            let files_for_ai = files.clone();
+            let ai_result = tokio::task::spawn_blocking(move || {
+                crate::ai::summary::generate_summary_blocking(
+                    &uhoh_dir_for_ai,
+                    &cfg_for_ai,
+                    &diff_for_ai,
+                    &files_for_ai,
+                )
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("AI summary task join error: {e}")));
+
+            match ai_result {
                 Ok(text) if !text.is_empty() => {
                     if let Err(e) = database.set_ai_summary(rowid, &text) {
                         tracing::warn!("Failed to set AI summary: {}", e);
@@ -1864,26 +1924,24 @@ fn check_inotify_limit() {}
 /// Parse "Mass delete detected: X/Y files (Z%)" from the snapshot message
 /// set by the dynamic trigger upgrade in snapshot.rs. Returns (deleted, baseline, ratio).
 fn parse_emergency_message(msg: &str) -> (usize, u64, f64) {
+    parse_emergency_message_opt(msg).unwrap_or((0, 0, 0.0))
+}
+
+#[allow(dead_code)]
+fn parse_emergency_message_opt(msg: &str) -> Option<(usize, u64, f64)> {
     // Format: "Mass delete detected: 15/20 files (75.0%)"
-    let default = (0, 0, 0.0);
-    let Some(after_colon) = msg.strip_prefix("Mass delete detected: ") else {
-        return default;
-    };
-    let Some(slash_pos) = after_colon.find('/') else {
-        return default;
-    };
-    let deleted: usize = after_colon[..slash_pos].parse().unwrap_or(0);
+    let after_colon = msg.strip_prefix("Mass delete detected: ")?;
+    let slash_pos = after_colon.find('/')?;
+    let deleted: usize = after_colon[..slash_pos].parse().ok()?;
     let rest = &after_colon[slash_pos + 1..];
-    let Some(space_pos) = rest.find(' ') else {
-        return default;
-    };
-    let baseline: u64 = rest[..space_pos].parse().unwrap_or(0);
+    let space_pos = rest.find(' ')?;
+    let baseline: u64 = rest[..space_pos].parse().ok()?;
     let ratio = if baseline > 0 {
         deleted as f64 / baseline as f64
     } else {
         0.0
     };
-    (deleted, baseline, ratio)
+    Some((deleted, baseline, ratio))
 }
 
 fn check_for_new_projects(
