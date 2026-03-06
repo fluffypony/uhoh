@@ -1822,21 +1822,22 @@ async fn run_doctor(
     }
 
     // 4) Hash verification for referenced blobs (detect on-disk corruption)
+    // Uses read_blob() which handles decompression and integrity verification
     let mut corrupted = Vec::new();
     for h in &referenced {
         let p = blob_root.join(&h[..h.len().min(2)]).join(h);
         if !p.exists() {
             continue;
         }
-        match std::fs::read(&p) {
-            Ok(bytes) => {
-                let actual = blake3::hash(&bytes).to_hex().to_string();
-                if actual != *h {
-                    corrupted.push((h.clone(), p.clone()));
-                }
+        match cas::read_blob(&blob_root, h) {
+            Ok(Some(_)) => { /* blob is valid */ }
+            Ok(None) => {
+                // read_blob returns None on hash mismatch
+                corrupted.push((h.clone(), p.clone()));
             }
             Err(e) => {
                 tracing::warn!("Failed to read blob {}: {}", &h[..h.len().min(12)], e);
+                corrupted.push((h.clone(), p.clone()));
             }
         }
     }

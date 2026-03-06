@@ -1880,6 +1880,7 @@ fn check_moved_folders(
                         }
                         let _ = database
                             .update_project_path(&project.hash, &new_path.to_string_lossy());
+                        failures.remove(&project.hash);
                         tracing::info!(
                             "Relocated project {} -> {}",
                             &project.hash[..project.hash.len().min(12)],

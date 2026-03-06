@@ -496,7 +496,7 @@ fn encode_relpath_bytes(rel: &Path) -> String {
         let bytes = rel.as_os_str().as_bytes();
         format!(
             "b64:{}",
-            base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
         )
     }
     #[cfg(windows)]
@@ -507,7 +507,7 @@ fn encode_relpath_bytes(rel: &Path) -> String {
             unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
         format!(
             "b64:{}",
-            base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
         )
     }
     #[cfg(not(any(unix, windows)))]
@@ -519,7 +519,7 @@ fn encode_relpath_bytes(rel: &Path) -> String {
 /// Decode a manifest relative path back to a platform OsString.
 pub fn decode_relpath_to_os(s: &str) -> OsString {
     if let Some(rest) = s.strip_prefix("b64:") {
-        if let Ok(bytes) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(rest) {
+        if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(rest) {
             #[cfg(unix)]
             {
                 use std::os::unix::ffi::OsStringExt;

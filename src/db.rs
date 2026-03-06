@@ -383,7 +383,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
-                    COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                    s.file_count
              FROM snapshots s
              WHERE s.project_hash = ?1
              ORDER BY s.timestamp DESC, s.rowid DESC",
@@ -417,7 +417,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
-                    COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                    s.file_count
              FROM snapshots s
              WHERE s.project_hash = ?1
              ORDER BY s.timestamp DESC
@@ -453,7 +453,7 @@ impl Database {
             (None, None) => {
                 let mut stmt = conn.prepare(
                     "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
-                            COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                            s.file_count
                      FROM snapshots s
                      WHERE s.project_hash = ?1
                      ORDER BY s.timestamp DESC",
@@ -475,7 +475,7 @@ impl Database {
             (Some(from), None) => {
                 let mut stmt = conn.prepare(
                     "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
-                            COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                            s.file_count
                      FROM snapshots s
                      WHERE s.project_hash = ?1 AND s.timestamp >= ?2
                      ORDER BY s.timestamp DESC",
@@ -497,7 +497,7 @@ impl Database {
             (None, Some(to)) => {
                 let mut stmt = conn.prepare(
                     "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
-                            COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                            s.file_count
                      FROM snapshots s
                      WHERE s.project_hash = ?1 AND s.timestamp <= ?2
                      ORDER BY s.timestamp DESC",
@@ -519,7 +519,7 @@ impl Database {
             (Some(from), Some(to)) => {
                 let mut stmt = conn.prepare(
                     "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
-                            COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                            s.file_count
                      FROM snapshots s
                      WHERE s.project_hash = ?1 AND s.timestamp >= ?2 AND s.timestamp <= ?3
                      ORDER BY s.timestamp DESC",
@@ -548,7 +548,7 @@ impl Database {
             .query_row(
                 "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                         s.ai_summary,
-                        COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                        s.file_count
                  FROM snapshots s WHERE s.rowid = ?1",
                 params![rowid],
                 |row| {
@@ -588,7 +588,7 @@ impl Database {
         conn.query_row(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
-                    COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as fc
+                    s.file_count as fc
              FROM snapshots s
              WHERE s.project_hash = ?1 AND s.snapshot_id = ?2",
             params![project_hash, snapshot_id],
@@ -839,7 +839,7 @@ impl Database {
         if let Some(ph) = project_hash {
             let mut stmt = conn.prepare(
                 "SELECT si.snapshot_rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.ai_summary,
-                        snippet(search_index, 3, '<mark>', '</mark>', '...', 32) as match_context
+                        snippet(search_index, -1, '<mark>', '</mark>', '...', 32) as match_context
                  FROM search_index si
                  JOIN snapshots s ON s.rowid = si.snapshot_rowid
                  WHERE search_index MATCH ?1 AND si.project_hash = ?2
@@ -863,7 +863,7 @@ impl Database {
         } else {
             let mut stmt = conn.prepare(
                 "SELECT si.snapshot_rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.ai_summary,
-                        snippet(search_index, 3, '<mark>', '</mark>', '...', 32) as match_context
+                        snippet(search_index, -1, '<mark>', '</mark>', '...', 32) as match_context
                  FROM search_index si
                  JOIN snapshots s ON s.rowid = si.snapshot_rowid
                  WHERE search_index MATCH ?1
@@ -1092,7 +1092,7 @@ impl Database {
         conn.query_row(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
-                    COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as fc
+                    s.file_count as fc
              FROM snapshots s
              WHERE s.project_hash = ?1 AND s.snapshot_id < ?2
              ORDER BY s.snapshot_id DESC LIMIT 1",
@@ -1120,7 +1120,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
-                    COALESCE(s.file_count, (SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = s.rowid)) as file_count
+                    s.file_count
              FROM snapshots s
              WHERE s.project_hash = ?1
              ORDER BY s.snapshot_id ASC",

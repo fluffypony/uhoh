@@ -387,6 +387,23 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
     let restore_locks = state.restore_locks.clone();
     let event_tx = state.event_tx.clone();
 
+    struct McpRestoreLockGuard {
+        locks: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+        key: String,
+    }
+    impl Drop for McpRestoreLockGuard {
+        fn drop(&mut self) {
+            let locks = self.locks.clone();
+            let key = self.key.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    locks.lock().await.remove(&key);
+                });
+            }
+        }
+    }
+
+    let mut _lock_guard: Option<McpRestoreLockGuard> = None;
     if !dry_run {
         let lock_key = path
             .clone()
@@ -400,7 +417,11 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
                 "Restore already in progress for this project".to_string(),
             );
         }
-        locks.insert(lock_key);
+        locks.insert(lock_key.clone());
+        _lock_guard = Some(McpRestoreLockGuard {
+            locks: restore_locks.clone(),
+            key: lock_key,
+        });
     }
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
@@ -469,14 +490,8 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
     })
     .await;
 
-    if !dry_run {
-        let lock_key = path_for_lock
-            .clone()
-            .or(hash_for_lock.clone())
-            .unwrap_or_else(|| "default".to_string());
-        let mut locks = restore_locks.lock().await;
-        locks.remove(&lock_key);
-    }
+    // Lock cleanup handled by McpRestoreLockGuard drop
+    drop(_lock_guard);
 
     match result {
         Ok(Ok(value)) => JsonRpcResponse::success(id, value),

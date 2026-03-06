@@ -120,13 +120,21 @@ pub fn cmd_gitstash(
     if let Some(mut sin) = upd.stdin.take() {
         use std::io::Write as _;
         for (path, blob_hash) in &tree_entries {
+            // Decode b64:-encoded paths back to filesystem paths for git
+            let git_path = if path.starts_with("b64:") {
+                cas::decode_relpath_to_os(path)
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                path.clone()
+            };
             // Path traversal guard
-            let p = std::path::Path::new(path);
+            let p = std::path::Path::new(&git_path);
             if p.is_absolute()
                 || p.components()
                     .any(|c| matches!(c, std::path::Component::ParentDir))
             {
-                tracing::warn!("Skipping suspicious path in git stash: {}", path);
+                tracing::warn!("Skipping suspicious path in git stash: {}", git_path);
                 continue;
             }
             // Symlink mode handling (120000) if snapshot recorded it as non-executable and content looks like link
@@ -138,7 +146,7 @@ pub fn cmd_gitstash(
                 "100644"
             };
             // Write NUL-terminated entries: "<mode> <hash>\t<path>\0"
-            write!(sin, "{mode} {blob_hash}\t{path}\0")?;
+            write!(sin, "{mode} {blob_hash}\t{git_path}\0")?;
         }
     }
     let status = upd.wait()?;

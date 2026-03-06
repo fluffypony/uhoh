@@ -239,15 +239,21 @@ pub async fn get_diff(
         let files = db.get_snapshot_files(snap.rowid)?;
 
         let base_rowid = if let Some(base_id) = params.against.as_ref() {
-            db.find_snapshot_by_base58(&hash, base_id)?
-                .ok_or_else(|| anyhow::anyhow!("Base snapshot not found"))?
-                .rowid
+            Some(
+                db.find_snapshot_by_base58(&hash, base_id)?
+                    .ok_or_else(|| anyhow::anyhow!("Base snapshot not found"))?
+                    .rowid,
+            )
         } else {
             db.snapshot_before(&hash, snap.snapshot_id)?
                 .map(|s| s.rowid)
-                .unwrap_or(snap.rowid)
         };
-        let base_files = db.get_snapshot_files(base_rowid).unwrap_or_default();
+        // When no previous snapshot exists (first snapshot), use empty base
+        // so all files show as additions instead of "no diff"
+        let base_files = match base_rowid {
+            Some(rowid) => db.get_snapshot_files(rowid).unwrap_or_default(),
+            None => Vec::new(),
+        };
 
         let filter = params.file.as_deref();
         let mut diffs = Vec::new();
