@@ -851,7 +851,13 @@ fn handle_db_commands(
                 database.event_ledger_recent(Some("db_guard"), name.as_deref(), None, None, 100)?;
             for e in events {
                 if let Some(t) = table {
-                    if e.path.as_deref() != Some(t.as_str()) {
+                    // Table info is stored in the detail JSON, not in e.path
+                    let matches = e
+                        .detail
+                        .as_deref()
+                        .map(|d| d.contains(t.as_str()))
+                        .unwrap_or(false);
+                    if !matches {
                         continue;
                     }
                 }

@@ -23,7 +23,11 @@ pub fn tick_mysql_guard(
     // Phase 1 schema polling mode: detect abrupt table/index shape changes and estimate row
     // count drops to surface catastrophic operations before full binlog support lands.
     let stored_credentials = crate::db_guard::resolve_stored_credentials(&guard.connection_ref)?;
-    let snapshot = match poll_schema_snapshot(&guard.connection_ref, stored_credentials.as_ref()) {
+    let snapshot = match poll_schema_snapshot(
+        &guard.connection_ref,
+        stored_credentials.as_ref(),
+        &guard.tables_csv,
+    ) {
         Ok(snapshot) => snapshot,
         Err(e) => {
             let mut event = new_event("db_guard", "mysql_poll_failed", "warn");
@@ -119,6 +123,7 @@ struct MysqlSnapshot {
 fn poll_schema_snapshot(
     connection_ref: &str,
     stored_credentials: Option<&CredentialMaterial>,
+    tables_csv: &str,
 ) -> Result<MysqlSnapshot> {
     let parsed = parse_mysql_ref(connection_ref)?;
     let env_credentials = resolve_mysql_env_credentials();
@@ -153,15 +158,33 @@ fn poll_schema_snapshot(
         defaults_guard = Some(tmp);
     }
 
+    // Build query with optional table filter from tables_csv
+    let query = if tables_csv.trim().is_empty() || tables_csv.trim() == "*" {
+        "SELECT TABLE_SCHEMA, TABLE_NAME, COALESCE(TABLE_ROWS, 0) \
+         FROM information_schema.tables \
+         WHERE TABLE_TYPE='BASE TABLE' \
+         ORDER BY TABLE_SCHEMA, TABLE_NAME"
+            .to_string()
+    } else {
+        let table_names: Vec<String> = tables_csv
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("'{}'", t.replace('\'', "''")))
+            .collect();
+        format!(
+            "SELECT TABLE_SCHEMA, TABLE_NAME, COALESCE(TABLE_ROWS, 0) \
+             FROM information_schema.tables \
+             WHERE TABLE_TYPE='BASE TABLE' AND TABLE_NAME IN ({}) \
+             ORDER BY TABLE_SCHEMA, TABLE_NAME",
+            table_names.join(",")
+        )
+    };
+
     cmd.arg("--batch")
         .arg("--skip-column-names")
         .arg("-e")
-        .arg(
-            "SELECT TABLE_SCHEMA, TABLE_NAME, COALESCE(TABLE_ROWS, 0) \
-             FROM information_schema.tables \
-             WHERE TABLE_TYPE='BASE TABLE' \
-             ORDER BY TABLE_SCHEMA, TABLE_NAME",
-        )
+        .arg(&query)
         .arg("-h")
         .arg(&parsed.host)
         .arg("-P")

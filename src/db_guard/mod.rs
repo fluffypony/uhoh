@@ -126,21 +126,34 @@ impl Subsystem for DbGuardSubsystem {
             return Ok(());
         }
 
-        let guards = ctx.database.list_db_guards()?;
-        for guard in &guards {
-            let mut event = new_event("db_guard", "guard_started", "info");
-            event.guard_name = Some(guard.name.clone());
-            event.detail = Some(format!("engine={}, mode={}", guard.engine, guard.mode));
-            if let Err(err) = ctx.event_ledger.append(event) {
-                tracing::error!("failed to append guard_started event: {err}");
-            }
-        }
+        let mut last_guard_names: Vec<String> = Vec::new();
 
-        // Phase 1: lightweight loop for schema polling and sqlite guards.
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = tokio::time::sleep(std::time::Duration::from_secs(GUARD_TICK_INTERVAL_SECS as u64)) => {
+                    // Re-read guards each tick so `uhoh db add` takes effect without restart
+                    let guards = match ctx.database.list_db_guards() {
+                        Ok(g) => g,
+                        Err(err) => {
+                            tracing::error!("failed to list db guards: {err}");
+                            continue;
+                        }
+                    };
+
+                    // Log newly registered guards
+                    for guard in &guards {
+                        if !last_guard_names.contains(&guard.name) {
+                            let mut event = new_event("db_guard", "guard_started", "info");
+                            event.guard_name = Some(guard.name.clone());
+                            event.detail = Some(format!("engine={}, mode={}", guard.engine, guard.mode));
+                            if let Err(err) = ctx.event_ledger.append(event) {
+                                tracing::error!("failed to append guard_started event: {err}");
+                            }
+                        }
+                    }
+                    last_guard_names = guards.iter().map(|g| g.name.clone()).collect();
+
                     self.tick_guards(&ctx, &guards)?;
                 }
             }

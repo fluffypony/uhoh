@@ -221,7 +221,15 @@ fn detect_backend(uhoh_dir: &Path) -> Result<Backend> {
     // Prefer MLX on Apple Silicon macOS when available
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        if Command::new("python3")
+        // Check the managed venv first (installed by mlx_update.rs)
+        let venv_python = uhoh_dir.join("venv/mlx/bin/python3");
+        let mlx_python = if venv_python.exists() {
+            venv_python
+        } else {
+            PathBuf::from("python3")
+        };
+
+        if Command::new(&mlx_python)
             .args(["-c", "import mlx_lm; print('ok')"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -230,7 +238,7 @@ fn detect_backend(uhoh_dir: &Path) -> Result<Backend> {
             .unwrap_or(false)
         {
             return Ok(Backend::MlxLm {
-                python: PathBuf::from("python3"),
+                python: mlx_python,
             });
         }
     }

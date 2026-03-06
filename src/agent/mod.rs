@@ -75,20 +75,34 @@ impl Subsystem for AgentSubsystem {
             return Ok(());
         }
 
-        let agents = ctx.database.list_agents()?;
-        for agent in &agents {
-            let mut event = new_event("agent", "agent_registered", "info");
-            event.agent_name = Some(agent.name.clone());
-            event.detail = Some(format!("profile={}", agent.profile_path));
-            if let Err(err) = ctx.event_ledger.append(event) {
-                tracing::error!("failed to append agent_registered event: {err}");
-            }
-        }
+        let mut last_agent_names: Vec<String> = Vec::new();
 
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                    // Re-read agents each tick so `uhoh agent add` takes effect without restart
+                    let agents = match ctx.database.list_agents() {
+                        Ok(a) => a,
+                        Err(err) => {
+                            tracing::error!("failed to list agents: {err}");
+                            continue;
+                        }
+                    };
+
+                    // Log newly registered agents
+                    for agent in &agents {
+                        if !last_agent_names.contains(&agent.name) {
+                            let mut event = new_event("agent", "agent_registered", "info");
+                            event.agent_name = Some(agent.name.clone());
+                            event.detail = Some(format!("profile={}", agent.profile_path));
+                            if let Err(err) = ctx.event_ledger.append(event) {
+                                tracing::error!("failed to append agent_registered event: {err}");
+                            }
+                        }
+                    }
+                    last_agent_names = agents.iter().map(|a| a.name.clone()).collect();
+
                     self.poll_background_tasks().await;
                     if self
                         .background_failures
@@ -122,8 +136,6 @@ impl Subsystem for AgentSubsystem {
         if self.healthy {
             if self.fanotify_started {
                 SubsystemHealth::HealthyWithAudit(AuditSource::Fanotify)
-            } else if cfg!(target_os = "macos") {
-                SubsystemHealth::HealthyWithAudit(AuditSource::OpenBsm)
             } else {
                 SubsystemHealth::HealthyWithAudit(AuditSource::None)
             }
@@ -132,8 +144,6 @@ impl Subsystem for AgentSubsystem {
                 message: "agent monitor reported failures".to_string(),
                 source: if self.fanotify_started {
                     AuditSource::Fanotify
-                } else if cfg!(target_os = "macos") {
-                    AuditSource::OpenBsm
                 } else {
                     AuditSource::None
                 },
@@ -223,6 +233,8 @@ impl AgentSubsystem {
     fn tick_agents(&mut self, ctx: &SubsystemContext, agents: &[AgentEntry]) -> Result<()> {
         if ctx.config.agent.intercept_enabled {
             if !self.intercept_started {
+                // Clear fatal_error on successful restart to avoid permanent health degradation
+                self.fatal_error = None;
                 self.intercept_started = true;
                 let ctx_cl = ctx.clone();
                 let agents_cl = agents.to_vec();

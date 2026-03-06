@@ -110,10 +110,8 @@ async fn subsystem_manager_starts_reports_health_and_shuts_down() {
 fn event_ledger_trace_and_resolve_roundtrip() {
     let (_tmp, db) = temp_db();
     let ledger = EventLedger::new(db.clone());
-    ledger.start_flusher();
 
     let _ = ledger.append(event("agent", "tool_call", Some("src/lib.rs"), None));
-    let _ = ledger.flush();
     let root = db
         .event_ledger_recent(None, None, None, None, 10)
         .unwrap()
@@ -121,7 +119,6 @@ fn event_ledger_trace_and_resolve_roundtrip() {
         .map(|e| e.id)
         .unwrap();
     let _ = ledger.append(event("fs", "file_write", Some("src/lib.rs"), Some(root)));
-    let _ = ledger.flush();
     let child = db
         .event_ledger_recent(None, None, None, None, 10)
         .unwrap()

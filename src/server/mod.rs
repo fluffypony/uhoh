@@ -44,8 +44,23 @@ pub async fn start_server(
     restore_in_progress: Arc<std::sync::atomic::AtomicBool>,
     subsystem_manager: Arc<Mutex<SubsystemManager>>,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    let auth_token = auth::generate_token();
-    auth::write_token_file(&uhoh_dir, &auth_token)?;
+    // Reuse existing token if present, only generate on first run
+    let token_path = uhoh_dir.join("server.token");
+    let auth_token = if token_path.exists() {
+        let existing = std::fs::read_to_string(&token_path).unwrap_or_default();
+        let trimmed = existing.trim().to_string();
+        if trimmed.is_empty() {
+            let new_token = auth::generate_token();
+            auth::write_token_file(&uhoh_dir, &new_token)?;
+            new_token
+        } else {
+            trimmed
+        }
+    } else {
+        let new_token = auth::generate_token();
+        auth::write_token_file(&uhoh_dir, &new_token)?;
+        new_token
+    };
 
     let state = AppState {
         database,

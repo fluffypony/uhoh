@@ -217,9 +217,6 @@ async fn tool_pre_notify(state: AppState, id: Option<Value>, args: Value) -> Jso
         event.path = path.clone();
         event.detail = Some(format!("action={action}"));
         let ledger = crate::event_ledger::EventLedger::new(db.clone());
-        if let Err(err) = ledger.flush() {
-            tracing::error!("failed to flush event ledger before MCP pre_notify append: {err}");
-        }
         let event_id = ledger.append(event)?;
         Ok(json!({
             "content": [{"type": "text", "text": "pre-notify accepted"}],

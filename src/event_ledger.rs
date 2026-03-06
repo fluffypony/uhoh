@@ -1,85 +1,43 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 use crate::db::{Database, EventLedgerEntry, EventLedgerTraceResult, NewEventLedgerEntry};
+use crate::server::events::ServerEvent;
 
 #[derive(Clone)]
 pub struct EventLedger {
     db: Arc<Database>,
-    _queue_tx: mpsc::UnboundedSender<NewEventLedgerEntry>,
-    queue_rx: Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<NewEventLedgerEntry>>>>,
-    started: Arc<AtomicBool>,
+    server_event_tx: Option<broadcast::Sender<ServerEvent>>,
 }
 
 impl EventLedger {
     pub fn new(db: Arc<Database>) -> Self {
-        let (queue_tx, queue_rx) = mpsc::unbounded_channel();
         Self {
             db,
-            _queue_tx: queue_tx,
-            queue_rx: Arc::new(std::sync::Mutex::new(Some(queue_rx))),
-            started: Arc::new(AtomicBool::new(false)),
+            server_event_tx: None,
         }
     }
 
-    pub fn start_flusher(&self) {
-        if self.started.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
-        let db = self.db.clone();
-        let mut queue = match self.queue_rx.lock() {
-            Ok(mut guard) => match guard.take() {
-                Some(rx) => rx,
-                None => return,
-            },
-            Err(_) => return,
-        };
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                let mut batch = Vec::new();
-                while let Ok(event) = queue.try_recv() {
-                    batch.push(event);
-                    if batch.len() >= 256 {
-                        break;
-                    }
-                }
-                if batch.is_empty() {
-                    continue;
-                }
-                if let Err(err) = db.insert_event_ledger_batch(&batch) {
-                    tracing::error!("failed to flush event ledger batch: {err}");
-                }
-            }
-        });
+    /// Attach a broadcast sender so that persisted events are automatically
+    /// surfaced as `ServerEvent`s (for WebSocket, notifications, webhooks).
+    pub fn with_server_event_tx(mut self, tx: broadcast::Sender<ServerEvent>) -> Self {
+        self.server_event_tx = Some(tx);
+        self
     }
 
     pub fn append(&self, event: NewEventLedgerEntry) -> Result<i64> {
-        // Always insert directly to return a valid event ID.
-        // The flusher handles async batching of events that don't need IDs.
-        self.db.insert_event_ledger(&event)
-    }
+        let id = self.db.insert_event_ledger(&event)?;
 
-    pub fn flush(&self) -> Result<usize> {
-        let mut batch = Vec::new();
-        if let Ok(mut guard) = self.queue_rx.lock() {
-            if let Some(queue) = guard.as_mut() {
-                while let Ok(event) = queue.try_recv() {
-                    batch.push(event);
-                    if batch.len() >= 1024 {
-                        break;
-                    }
-                }
+        // Bridge: map persisted event to ServerEvent and broadcast
+        if let Some(ref tx) = self.server_event_tx {
+            if let Some(server_event) = map_to_server_event(&event) {
+                let _ = tx.send(server_event);
             }
         }
-        self.db.insert_event_ledger_batch(&batch)
+
+        Ok(id)
     }
 
     pub fn recent(
@@ -100,6 +58,27 @@ impl EventLedger {
 
     pub fn mark_resolved(&self, id: i64) -> Result<()> {
         self.db.event_ledger_mark_resolved(id)
+    }
+}
+
+/// Map a persisted event ledger entry to a `ServerEvent` for real-time broadcast.
+/// Only critical/warn-level events from db_guard and agent sources are bridged,
+/// since other event types (snapshot, restore, etc.) are already emitted directly.
+fn map_to_server_event(event: &NewEventLedgerEntry) -> Option<ServerEvent> {
+    match (event.source.as_str(), event.severity.as_str()) {
+        ("db_guard", "critical" | "warn" | "error") => Some(ServerEvent::DbGuardAlert {
+            guard_name: event.guard_name.clone().unwrap_or_default(),
+            event_type: event.event_type.clone(),
+            severity: event.severity.clone(),
+            detail: event.detail.clone().unwrap_or_default(),
+        }),
+        ("agent", "critical" | "warn" | "error") => Some(ServerEvent::AgentAlert {
+            agent_name: event.agent_name.clone().unwrap_or_default(),
+            event_type: event.event_type.clone(),
+            severity: event.severity.clone(),
+            detail: event.detail.clone().unwrap_or_default(),
+        }),
+        _ => None,
     }
 }
 
