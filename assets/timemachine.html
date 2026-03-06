@@ -522,7 +522,7 @@
     <aside id="file-browser">
       <div class="panel-header">Project Explorer</div>
       <div class="search-box">
-        <input id="searchInput" type="text" class="search-input" placeholder="Search files or history..." />
+        <input id="searchInput" type="text" class="search-input" placeholder="Search files (or #keyword for history)" />
       </div>
       <div id="tree"></div>
     </aside>
@@ -793,9 +793,15 @@
           return;
         }
         try {
+          const encodedPath = state.selectedPath.split('/').map(encodeURIComponent).join('/');
           const text = await withAuth(() =>
-            api(`${API}/projects/${state.project.project_hash}/snapshots/${state.snapshot.id}/file/${state.selectedPath}`)
+            api(`${API}/projects/${state.project.project_hash}/snapshots/${state.snapshot.id}/file/${encodedPath}`)
           );
+          if (typeof text === 'string' && text.includes('\ufffd')) {
+            content.className = 'empty-state';
+            content.textContent = 'Binary file — cannot display';
+            return;
+          }
           const raw = typeof text === 'string' ? text : JSON.stringify(text, null, 2);
           let out = '';
           raw.split('\n').forEach((line, i) => {
@@ -849,6 +855,22 @@
           out += '</div>';
           content.className = '';
           content.innerHTML = out;
+
+          // Wire click handlers for timeline entries
+          content.querySelectorAll('[data-id]').forEach(el => {
+            el.addEventListener('click', async () => {
+              const id = el.getAttribute('data-id');
+              const snap = state.snapshots.find(s => s.id === id);
+              if (snap) {
+                hideDryRun();
+                state.snapshot = snap;
+                const idx = state.snapshots.findIndex(s => s.id === snap.id);
+                state.previous = idx >= 0 ? (state.snapshots[idx + 1] || null) : null;
+                renderTimeline();
+                await loadFiles();
+              }
+            });
+          });
         } catch(e) {
           content.className = 'empty-state';
           content.textContent = 'Failed to load timeline: ' + e.message;
@@ -882,6 +904,10 @@
         }
         if (diff.too_large) {
           out += `<div class="empty-state">file too large: ${escapeHtml(diff.path)}</div>`;
+          return;
+        }
+        if (diff.status === 'deleted') {
+          out += `<div class="code-line diff-rem"><span class="line-num"></span><span class="line-code">File deleted: ${escapeHtml(diff.path)}</span></div>`;
           return;
         }
         (diff.hunks || []).forEach((hunk) => {
@@ -926,6 +952,7 @@
           state.selectedPath = null;
           renderTimeline();
           await loadFiles();
+          await switchTab(activeTabView());
         };
 
         const label = document.createElement('div');
@@ -947,14 +974,18 @@
         return;
       }
       setStatus('Creating snapshot');
-      await withAuth(() => api(`${API}/projects/${state.project.project_hash}/snapshots`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
-      }));
-      hideDryRun();
-      await loadSnapshots();
-      setStatus('Snapshot created', 'ok');
+      try {
+        await withAuth(() => api(`${API}/projects/${state.project.project_hash}/snapshots`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message }),
+        }));
+        hideDryRun();
+        await loadSnapshots();
+        setStatus('Snapshot created', 'ok');
+      } catch(e) {
+        setStatus('Snapshot failed: ' + e.message, 'danger');
+      }
     }
 
     async function restoreSnapshot() {
@@ -977,14 +1008,18 @@
         return;
       }
       setStatus('Restoring snapshot', 'danger');
-      await withAuth(() => api(`${API}/projects/${state.project.project_hash}/restore/${state.pendingRestore}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dry_run: false, confirm: true }),
-      }));
-      hideDryRun();
-      setStatus('Restore complete', 'ok');
-      await loadSnapshots();
+      try {
+        await withAuth(() => api(`${API}/projects/${state.project.project_hash}/restore/${state.pendingRestore}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dry_run: false, confirm: true }),
+        }));
+        hideDryRun();
+        setStatus('Restore complete', 'ok');
+        await loadSnapshots();
+      } catch(e) {
+        setStatus('Restore failed: ' + e.message, 'danger');
+      }
     }
 
     async function onSearch() {
@@ -1050,13 +1085,23 @@
         } catch (_) {
           return;
         }
-        if (!state.project) return;
-        const isCurrentProject = data.project_hash === state.project.project_hash;
+        const isCurrentProject = state.project && data.project_hash === state.project.project_hash;
         switch (data.type) {
           case 'snapshot_created':
             if (isCurrentProject) {
               setStatus('New snapshot created', 'ok');
+              // Preserve current selection across autosave refreshes
+              const currentId = state.snapshot ? state.snapshot.id : null;
               await loadSnapshots();
+              if (currentId) {
+                const found = state.snapshots.find(s => s.id === currentId);
+                if (found) {
+                  state.snapshot = found;
+                  const idx = state.snapshots.findIndex(s => s.id === found.id);
+                  state.previous = idx >= 0 ? (state.snapshots[idx + 1] || null) : null;
+                  renderTimeline();
+                }
+              }
             }
             break;
           case 'snapshot_restored':
@@ -1076,9 +1121,14 @@
               await loadSnapshots();
             }
             break;
+          case 'project_added':
+          case 'project_removed':
+            await loadProjects();
+            break;
         }
       };
       ws.onclose = () => {
+        setStatus('Reconnecting...', 'muted');
         wsRetryDelay = Math.min(wsRetryDelay * 2, 60000);
         setTimeout(connectWs, wsRetryDelay);
       };

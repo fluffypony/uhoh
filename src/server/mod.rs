@@ -185,9 +185,18 @@ async fn health_check(State(state): State<AppState>) -> axum::Json<serde_json::V
     }))
 }
 
-async fn serve_ui() -> impl axum::response::IntoResponse {
+async fn serve_ui(request: axum::extract::Request) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // Return 404 JSON for unknown API paths instead of serving HTML
+    if request.uri().path().starts_with("/api/") {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"error": "Not found"})),
+        )
+            .into_response();
+    }
     let html = include_str!("../../assets/timemachine.html");
-    axum::response::Html(html)
+    axum::response::Html(html).into_response()
 }
 
 fn audit_source_label(source: &crate::subsystem::AuditSource) -> &'static str {
