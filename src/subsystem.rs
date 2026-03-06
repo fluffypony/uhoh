@@ -103,7 +103,7 @@ impl SubsystemManager {
                 .task
                 .as_ref()
                 .map(|t| t.is_finished())
-                .unwrap_or(false);
+                .unwrap_or(true); // None means task is gone (dead) — treat as finished
             if !finished {
                 continue;
             }

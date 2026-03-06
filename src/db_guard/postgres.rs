@@ -347,12 +347,15 @@ fn poll_total_row_count(connection_ref: &str) -> Result<i64> {
     run_postgres_task(async move {
         let client = pg_connect_spawn(connection_ref).await?;
 
+        // Use pg_class for row estimates (fast, no table scan).
+        // information_schema.tables does not have TABLE_ROWS in PostgreSQL.
         let rows = client
             .query(
-                "SELECT COALESCE(SUM(TABLE_ROWS::bigint), 0)
-                 FROM information_schema.tables
-                 WHERE table_schema = current_schema()
-                   AND TABLE_TYPE = 'BASE TABLE'",
+                "SELECT COALESCE(SUM(c.reltuples::bigint), 0)
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE c.relkind = 'r'
+                   AND n.nspname = current_schema()",
                 &[],
             )
             .await
@@ -538,15 +541,14 @@ fn run_postgres_task<T, F>(fut: F) -> Result<T>
 where
     F: std::future::Future<Output = Result<T>>,
 {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(fut))
-    } else {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("Failed to build runtime for postgres operation")?;
-        rt.block_on(fut)
-    }
+    // Always create a new single-threaded runtime. block_in_place panics when
+    // called from spawn_blocking threads, and try_current() succeeds there,
+    // so we cannot safely distinguish contexts.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build runtime for postgres operation")?;
+    rt.block_on(fut)
 }
 
 fn native_rustls_connector() -> Result<MakeRustlsConnect> {

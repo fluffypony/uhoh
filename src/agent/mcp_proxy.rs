@@ -91,16 +91,19 @@ async fn handle_connection_async(
         .await
         .with_context(|| format!("Failed connecting MCP upstream: {upstream_addr}"))?;
 
-    let (client_reader, mut client_writer) = client_stream.into_split();
+    let (client_reader, client_writer) = client_stream.into_split();
     let (upstream_reader, mut upstream_writer) = upstream.into_split();
     let mut client_lines = BufReader::new(client_reader).lines();
     let mut upstream_lines = BufReader::new(upstream_reader).lines();
 
+    let client_writer = std::sync::Arc::new(tokio::sync::Mutex::new(client_writer));
+    let client_writer_relay = client_writer.clone();
     let upstream_to_client = tokio::spawn(async move {
         while let Some(line) = upstream_lines.next_line().await? {
-            client_writer.write_all(line.as_bytes()).await?;
-            client_writer.write_all(b"\n").await?;
-            client_writer.flush().await?;
+            let mut w = client_writer_relay.lock().await;
+            w.write_all(line.as_bytes()).await?;
+            w.write_all(b"\n").await?;
+            w.flush().await?;
         }
         Result::<(), anyhow::Error>::Ok(())
     });
@@ -131,9 +134,24 @@ async fn handle_connection_async(
                 .map(|m| m == "tools/call")
                 .unwrap_or(false)
             {
-                if intercept_tool_call(&json, &uhoh_dir, &ledger, &config).await? {
-                    // Pause mode: hold and do not forward this call.
-                    should_forward = false;
+                match intercept_tool_call(&json, &uhoh_dir, &ledger, &config).await? {
+                    InterceptResult::Forward => {}
+                    InterceptResult::Block { id, reason } => {
+                        let error_response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "error": {
+                                "code": -32000,
+                                "message": format!("Action blocked by uhoh safety policy: {}", reason)
+                            },
+                            "id": id
+                        });
+                        let mut err_line = serde_json::to_string(&error_response)?;
+                        err_line.push('\n');
+                        let mut w = client_writer.lock().await;
+                        w.write_all(err_line.as_bytes()).await?;
+                        w.flush().await?;
+                        should_forward = false;
+                    }
                 }
             }
         }
@@ -149,12 +167,23 @@ async fn handle_connection_async(
     Ok(())
 }
 
+/// Result of intercepting a tool call.
+pub enum InterceptResult {
+    /// Not dangerous or approved — forward normally.
+    Forward,
+    /// Rejected or timed out — send error response back to client.
+    Block {
+        id: serde_json::Value,
+        reason: String,
+    },
+}
+
 async fn intercept_tool_call(
     call: &serde_json::Value,
     uhoh_dir: &Path,
     ledger: &crate::event_ledger::EventLedger,
     config: &crate::config::Config,
-) -> Result<bool> {
+) -> Result<InterceptResult> {
     let session_id = call
         .pointer("/params/arguments/session_id")
         .or_else(|| call.pointer("/params/arguments/session"))
@@ -248,13 +277,25 @@ async fn intercept_tool_call(
                         "approval_id": approval_id,
                         "tool": tool,
                         "timeout_seconds": config.agent.pause_timeout_seconds,
-                        "action": "auto_resumed",
+                        "action": "blocked",
                     })
                     .to_string(),
                 );
                 if let Err(err) = ledger.append(timeout_event) {
                     tracing::error!("failed to append dangerous_action_timeout event: {err}");
                 }
+
+                let call_id = call
+                    .get("id")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                return Ok(InterceptResult::Block {
+                    id: call_id,
+                    reason: format!(
+                        "Dangerous tool call '{}' was not approved within {} seconds",
+                        tool, config.agent.pause_timeout_seconds
+                    ),
+                });
             }
         }
     }
@@ -273,7 +314,7 @@ async fn intercept_tool_call(
     if let Err(err) = ledger.append(event) {
         tracing::error!("failed to append tool_call event: {err}");
     }
-    Ok(false)
+    Ok(InterceptResult::Forward)
 }
 
 fn is_dangerous_tool_call(tool: &str, path: Option<&str>, patterns: &[String]) -> bool {
@@ -288,7 +329,11 @@ fn is_dangerous_tool_call(tool: &str, path: Option<&str>, patterns: &[String]) -
             return tool_l == raw.trim();
         }
         if let Some(raw) = p.strip_prefix("path:") {
-            return path_l == raw.trim();
+            let raw = raw.trim();
+            // Use path suffix matching so "Cargo.toml" matches "/home/user/project/Cargo.toml"
+            let file_path = std::path::Path::new(&*path_l);
+            let pattern_path = std::path::Path::new(raw);
+            return file_path.ends_with(pattern_path);
         }
         tool_l == p || path_l == p
     })
@@ -409,9 +454,11 @@ async fn wait_for_approval(
             let _ = std::fs::remove_file(&pending);
             return Ok(true);
         }
+        // Explicit denial: if pending file was deleted externally, treat as rejection
+        if !pending.exists() {
+            return Ok(false);
+        }
         if std::time::Instant::now() >= deadline {
-            let _ = ensure_secure_runtime_dir(&runtime);
-            let _ = std::fs::write(runtime.join("resume.pid"), std::process::id().to_string());
             let _ = std::fs::remove_file(&pending);
             return Ok(false);
         }

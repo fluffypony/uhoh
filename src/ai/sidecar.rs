@@ -330,19 +330,21 @@ fn spawn_backend(
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("");
+                // Longer/more-specific patterns must come first to avoid
+                // "3b" matching "35b" or "32b" filenames.
                 match stem {
                     s if s.contains("0.5b") => {
                         "mlx-community/Qwen3.5-0.5B-Instruct-4bit".to_string()
-                    }
-                    s if s.contains("3b") => "mlx-community/Qwen3.5-3B-Instruct-4bit".to_string(),
-                    s if s.contains("7b") => "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string(),
-                    s if s.contains("9b") || s.contains("8b") => {
-                        "mlx-community/Qwen3.5-8B-Instruct-4bit".to_string()
                     }
                     s if s.contains("35b") || s.contains("a3b") => {
                         "mlx-community/Qwen3.5-35B-A3B-4bit".to_string()
                     }
                     s if s.contains("32b") => "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string(),
+                    s if s.contains("9b") || s.contains("8b") => {
+                        "mlx-community/Qwen3.5-8B-Instruct-4bit".to_string()
+                    }
+                    s if s.contains("7b") => "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string(),
+                    s if s.contains("3b") => "mlx-community/Qwen3.5-3B-Instruct-4bit".to_string(),
                     _ => stem.to_string(),
                 }
             };

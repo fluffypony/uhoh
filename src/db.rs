@@ -209,15 +209,26 @@ impl Database {
     }
 
     fn conn(&self) -> DbConn {
-        loop {
+        const MAX_ATTEMPTS: u32 = 50; // 50 × 100ms = 5 seconds max
+        for attempt in 1..=MAX_ATTEMPTS {
             match self.pool.get() {
                 Ok(conn) => return conn,
                 Err(err) => {
-                    tracing::error!("Database connection pool unavailable (retrying): {}", err);
+                    if attempt == MAX_ATTEMPTS {
+                        panic!(
+                            "Database connection pool unavailable after {} attempts: {}",
+                            MAX_ATTEMPTS, err
+                        );
+                    }
+                    tracing::error!(
+                        "Database connection pool unavailable (attempt {}/{}, retrying): {}",
+                        attempt, MAX_ATTEMPTS, err
+                    );
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
         }
+        unreachable!()
     }
 
     fn migrate(&self) -> Result<()> {

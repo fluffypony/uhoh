@@ -54,6 +54,7 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
     let mut allow_paths = vec![
         "/usr".to_string(),
         "/lib".to_string(),
+        "/lib64".to_string(), // Required for x86_64 Linux dynamic linker
         "/etc".to_string(),
         "/etc/ld.so.cache".to_string(),
         "/tmp".to_string(),
