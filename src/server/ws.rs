@@ -21,13 +21,24 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let mut event_rx = state.event_tx.subscribe();
 
     let send_task = tokio::spawn(async move {
-        while let Ok(event) = event_rx.recv().await {
-            let payload = match serde_json::to_string(&event) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if sender.send(Message::Text(payload.into())).await.is_err() {
-                break;
+        loop {
+            match event_rx.recv().await {
+                Ok(event) => {
+                    let payload = match serde_json::to_string(&event) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if sender.send(Message::Text(payload.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::debug!("WebSocket client lagged, skipped {} events", n);
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    break;
+                }
             }
         }
     });

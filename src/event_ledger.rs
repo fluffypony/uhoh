@@ -3,22 +3,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossbeam::queue::ArrayQueue;
+use tokio::sync::mpsc;
 
 use crate::db::{Database, EventLedgerEntry, EventLedgerTraceResult, NewEventLedgerEntry};
 
 #[derive(Clone)]
 pub struct EventLedger {
     db: Arc<Database>,
-    queue: Arc<ArrayQueue<NewEventLedgerEntry>>,
+    queue_tx: mpsc::UnboundedSender<NewEventLedgerEntry>,
+    queue_rx: Arc<std::sync::Mutex<Option<mpsc::UnboundedReceiver<NewEventLedgerEntry>>>>,
     started: Arc<AtomicBool>,
 }
 
 impl EventLedger {
     pub fn new(db: Arc<Database>) -> Self {
+        let (queue_tx, queue_rx) = mpsc::unbounded_channel();
         Self {
             db,
-            queue: Arc::new(ArrayQueue::new(8192)),
+            queue_tx,
+            queue_rx: Arc::new(std::sync::Mutex::new(Some(queue_rx))),
             started: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -31,12 +34,18 @@ impl EventLedger {
             return;
         }
         let db = self.db.clone();
-        let queue = self.queue.clone();
+        let mut queue = match self.queue_rx.lock() {
+            Ok(mut guard) => match guard.take() {
+                Some(rx) => rx,
+                None => return,
+            },
+            Err(_) => return,
+        };
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 let mut batch = Vec::new();
-                while let Some(event) = queue.pop() {
+                while let Ok(event) = queue.try_recv() {
                     batch.push(event);
                     if batch.len() >= 256 {
                         break;
@@ -53,22 +62,21 @@ impl EventLedger {
     }
 
     pub fn append(&self, event: NewEventLedgerEntry) -> Result<i64> {
-        if !self.started.load(Ordering::SeqCst) {
-            return self.db.insert_event_ledger(&event);
-        }
-        if self.queue.push(event.clone()).is_err() {
-            self.db.insert_event_ledger(&event)
-        } else {
-            Ok(0)
-        }
+        // Always insert directly to return a valid event ID.
+        // The flusher handles async batching of events that don't need IDs.
+        self.db.insert_event_ledger(&event)
     }
 
     pub fn flush(&self) -> Result<usize> {
         let mut batch = Vec::new();
-        while let Some(event) = self.queue.pop() {
-            batch.push(event);
-            if batch.len() >= 1024 {
-                break;
+        if let Ok(mut guard) = self.queue_rx.lock() {
+            if let Some(queue) = guard.as_mut() {
+                while let Ok(event) = queue.try_recv() {
+                    batch.push(event);
+                    if batch.len() >= 1024 {
+                        break;
+                    }
+                }
             }
         }
         self.db.insert_event_ledger_batch(&batch)

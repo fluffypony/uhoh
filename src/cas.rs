@@ -131,8 +131,8 @@ pub fn store_symlink_target(blob_root: &Path, abs_path: &Path) -> Result<(String
     Ok((hash, size, bytes_written))
 }
 
-/// Store a blob from a file path using streaming BLAKE3 and a tiered strategy.
-/// Returns (hash, size, storage_method).
+/// Store a blob from a file path using single-pass streaming hash+write.
+/// Returns (hash, size, storage_method, bytes_on_disk).
 pub fn store_blob_from_file(
     blob_root: &Path,
     file_path: &Path,
@@ -189,36 +189,7 @@ pub fn store_blob_from_file(
     #[cfg(not(feature = "compression"))]
     let do_compress = false;
 
-    // Finish reading the file to complete the hash (first_n may not cover entire file)
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    let hash = hasher.finalize().to_hex().to_string();
-
-    // Reopen the file for the copy/compress pass
-    let file2 = std::fs::File::open(file_path)
-        .with_context(|| format!("Cannot reopen: {}", file_path.display()))?;
-    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file2);
-    let dir = blob_root.join(&hash[..hash.len().min(2)]);
-    std::fs::create_dir_all(&dir)?;
-    let blob_path = dir.join(&hash);
-
-    if blob_path.exists() {
-        return Ok((hash, file_size, StorageMethod::Copy, 0));
-    }
-
-    if !do_compress {
-        if reflink_copy::reflink(file_path, &blob_path).is_ok() {
-            set_blob_readonly(&blob_path);
-            fsync_parent_dir(&blob_path);
-            return Ok((hash, file_size, StorageMethod::Reflink, 0));
-        }
-    }
-
+    // Single-pass: hash and write to temp file simultaneously to avoid TOCTOU race
     let tmp_dir = blob_root.join("tmp");
     std::fs::create_dir_all(&tmp_dir)?;
     let tmp_path = tmp_dir.join(format!(
@@ -230,6 +201,45 @@ pub fn store_blob_from_file(
             .as_nanos()
     ));
 
+    // Write what we already read (first_n bytes) plus the rest, hashing as we go
+    let mut tmp_file = create_restricted_file(&tmp_path)?;
+    if first_n > 0 {
+        tmp_file.write_all(&buf[..first_n])?;
+    }
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        tmp_file.write_all(&buf[..n])?;
+    }
+    tmp_file.sync_all()?;
+    drop(tmp_file);
+
+    let actual_size = std::fs::metadata(&tmp_path)?.len();
+    let hash = hasher.finalize().to_hex().to_string();
+
+    let dir = blob_root.join(&hash[..hash.len().min(2)]);
+    std::fs::create_dir_all(&dir)?;
+    let blob_path = dir.join(&hash);
+
+    if blob_path.exists() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Ok((hash, actual_size, StorageMethod::Copy, 0));
+    }
+
+    // For non-compressed case, reflink from original is safe to try
+    // (it's an optimization; the temp file is our fallback)
+    if !do_compress {
+        if reflink_copy::reflink(file_path, &blob_path).is_ok() {
+            let _ = std::fs::remove_file(&tmp_path);
+            set_blob_readonly(&blob_path);
+            fsync_parent_dir(&blob_path);
+            return Ok((hash, actual_size, StorageMethod::Reflink, 0));
+        }
+    }
+
     let bytes_on_disk: u64 = if do_compress {
         #[cfg(feature = "compression")]
         {
@@ -238,13 +248,25 @@ pub fn store_blob_from_file(
             } else {
                 3
             };
-            let tmp_file = create_restricted_file(&tmp_path)?;
-            let mut tmp_writer = std::io::BufWriter::new(tmp_file);
-            tmp_writer.write_all(COMPRESSION_MAGIC)?;
-            let mut encoder = zstd::stream::write::Encoder::new(tmp_writer, level)?;
+            // Read from temp file (already consistent) and compress
+            let src_file = std::fs::File::open(&tmp_path)?;
+            let mut src_reader = std::io::BufReader::with_capacity(64 * 1024, src_file);
+
+            let compressed_tmp = tmp_dir.join(format!(
+                ".cblob.{}.{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            let cfile = create_restricted_file(&compressed_tmp)?;
+            let mut cwriter = std::io::BufWriter::new(cfile);
+            cwriter.write_all(COMPRESSION_MAGIC)?;
+            let mut encoder = zstd::stream::write::Encoder::new(cwriter, level)?;
 
             loop {
-                let n = reader.read(&mut buf)?;
+                let n = src_reader.read(&mut buf)?;
                 if n == 0 {
                     break;
                 }
@@ -253,58 +275,54 @@ pub fn store_blob_from_file(
 
             let mut writer = encoder.finish()?;
             writer.flush()?;
-            let file = writer
+            let file_handle = writer
                 .into_inner()
                 .map_err(|e| anyhow::anyhow!("Failed to get temp file handle: {e}"))?;
-            file.sync_all()?;
-            let mut compressed_size = file.metadata()?.len();
+            file_handle.sync_all()?;
+            let compressed_size = file_handle.metadata()?.len();
 
-            if compressed_size >= file_size + COMPRESSION_MAGIC.len() as u64 {
-                drop(file);
+            if compressed_size < actual_size + COMPRESSION_MAGIC.len() as u64 {
+                // Compressed is smaller: use it
                 let _ = std::fs::remove_file(&tmp_path);
-
-                let mut src =
-                    std::io::BufReader::with_capacity(64 * 1024, std::fs::File::open(file_path)?);
-                let mut dst = create_restricted_file(&tmp_path)?;
-                loop {
-                    let n = src.read(&mut buf)?;
-                    if n == 0 {
-                        break;
+                match std::fs::rename(&compressed_tmp, &blob_path) {
+                    Ok(()) => {
+                        set_blob_readonly(&blob_path);
+                        fsync_parent_dir(&blob_path);
+                        return Ok((hash, actual_size, StorageMethod::Copy, compressed_size));
                     }
-                    dst.write_all(&buf[..n])?;
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&compressed_tmp);
+                        if blob_path.exists() {
+                            return Ok((hash, actual_size, StorageMethod::Copy, 0));
+                        }
+                        return Err(e).context("Failed to rename compressed blob");
+                    }
                 }
-                dst.sync_all()?;
-                compressed_size = file_size;
+            } else {
+                // Uncompressed is smaller or equal
+                let _ = std::fs::remove_file(&compressed_tmp);
+                actual_size
             }
-            compressed_size
         }
         #[cfg(not(feature = "compression"))]
         {
-            0
+            actual_size
         }
     } else {
-        let mut tmp_file = create_restricted_file(&tmp_path)?;
-        loop {
-            let n = reader.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            tmp_file.write_all(&buf[..n])?;
-        }
-        tmp_file.sync_all()?;
-        file_size
+        actual_size
     };
 
+    // Rename uncompressed temp file to final location
     match std::fs::rename(&tmp_path, &blob_path) {
         Ok(()) => {
             set_blob_readonly(&blob_path);
             fsync_parent_dir(&blob_path);
-            Ok((hash, file_size, StorageMethod::Copy, bytes_on_disk))
+            Ok((hash, actual_size, StorageMethod::Copy, bytes_on_disk))
         }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp_path);
             if blob_path.exists() {
-                Ok((hash, file_size, StorageMethod::Copy, 0))
+                Ok((hash, actual_size, StorageMethod::Copy, 0))
             } else {
                 Err(e).with_context(|| {
                     format!(
@@ -435,7 +453,7 @@ pub fn base58_to_id(s: &str) -> Option<u64> {
     if s.is_empty() {
         return None;
     }
-    if s.len() > 22 {
+    if s.len() > 11 {
         return None;
     }
     let bytes = bs58::decode(s)

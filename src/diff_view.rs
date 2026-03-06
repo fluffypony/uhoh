@@ -54,8 +54,8 @@ pub fn compute_structured_diff(
     file_path: &str,
     with_highlighting: bool,
 ) -> FileDiff {
-    let is_binary = old_content.iter().take(8192).any(|&b| b == 0)
-        || new_content.iter().take(8192).any(|&b| b == 0);
+    let is_binary = content_inspector::inspect(&old_content[..old_content.len().min(8192)]).is_binary()
+        || content_inspector::inspect(&new_content[..new_content.len().min(8192)]).is_binary();
     if is_binary {
         return FileDiff {
             path: file_path.to_string(),
@@ -217,6 +217,10 @@ pub fn cmd_diff(
         _ => anyhow::bail!("Invalid diff arguments"),
     };
 
+    // Track whether files2 represents current working tree (not stored in CAS)
+    let is_current_tree = label2 == "current";
+    let project_path = Path::new(&project.current_path);
+
     let map1: std::collections::HashMap<&str, &str> = files1
         .iter()
         .map(|f| (f.path.as_str(), f.hash.as_str()))
@@ -246,10 +250,16 @@ pub fn cmd_diff(
             .and_then(|h| cas::read_blob(&blob_root, h).ok().flatten())
             .and_then(|b| String::from_utf8(b).ok())
             .unwrap_or_default();
-        let new_content = new_hash
-            .and_then(|h| cas::read_blob(&blob_root, h).ok().flatten())
-            .and_then(|b| String::from_utf8(b).ok())
-            .unwrap_or_default();
+        let new_content = if is_current_tree {
+            // Read directly from filesystem for working tree comparison
+            let file_on_disk = project_path.join(cas::decode_relpath_to_os(path));
+            std::fs::read_to_string(&file_on_disk).unwrap_or_default()
+        } else {
+            new_hash
+                .and_then(|h| cas::read_blob(&blob_root, h).ok().flatten())
+                .and_then(|b| String::from_utf8(b).ok())
+                .unwrap_or_default()
+        };
 
         if old_content.len() > MAX_DIFF_BYTES || new_content.len() > MAX_DIFF_BYTES {
             writeln!(stdout, "\n--- {label1}/{path}")?;
