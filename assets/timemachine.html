@@ -560,6 +560,10 @@
       pendingRestore: null,
     };
 
+    const TOKEN_HELP_TEXT = navigator.userAgent.includes('Windows')
+      ? 'Enter bearer token from your uhoh data directory server.token file'
+      : 'Enter bearer token from ~/.uhoh/server.token';
+
     const statusEl = document.getElementById('status');
 
     function setStatus(text, cls = 'muted') {
@@ -611,13 +615,19 @@
       if (contentType.includes('application/json')) {
         return res.json();
       }
+      if (contentType.includes('application/octet-stream')) {
+        const err = new Error('Binary file — cannot display');
+        err.status = 415;
+        err.isBinary = true;
+        throw err;
+      }
       return res.text();
     }
 
     function withAuth(fn) {
       return fn().catch(async (error) => {
         if (error.status !== 401) throw error;
-        const token = prompt('Enter bearer token from ~/.uhoh/server.token:');
+        const token = prompt(TOKEN_HELP_TEXT + ':');
         if (!token) throw error;
         window.localStorage.setItem('uhoh_token', token.trim());
         return fn();
@@ -639,7 +649,7 @@
         await loadProjects();
       } catch(e) {
         if (e.status === 401) {
-          const token = prompt('Enter bearer token from ~/.uhoh/server.token:');
+          const token = prompt(TOKEN_HELP_TEXT + ':');
           if (token) {
             window.localStorage.setItem('uhoh_token', token.trim());
             await loadProjects();
@@ -711,11 +721,21 @@
       if (!state.project) {
         return;
       }
+      const selectedId = state.snapshot ? state.snapshot.id : null;
       setStatus('Loading snapshots');
       const data = await withAuth(() => api(`${API}/projects/${state.project.project_hash}/snapshots?limit=200`));
       state.snapshots = data.snapshots || [];
-      state.snapshot = state.snapshots[0] || null;
-      state.previous = state.snapshots[1] || null;
+      if (selectedId) {
+        state.snapshot = state.snapshots.find((s) => s.id === selectedId) || state.snapshots[0] || null;
+      } else {
+        state.snapshot = state.snapshots[0] || null;
+      }
+      if (state.snapshot) {
+        const idx = state.snapshots.findIndex((s) => s.id === state.snapshot.id);
+        state.previous = idx >= 0 ? (state.snapshots[idx + 1] || null) : null;
+      } else {
+        state.previous = null;
+      }
       renderTimeline();
       if (!state.snapshot) {
         state.selectedPath = null;
@@ -834,9 +854,11 @@
           const renderEntry = (s, label) => {
             const time = new Date(s.timestamp).toLocaleString();
             const msg = s.message || label || 'Snapshot';
+            const pin = s.pinned ? ' 📌' : '';
+            const ai = s.ai_summary ? `<div style="margin-left:80px;color:var(--accent-blue);opacity:0.85;">${escapeHtml(s.ai_summary)}</div>` : '';
             return `<div class="code-line" style="cursor:pointer;padding:4px 0;" data-id="${escapeHtml(s.id)}">` +
               `<span class="line-num" style="width:80px;color:var(--accent-purple)">${escapeHtml(s.id)}</span>` +
-              `<span class="line-code"><span style="color:var(--text-muted)">${escapeHtml(label)}</span> ${escapeHtml(msg)} <span style="color:var(--text-muted)">— ${time}</span></span></div>`;
+              `<span class="line-code"><span style="color:var(--text-muted)">${escapeHtml(label)}</span> ${escapeHtml(msg + pin)} <span style="color:var(--text-muted)">— ${time}</span></span></div>${ai}`;
           };
 
           let out = '<div style="padding: 8px;">';
@@ -957,10 +979,35 @@
 
         const label = document.createElement('div');
         label.className = 'event-label';
-        label.textContent = `${snapshot.trigger} · ${time}`;
+        const pin = snapshot.pinned ? ' 📌' : '';
+        const summary = snapshot.ai_summary ? ` · ${snapshot.ai_summary.slice(0, 60)}` : '';
+        label.textContent = `${snapshot.trigger}${pin} · ${time}${summary}`;
+
+        const pinBtn = document.createElement('button');
+        pinBtn.className = 'btn';
+        pinBtn.style.padding = '2px 8px';
+        pinBtn.style.fontSize = '9px';
+        pinBtn.textContent = snapshot.pinned ? 'Unpin' : 'Pin';
+        pinBtn.onclick = async (e) => {
+          e.stopPropagation();
+          if (!state.project) return;
+          try {
+            await withAuth(() => api(`${API}/projects/${state.project.project_hash}/snapshots/${snapshot.id}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ pinned: !snapshot.pinned }),
+            }));
+            await loadSnapshots();
+            await switchTab(activeTabView());
+            setStatus(snapshot.pinned ? 'Snapshot unpinned' : 'Snapshot pinned', 'ok');
+          } catch (err) {
+            setStatus('Pin update failed: ' + err.message, 'danger');
+          }
+        };
 
         row.appendChild(node);
         row.appendChild(label);
+        row.appendChild(pinBtn);
         root.appendChild(row);
       });
     }
@@ -1076,7 +1123,11 @@
     let wsRetryDelay = 1000;
     function connectWs() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${proto}//${location.host}/ws`);
+      const token = window.localStorage.getItem('uhoh_token') || '';
+      const wsUrl = token
+        ? `${proto}//${location.host}/ws?token=${encodeURIComponent(token)}`
+        : `${proto}//${location.host}/ws`;
+      const ws = new WebSocket(wsUrl);
       ws.onopen = () => { wsRetryDelay = 1000; };
       ws.onmessage = async (event) => {
         let data;
@@ -1090,18 +1141,7 @@
           case 'snapshot_created':
             if (isCurrentProject) {
               setStatus('New snapshot created', 'ok');
-              // Preserve current selection across autosave refreshes
-              const currentId = state.snapshot ? state.snapshot.id : null;
               await loadSnapshots();
-              if (currentId) {
-                const found = state.snapshots.find(s => s.id === currentId);
-                if (found) {
-                  state.snapshot = found;
-                  const idx = state.snapshots.findIndex(s => s.id === found.id);
-                  state.previous = idx >= 0 ? (state.snapshots[idx + 1] || null) : null;
-                  renderTimeline();
-                }
-              }
             }
             break;
           case 'snapshot_restored':

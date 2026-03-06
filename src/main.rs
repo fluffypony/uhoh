@@ -861,13 +861,7 @@ fn handle_db_commands(
                 database.event_ledger_recent(Some("db_guard"), name.as_deref(), None, None, 100)?;
             for e in events {
                 if let Some(t) = table {
-                    // Table info is stored in the detail JSON, not in e.path
-                    let matches = e
-                        .detail
-                        .as_deref()
-                        .map(|d| d.contains(t.as_str()))
-                        .unwrap_or(false);
-                    if !matches {
+                    if !event_matches_table_filter(&e, t) {
                         continue;
                     }
                 }
@@ -1115,22 +1109,65 @@ fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Resul
         });
 
         let tables = parse_watched_tables(tables_csv);
-        for table in tables {
-            let trigger_ident = quote_pg_ident(&format!(
-                "uhoh_delete_counter_{}",
-                blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
-            ))?;
-            let fn_ident = quote_pg_ident(&format!(
-                "_uhoh_count_deletes_{}",
-                blake3::hash(table.as_bytes()).to_hex()
-            ))?;
-            let table_quoted = quote_pg_ident(&table)?;
-            let sql = format!(
-                "DROP TRIGGER IF EXISTS {trigger_ident} ON {table_quoted}; DROP FUNCTION IF EXISTS {fn_ident}();"
-            );
-            client.batch_execute(&sql).await.map_err(|e| {
-                anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string()))
-            })?;
+        if tables.is_empty() {
+            // Wildcard mode (`*`): remove all uhoh-installed table triggers/functions.
+            client
+                .batch_execute(
+                    r#"
+                    DO $$
+                    DECLARE rec RECORD;
+                    BEGIN
+                        FOR rec IN
+                            SELECT n.nspname AS schema_name, c.relname AS table_name, t.tgname AS trigger_name
+                            FROM pg_trigger t
+                            JOIN pg_class c ON c.oid = t.tgrelid
+                            JOIN pg_namespace n ON n.oid = c.relnamespace
+                            WHERE NOT t.tgisinternal
+                              AND t.tgname LIKE 'uhoh_delete_counter_%'
+                        LOOP
+                            EXECUTE format(
+                                'DROP TRIGGER IF EXISTS %I ON %I.%I',
+                                rec.trigger_name,
+                                rec.schema_name,
+                                rec.table_name
+                            );
+                        END LOOP;
+
+                        FOR rec IN
+                            SELECT n.nspname AS schema_name, p.proname AS fn_name
+                            FROM pg_proc p
+                            JOIN pg_namespace n ON n.oid = p.pronamespace
+                            WHERE p.proname LIKE '_uhoh_count_deletes_%'
+                        LOOP
+                            EXECUTE format(
+                                'DROP FUNCTION IF EXISTS %I.%I()',
+                                rec.schema_name,
+                                rec.fn_name
+                            );
+                        END LOOP;
+                    END $$;
+                    "#,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
+        } else {
+            for table in tables {
+                let trigger_ident = quote_pg_ident(&format!(
+                    "uhoh_delete_counter_{}",
+                    blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
+                ))?;
+                let fn_ident = quote_pg_ident(&format!(
+                    "_uhoh_count_deletes_{}",
+                    blake3::hash(table.as_bytes()).to_hex()
+                ))?;
+                let table_quoted = quote_pg_ident(&table)?;
+                let sql = format!(
+                    "DROP TRIGGER IF EXISTS {trigger_ident} ON {table_quoted}; DROP FUNCTION IF EXISTS {fn_ident}();"
+                );
+                client.batch_execute(&sql).await.map_err(|e| {
+                    anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string()))
+                })?;
+            }
         }
 
         client
@@ -1788,6 +1825,74 @@ fn extract_session_id(detail: &str) -> Option<String> {
     json.get("session_id")
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+fn event_matches_table_filter(entry: &db::EventLedgerEntry, table_filter: &str) -> bool {
+    let table = table_filter.trim();
+    if table.is_empty() {
+        return true;
+    }
+
+    if let Some(path) = entry.path.as_deref() {
+        if table_name_matches(path, table) {
+            return true;
+        }
+    }
+
+    let Some(detail) = entry.detail.as_deref() else {
+        return false;
+    };
+
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(detail) {
+        return json_contains_table_name(&json, table);
+    }
+
+    table_name_matches(detail, table)
+}
+
+fn json_contains_table_name(value: &serde_json::Value, table: &str) -> bool {
+    match value {
+        serde_json::Value::String(s) => table_name_matches(s, table),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|item| json_contains_table_name(item, table)),
+        serde_json::Value::Object(map) => {
+            let key_hits = ["table", "table_name", "tableName", "relation", "relname"];
+            for key in key_hits {
+                if let Some(v) = map.get(key) {
+                    if json_contains_table_name(v, table) {
+                        return true;
+                    }
+                }
+            }
+            map.values().any(|v| {
+                matches!(
+                    v,
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_)
+                ) && json_contains_table_name(v, table)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn table_name_matches(candidate: &str, table: &str) -> bool {
+    let normalized = candidate
+        .trim()
+        .trim_matches('"')
+        .trim_matches('`')
+        .to_ascii_lowercase();
+    let table_l = table.trim().to_ascii_lowercase();
+
+    if normalized == table_l {
+        return true;
+    }
+
+    if let Some((_, tail)) = normalized.rsplit_once('.') {
+        return tail == table_l;
+    }
+
+    false
 }
 
 fn extract_detail_field(detail: &str, key: &str) -> Option<String> {

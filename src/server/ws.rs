@@ -1,34 +1,101 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
+        Query, State, WebSocketUpgrade,
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
+use subtle::ConstantTimeEq;
 
 use super::AppState;
 
+#[derive(serde::Deserialize)]
+pub struct WsAuthQuery {
+    token: Option<String>,
+}
+
 pub async fn websocket_handler(
     headers: HeaderMap,
+    Query(query): Query<WsAuthQuery>,
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Validate Origin header to prevent cross-site WebSocket hijacking
     if let Some(origin) = headers.get("origin") {
         if let Ok(origin_str) = origin.to_str() {
-            let allowed = origin_str.starts_with("http://127.0.0.1")
-                || origin_str.starts_with("http://localhost")
-                || origin_str.starts_with("https://127.0.0.1")
-                || origin_str.starts_with("https://localhost");
+            let allowed = url::Url::parse(origin_str)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .map(|host| {
+                    host.eq_ignore_ascii_case("127.0.0.1")
+                        || host.eq_ignore_ascii_case("localhost")
+                        || host == "::1"
+                })
+                .unwrap_or(false);
             if !allowed {
                 return Err(StatusCode::FORBIDDEN);
             }
         }
     }
 
+    // If HTTP auth is enabled, require the same bearer token for /ws via
+    // Authorization or Sec-WebSocket-Protocol, since /ws is auth-middleware exempt.
+    if state.config.server.require_auth {
+        if !websocket_auth_ok(&headers, query.token.as_deref(), &state.uhoh_dir) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+
     Ok(ws.on_upgrade(move |socket| handle_socket(socket, state)))
+}
+
+fn websocket_auth_ok(
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    uhoh_dir: &std::path::Path,
+) -> bool {
+    let expected = match std::fs::read_to_string(uhoh_dir.join("server.token")) {
+        Ok(token) => token.trim().to_string(),
+        Err(_) => return false,
+    };
+    if expected.is_empty() {
+        return false;
+    }
+
+    if let Some(auth_header) = headers.get("authorization") {
+        if let Ok(auth) = auth_header.to_str() {
+            if let Some(provided) = auth.strip_prefix("Bearer ") {
+                if provided.as_bytes().ct_eq(expected.as_bytes()).into() {
+                    return true;
+                }
+            }
+        }
+    }
+
+    if let Some(token) = query_token {
+        if token.as_bytes().ct_eq(expected.as_bytes()).into() {
+            return true;
+        }
+    }
+
+    if let Some(protocol_header) = headers.get("sec-websocket-protocol") {
+        if let Ok(protocols) = protocol_header.to_str() {
+            // Accept token transport via protocol list, e.g.:
+            // Sec-WebSocket-Protocol: bearer,<token>
+            let mut iter = protocols.split(',').map(|s| s.trim());
+            while let Some(name) = iter.next() {
+                if name.eq_ignore_ascii_case("bearer") {
+                    if let Some(token) = iter.next() {
+                        return token.as_bytes().ct_eq(expected.as_bytes()).into();
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
