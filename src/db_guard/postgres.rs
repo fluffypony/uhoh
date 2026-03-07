@@ -313,21 +313,10 @@ fn poll_delete_count(connection_ref: &str, window_seconds: i64) -> Result<i64> {
     run_postgres_task(async move {
         let client = pg_connect_spawn(connection_ref).await?;
         // Keep helper tables bounded to avoid unbounded growth in monitored DBs.
-        // Time-based cleanup plus row-count cap for burst scenarios.
         let _ = client
             .execute(
                 "DELETE FROM _uhoh_delete_counts
                  WHERE ts < now() - interval '24 hours'",
-                &[],
-            )
-            .await;
-        // Cap at 10k rows to limit WAL traffic during delete storms
-        let _ = client
-            .execute(
-                "DELETE FROM _uhoh_delete_counts
-                 WHERE ctid NOT IN (
-                     SELECT ctid FROM _uhoh_delete_counts ORDER BY ts DESC LIMIT 10000
-                 )",
                 &[],
             )
             .await;
@@ -396,16 +385,6 @@ fn poll_ddl_events(connection_ref: &str, max_rows: i64) -> Result<Vec<String>> {
                 &[],
             )
             .await;
-        let _ = client
-            .execute(
-                "DELETE FROM _uhoh_ddl_events
-                 WHERE ctid NOT IN (
-                     SELECT ctid FROM _uhoh_ddl_events ORDER BY id DESC LIMIT 5000
-                 )",
-                &[],
-            )
-            .await;
-
         let rows = client
             .query(
                 "SELECT id, payload::text

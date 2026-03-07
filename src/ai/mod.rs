@@ -53,9 +53,11 @@ fn on_ac_power() -> bool {
     let mut batteries = match manager.batteries() {
         Ok(b) => b,
         Err(_) => {
-            // API error enumerating batteries — conservative: skip AI
-            tracing::debug!("Battery API error; assuming battery power to be safe");
-            return false;
+            // API error enumerating batteries. On Linux, this can happen on battery-less
+            // desktops/VMs where Manager::new() succeeds but batteries() fails.
+            // Default to AC (true) since Manager creation would have failed on a
+            // truly unsupported platform.
+            return true;
         }
     };
     // If no batteries found at all, this is a desktop/VM — assume AC

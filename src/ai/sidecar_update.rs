@@ -40,8 +40,8 @@ fn detect_platform_asset_substring() -> Result<&'static str> {
                 // Prefer CUDA build; upstream uses "cuda" in asset names
                 Ok("linux-cuda")
             } else {
-                // CPU-only; upstream uses "linux-x64" (was "ubuntu-x64" in older releases)
-                Ok("linux-x64")
+                // CPU-only; upstream uses "ubuntu-x64" for Linux CPU builds
+                Ok("ubuntu-x64")
             }
         }
         ("linux", "aarch64") => Ok("linux-arm64"),
@@ -49,7 +49,7 @@ fn detect_platform_asset_substring() -> Result<&'static str> {
             if has_nvidia_gpu() {
                 Ok("win-cuda")
             } else {
-                Ok("win-x64")
+                Ok("win-cpu-x64")
             }
         }
         ("windows", "aarch64") => Ok("win-arm64"),
