@@ -7,6 +7,7 @@ pub struct LedgerRecentFilters<'a> {
     pub guard_name: Option<&'a str>,
     pub agent_name: Option<&'a str>,
     pub session: Option<&'a str>,
+    pub since: Option<&'a str>,
 }
 
 pub fn build_recent_query(filters: LedgerRecentFilters<'_>, limit: i64) -> (String, Vec<Value>) {
@@ -28,6 +29,10 @@ pub fn build_recent_query(filters: LedgerRecentFilters<'_>, limit: i64) -> (Stri
     if let Some(session) = filters.session {
         where_clauses.push("session_id = ?");
         params.push(Value::from(session.to_string()));
+    }
+    if let Some(since) = filters.since {
+        where_clauses.push("ts >= ?");
+        params.push(Value::from(since.to_string()));
     }
 
     let mut sql = String::from(

@@ -2119,12 +2119,19 @@ fn parse_emergency_message(msg: &str) -> (usize, u64, f64) {
 
 fn parse_emergency_message_opt(msg: &str) -> Option<(usize, u64, f64)> {
     // Format: "Mass delete detected: 15/20 files (75.0%)"
-    let after_colon = msg.strip_prefix("Mass delete detected: ")?;
-    let slash_pos = after_colon.find('/')?;
-    let deleted: usize = after_colon[..slash_pos].parse().ok()?;
-    let rest = &after_colon[slash_pos + 1..];
-    let space_pos = rest.find(' ')?;
-    let baseline: u64 = rest[..space_pos].parse().ok()?;
+    // Tolerant parsing: find the first N/M pattern anywhere in the message
+    let after = msg.find("delete")
+        .and_then(|i| msg[i..].find(|c: char| c.is_ascii_digit()).map(|j| i + j))
+        .unwrap_or_else(|| {
+            msg.find(|c: char| c.is_ascii_digit()).unwrap_or(msg.len())
+        });
+    let rest = &msg[after..];
+    let slash_pos = rest.find('/')?;
+    let deleted: usize = rest[..slash_pos].trim().parse().ok()?;
+    let after_slash = &rest[slash_pos + 1..];
+    // Take digits until non-digit
+    let end = after_slash.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_slash.len());
+    let baseline: u64 = after_slash[..end].trim().parse().ok()?;
     let ratio = if baseline > 0 {
         deleted as f64 / baseline as f64
     } else {

@@ -588,21 +588,20 @@ async fn main() -> Result<()> {
                 .map(normalize_timeline_source)
                 .transpose()?;
             let since_cutoff = since.as_deref().map(parse_since_cutoff).transpose()?;
+            let since_rfc3339 = since_cutoff.map(|c| c.to_rfc3339());
 
-            let events = database.event_ledger_recent(None, None, None, None, 1000)?;
+            let events = database.event_ledger_recent_since(
+                None,
+                None,
+                None,
+                None,
+                since_rfc3339.as_deref(),
+                1000,
+            )?;
             let mut filtered = Vec::new();
             for entry in events {
                 if let Some(ref src) = normalized_source {
                     if !source_matches(src, &entry.source) {
-                        continue;
-                    }
-                }
-
-                if let Some(cutoff) = since_cutoff {
-                    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&entry.ts) else {
-                        continue;
-                    };
-                    if ts.with_timezone(&chrono::Utc) < cutoff {
                         continue;
                     }
                 }

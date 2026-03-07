@@ -453,7 +453,7 @@ impl Database {
                     s.file_count
              FROM snapshots s
              WHERE s.project_hash = ?1
-             ORDER BY s.timestamp DESC
+             ORDER BY s.timestamp DESC, s.snapshot_id DESC
              LIMIT ?2 OFFSET ?3",
         )?;
         let rows = stmt.query_map(params![project_hash, limit as i64, offset as i64], |row| {
@@ -489,7 +489,7 @@ impl Database {
                             s.file_count
                      FROM snapshots s
                      WHERE s.project_hash = ?1
-                     ORDER BY s.timestamp DESC",
+                     ORDER BY s.timestamp DESC, s.snapshot_id DESC",
                 )?;
                 let rows = stmt.query_map(params![project_hash], |row| {
                     Ok(SnapshotSummary {
@@ -511,7 +511,7 @@ impl Database {
                             s.file_count
                      FROM snapshots s
                      WHERE s.project_hash = ?1 AND s.timestamp >= ?2
-                     ORDER BY s.timestamp DESC",
+                     ORDER BY s.timestamp DESC, s.snapshot_id DESC",
                 )?;
                 let rows = stmt.query_map(params![project_hash, from], |row| {
                     Ok(SnapshotSummary {
@@ -533,7 +533,7 @@ impl Database {
                             s.file_count
                      FROM snapshots s
                      WHERE s.project_hash = ?1 AND s.timestamp <= ?2
-                     ORDER BY s.timestamp DESC",
+                     ORDER BY s.timestamp DESC, s.snapshot_id DESC",
                 )?;
                 let rows = stmt.query_map(params![project_hash, to], |row| {
                     Ok(SnapshotSummary {
@@ -555,7 +555,7 @@ impl Database {
                             s.file_count
                      FROM snapshots s
                      WHERE s.project_hash = ?1 AND s.timestamp >= ?2 AND s.timestamp <= ?3
-                     ORDER BY s.timestamp DESC",
+                     ORDER BY s.timestamp DESC, s.snapshot_id DESC",
                 )?;
                 let rows = stmt.query_map(params![project_hash, from, to], |row| {
                     Ok(SnapshotSummary {
@@ -1400,6 +1400,18 @@ impl Database {
         session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<EventLedgerEntry>> {
+        self.event_ledger_recent_since(source, guard_name, agent_name, session, None, limit)
+    }
+
+    pub fn event_ledger_recent_since(
+        &self,
+        source: Option<&str>,
+        guard_name: Option<&str>,
+        agent_name: Option<&str>,
+        session: Option<&str>,
+        since: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<EventLedgerEntry>> {
         let conn = self.conn()?;
         let (sql, param_values) = ledger::build_recent_query(
             ledger::LedgerRecentFilters {
@@ -1407,6 +1419,7 @@ impl Database {
                 guard_name,
                 agent_name,
                 session,
+                since,
             },
             limit as i64,
         );

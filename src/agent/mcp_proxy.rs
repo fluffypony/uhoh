@@ -644,26 +644,54 @@ pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
     std::fs::create_dir_all(uhoh_dir)
         .with_context(|| format!("Failed to create uhoh dir: {}", uhoh_dir.display()))?;
     let token_path = uhoh_dir.join(PROXY_TOKEN_FILE);
-    if token_path.exists() {
-        let token = std::fs::read_to_string(&token_path)
-            .with_context(|| format!("Failed reading {}", token_path.display()))?;
+
+    // Try to read existing token first
+    if let Ok(token) = std::fs::read_to_string(&token_path) {
         let token = token.trim().to_string();
-        if token.is_empty() {
-            anyhow::bail!("Agent proxy token file is empty: {}", token_path.display());
+        if !token.is_empty() {
+            return Ok(token);
         }
-        return Ok(token);
     }
 
+    // Atomic creation: create_new(true) fails if the file already exists,
+    // preventing race conditions where two callers generate different tokens.
     let token = random_hex(32);
-    std::fs::write(&token_path, format!("{token}\n"))
-        .with_context(|| format!("Failed writing {}", token_path.display()))?;
-    #[cfg(unix)]
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&token_path)
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("Failed to set permissions on {}", token_path.display()))?;
+        Ok(mut f) => {
+            use std::io::Write;
+            f.write_all(format!("{token}\n").as_bytes())
+                .with_context(|| format!("Failed writing {}", token_path.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    &token_path,
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .with_context(|| {
+                    format!("Failed to set permissions on {}", token_path.display())
+                })?;
+            }
+            Ok(token)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another caller created it first — read their token
+            let token = std::fs::read_to_string(&token_path)
+                .with_context(|| format!("Failed reading {}", token_path.display()))?;
+            let token = token.trim().to_string();
+            if token.is_empty() {
+                anyhow::bail!("Agent proxy token file is empty: {}", token_path.display());
+            }
+            Ok(token)
+        }
+        Err(e) => {
+            Err(e).with_context(|| format!("Failed creating {}", token_path.display()))
+        }
     }
-    Ok(token)
 }
 
 #[cfg(test)]

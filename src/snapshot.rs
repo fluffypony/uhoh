@@ -85,25 +85,50 @@ pub fn create_snapshot(
             );
         }
 
-        // Build set of non-ignored file paths via walker for filtering changed_paths
-        // This ensures incremental snapshots respect .gitignore rules
-        let walked_set: HashSet<PathBuf> = crate::ignore_rules::build_walker(project_path)
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_type()
-                    .is_some_and(|ft| ft.is_file() || ft.is_symlink())
+        // Build a gitignore matcher for filtering changed_paths without a full tree walk.
+        // This is O(changed_paths) instead of O(total_project_files).
+        let gitignore = {
+            let mut builder = ignore::gitignore::GitignoreBuilder::new(project_path);
+            // Add .gitignore if it exists
+            let gitignore_path = project_path.join(".gitignore");
+            if gitignore_path.exists() {
+                builder.add(&gitignore_path);
+            }
+            // Add .uhohignore if it exists
+            for name in &[".uhohignore", ".git/.uhohignore"] {
+                let p = project_path.join(name);
+                if p.exists() {
+                    builder.add(&p);
+                }
+            }
+            builder.build().unwrap_or_else(|_| {
+                ignore::gitignore::GitignoreBuilder::new(project_path)
+                    .build()
+                    .unwrap()
             })
-            .map(|e| e.into_path())
-            .collect();
+        };
         let mut rel_changed: HashSet<String> = HashSet::new();
         for p in paths {
             if !p.starts_with(project_path) {
                 continue;
             }
-            // For existing files, check ignore rules via walker output.
+            // Skip .git internals and .uhoh directory
+            if let Ok(rel) = p.strip_prefix(project_path) {
+                let rel_str = rel.to_string_lossy();
+                if rel_str.starts_with(".git/") || rel_str.starts_with(".git\\")
+                    || rel_str == ".git" || rel_str == ".uhoh"
+                {
+                    continue;
+                }
+            }
+            // For existing files, check ignore rules.
             // For deleted files, include them (they need deletion detection).
-            if p.exists() && !walked_set.contains(p) {
-                continue; // Ignored by .gitignore
+            if p.exists() {
+                let is_dir = p.is_dir();
+                let matched = gitignore.matched_path_or_any_parents(p, is_dir);
+                if matched.is_ignore() {
+                    continue;
+                }
             }
             if let Ok(rel) = p.strip_prefix(project_path) {
                 let rel_s = cas::encode_relpath(rel);
