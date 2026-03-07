@@ -720,6 +720,9 @@ impl Config {
             if config.watch.max_debounce_secs < config.watch.debounce_quiet_secs {
                 anyhow::bail!("watch.max_debounce_secs must be >= watch.debounce_quiet_secs");
             }
+            if config.storage.storage_min_bytes == 0 {
+                anyhow::bail!("storage.storage_min_bytes must be > 0");
+            }
             Ok(config)
         } else {
             let config = Config::default();

@@ -55,8 +55,6 @@ pub fn compact_project(
         if snapshot.pinned {
             register_in_buckets(
                 snapshot,
-                &now,
-                config,
                 &mut buckets_5min,
                 &mut buckets_hourly,
                 &mut buckets_daily,
@@ -69,8 +67,6 @@ pub fn compact_project(
         if protected_predecessors.contains(&snapshot.rowid) {
             register_in_buckets(
                 snapshot,
-                &now,
-                config,
                 &mut buckets_5min,
                 &mut buckets_hourly,
                 &mut buckets_daily,
@@ -89,8 +85,6 @@ pub fn compact_project(
             if age < emergency_retention {
                 register_in_buckets(
                     snapshot,
-                    &now,
-                    config,
                     &mut buckets_5min,
                     &mut buckets_hourly,
                     &mut buckets_daily,
@@ -105,8 +99,6 @@ pub fn compact_project(
         if age < Duration::minutes(config.keep_all_minutes as i64) {
             register_in_buckets(
                 snapshot,
-                &now,
-                config,
                 &mut buckets_5min,
                 &mut buckets_hourly,
                 &mut buckets_daily,
@@ -120,8 +112,6 @@ pub fn compact_project(
         if snapshot.trigger == "manual" && !snapshot.message.is_empty() {
             register_in_buckets(
                 snapshot,
-                &now,
-                config,
                 &mut buckets_5min,
                 &mut buckets_hourly,
                 &mut buckets_daily,
@@ -159,8 +149,6 @@ pub fn compact_project(
 }
 fn register_in_buckets(
     snapshot: &SnapshotRow,
-    _now: &DateTime<Utc>,
-    _config: &CompactionConfig,
     b5: &mut std::collections::HashSet<i64>,
     bh: &mut std::collections::HashSet<i64>,
     bd: &mut std::collections::HashSet<i64>,
