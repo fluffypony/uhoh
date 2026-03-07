@@ -328,7 +328,7 @@ Database guard is designed for emergency detection and recovery prep. It is not 
 - `agent.mcp_proxy_port` (default 22823): MCP proxy listen port.
 - `agent.intercept_enabled` (default true): enable session log tailing fallback.
 - `agent.audit_enabled` (default false): enable OS-level audit loop.
-- `agent.audit_scope` (default `project`): audit scope (`project` or `home`).
+- `agent.audit_scope` (default `project`): audit scope. Currently only `project` scope is implemented (monitors active project roots).
 - `agent.audit_max_events_per_second` (default 500): rate limit for fanotify/audit events per second.
 - `agent.sandbox_enabled` (default false): enable sandbox integrations when available.
 - `agent.on_dangerous_change` (default `none`): dangerous-action policy (`none` or `pause`).
@@ -565,7 +565,7 @@ On macOS this creates a launchd agent (`~/Library/LaunchAgents/com.uhoh.daemon.p
 - `uhoh start [--service]` / `uhoh stop` / `uhoh restart`
 - `uhoh service-install` / `uhoh service-remove`
 - `uhoh mcp` — run MCP server over STDIO
-- `uhoh db add <dsn> [--tables ...] [--name ...] [--mode triggers]`
+- `uhoh db add <dsn> [--tables ...] [--name ...] [--mode triggers]` (mode currently accepts `triggers` and `schema_polling` but both paths use trigger-based monitoring for Postgres)
 - `uhoh db remove <name>` / `uhoh db list`
 - `uhoh db events [name] [--table ...]`
 - `uhoh db recover <event-id> [--apply]`
