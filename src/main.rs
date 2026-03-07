@@ -447,7 +447,7 @@ async fn main() -> Result<()> {
             if verify_install {
                 return run_verify_install().await;
             }
-            run_doctor(&uhoh, &database, fix, restore_latest).await?;
+            run_doctor(&uhoh, database.clone_handle(), fix, restore_latest).await?;
         }
 
         Commands::Status => {
@@ -2062,7 +2062,7 @@ async fn run_zero_verb() -> Result<()> {
 
 async fn run_doctor(
     uhoh_dir: &std::path::Path,
-    database: &db::Database,
+    database: db::Database,
     fix: bool,
     restore_latest: bool,
 ) -> Result<()> {
@@ -2081,8 +2081,11 @@ async fn run_doctor(
         }
     }
 
-    if !integrity_ok && restore_latest {
-        // Attempt restore from latest backup after integrity-check connection is dropped
+    // Drop the database pool before restore to release all connections.
+    // This prevents file-locking conflicts (especially on Windows) and
+    // ensures no stale connections reference the old DB/WAL state.
+    let database = if !integrity_ok && restore_latest {
+        drop(database);
         let backups = uhoh_dir.join("backups");
         if backups.exists() {
             let mut files: Vec<_> = std::fs::read_dir(&backups)?.flatten().collect();
@@ -2108,7 +2111,11 @@ async fn run_doctor(
                 eprintln!("No backups found to restore.");
             }
         }
-    }
+        // Re-open pool after restore
+        db::Database::open(uhoh_dir)?
+    } else {
+        database
+    };
 
     // 2) Blob store cross-check
     let blob_root = uhoh_dir.join("blobs");

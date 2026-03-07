@@ -288,7 +288,9 @@ async fn intercept_tool_call(
                             tool, config.agent.pause_timeout_seconds
                         ),
                     ),
-                    ApprovalDecision::Approved => unreachable!(),
+                    ApprovalDecision::Approved => {
+                        anyhow::bail!("unexpected Approved state after deny check")
+                    }
                 };
                 let mut block_event = new_event("agent", event_type, "warn");
                 block_event.path = path.clone();

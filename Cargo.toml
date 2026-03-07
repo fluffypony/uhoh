@@ -152,7 +152,7 @@ landlock = { version = "0.4", optional = true }
 winapi = { version = "0.3", features = ["winnt", "processthreadsapi", "handleapi", "psapi"] }
 
 [features]
-default = []
+default = ["compression", "keyring"]
 compression = ["zstd"]
 keyring = ["dep:keyring"]
 audit-trail = []

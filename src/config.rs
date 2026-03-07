@@ -226,7 +226,7 @@ pub struct ServerConfig {
     pub mcp_enabled: bool,
 
     /// Require bearer auth on MCP HTTP endpoint.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub mcp_require_auth: bool,
 
     /// Require bearer auth on mutating methods.

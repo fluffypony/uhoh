@@ -115,25 +115,27 @@ pub fn compact_project(
             continue;
         }
 
-        // Manual commits with messages get minimum daily retention
-        let is_manual_with_msg = snapshot.trigger == "manual" && !snapshot.message.is_empty();
+        // Manual commits with messages are always retained (like pinned snapshots).
+        // They represent explicit user saves and should never be pruned by bucket dedup.
+        if snapshot.trigger == "manual" && !snapshot.message.is_empty() {
+            register_in_buckets(
+                snapshot,
+                &now,
+                config,
+                &mut buckets_5min,
+                &mut buckets_hourly,
+                &mut buckets_daily,
+                &mut buckets_weekly,
+            );
+            continue;
+        }
 
         let dominated = if age < Duration::days(config.keep_5min_days as i64) {
-            let bucket_secs = if is_manual_with_msg { 86400i64 } else { 300 };
-            let bucket = ts.timestamp().div_euclid(bucket_secs);
-            if is_manual_with_msg {
-                !buckets_daily.insert(bucket)
-            } else {
-                !buckets_5min.insert(bucket)
-            }
+            let bucket = ts.timestamp().div_euclid(300);
+            !buckets_5min.insert(bucket)
         } else if age < Duration::days(config.keep_hourly_days as i64) {
-            let bucket_secs = if is_manual_with_msg { 86400i64 } else { 3600 };
-            let bucket = ts.timestamp().div_euclid(bucket_secs);
-            if is_manual_with_msg {
-                !buckets_daily.insert(bucket)
-            } else {
-                !buckets_hourly.insert(bucket)
-            }
+            let bucket = ts.timestamp().div_euclid(3600);
+            !buckets_hourly.insert(bucket)
         } else if age < Duration::days(config.keep_daily_days as i64) {
             let bucket = ts.timestamp().div_euclid(86400);
             !buckets_daily.insert(bucket)

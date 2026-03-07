@@ -232,7 +232,7 @@ impl Database {
                 }
             }
         }
-        unreachable!()
+        anyhow::bail!("Database connection pool unavailable after {MAX_ATTEMPTS} attempts")
     }
 
     fn migrate(&self) -> Result<()> {

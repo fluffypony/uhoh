@@ -136,26 +136,40 @@ fn safe_remove_dir_tree_within(project_base: &Path, target: &Path) -> Result<()>
         );
     }
 
-    let mut stack = vec![target_canonical.clone()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)? {
+    // Walk the tree manually to handle symlinks safely: remove symlink entries
+    // themselves without following them, and only recurse into real directories.
+    fn remove_tree_safe(dir: &Path, project_root: &Path) -> Result<()> {
+        for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
             let meta = std::fs::symlink_metadata(&path)?;
             if meta.file_type().is_symlink() {
-                anyhow::bail!(
-                    "Refusing to recursively delete directory containing symlink: {}",
-                    path.display()
-                );
-            }
-            if meta.is_dir() {
-                stack.push(path);
+                // Remove the symlink itself, never follow it
+                std::fs::remove_file(&path).with_context(|| {
+                    format!("Failed to remove symlink: {}", path.display())
+                })?;
+            } else if meta.is_dir() {
+                // Verify the real directory is still within project bounds
+                if let Ok(canon) = dunce::canonicalize(&path) {
+                    if !canon.starts_with(project_root) {
+                        tracing::warn!(
+                            "Skipping directory outside project root: {}",
+                            path.display()
+                        );
+                        continue;
+                    }
+                }
+                remove_tree_safe(&path, project_root)?;
+                let _ = std::fs::remove_dir(&path);
+            } else {
+                std::fs::remove_file(&path)?;
             }
         }
+        Ok(())
     }
 
-    std::fs::remove_dir_all(&target_canonical)
-        .with_context(|| format!("Failed removing directory {}", target.display()))?;
+    remove_tree_safe(&target_canonical, &project_canonical)?;
+    let _ = std::fs::remove_dir(&target_canonical);
     Ok(())
 }
 
@@ -506,8 +520,11 @@ pub fn cmd_restore(
             if let Ok(entries) = std::fs::read_dir(root) {
                 for e in entries.flatten() {
                     let p = e.path();
-                    if p.is_dir() {
-                        remove_empty_dirs(&p, base);
+                    // Use symlink_metadata to avoid following symlinks
+                    if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                        if meta.is_dir() && !meta.file_type().is_symlink() {
+                            remove_empty_dirs(&p, base);
+                        }
                     }
                 }
             }

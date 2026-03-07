@@ -388,6 +388,88 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     let config_path = uhoh_dir.join("config.toml");
     let mut config = Config::load(&config_path)?;
 
+    // === Singleton acquisition: must happen BEFORE starting any subsystems ===
+    #[cfg(windows)]
+    let _daemon_mutex = {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        let dir_hash = blake3::hash(uhoh_dir.to_string_lossy().as_bytes())
+            .to_hex()
+            .to_string();
+        let mutex_name = format!("Local\\uhoh-{}\0", &dir_hash[..16]);
+        let name: Vec<u16> = OsStr::new(&mutex_name).encode_wide().collect();
+        unsafe {
+            let handle = winapi::um::synchapi::CreateMutexW(
+                std::ptr::null_mut(),
+                winapi::shared::minwindef::FALSE,
+                name.as_ptr(),
+            );
+            if handle.is_null() {
+                anyhow::bail!("Failed to create daemon mutex");
+            }
+            if winapi::um::errhandlingapi::GetLastError()
+                == winapi::shared::winerror::ERROR_ALREADY_EXISTS
+            {
+                winapi::um::handleapi::CloseHandle(handle);
+                anyhow::bail!("Another uhoh daemon is already running");
+            }
+            handle
+        }
+    };
+
+    // Write PID file with exclusive lock to avoid races.
+    // On Windows, use a separate .lock file so the .pid file remains readable
+    // by CLI commands (Windows file locks are mandatory and block reads).
+    let pid_path = uhoh_dir.join("daemon.pid");
+
+    #[cfg(not(windows))]
+    let _pid_lock_file = {
+        let mut pid_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&pid_path)?;
+        {
+            use fs4::FileExt;
+            pid_file
+                .try_lock_exclusive()
+                .context("Another uhoh daemon is already running (PID file locked)")?;
+        }
+        use std::io::Write as _;
+        let _ = pid_file.set_len(0);
+        let start_ticks =
+            crate::platform::read_process_start_ticks(std::process::id()).unwrap_or(0);
+        let record = format!("{} {}\n", std::process::id(), start_ticks);
+        let f = &mut pid_file;
+        let _ = f.write_all(record.as_bytes());
+        let _ = f.sync_all();
+        pid_file // keep alive to hold the lock
+    };
+
+    #[cfg(windows)]
+    let _pid_lock_file = {
+        // Use a separate .lock file so the .pid remains readable
+        let lock_path = uhoh_dir.join("daemon.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        {
+            use fs4::FileExt;
+            lock_file
+                .try_lock_exclusive()
+                .context("Another uhoh daemon is already running (lock file)")?;
+        }
+        // Write PID to the separate .pid file (not locked, so CLI can read it)
+        use std::io::Write;
+        let start_ticks =
+            crate::platform::read_process_start_ticks(std::process::id()).unwrap_or(0);
+        let record = format!("{} {}\n", std::process::id(), start_ticks);
+        let _ = std::fs::write(&pid_path, record.as_bytes());
+        lock_file // keep alive to hold the lock
+    };
+
     let (server_event_tx, _) = broadcast::channel::<crate::server::events::ServerEvent>(4096);
     let restore_in_progress = Arc::new(AtomicBool::new(false));
 
@@ -429,74 +511,6 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     } else {
         None
     };
-
-    #[cfg(windows)]
-    let _daemon_mutex = {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        let dir_hash = blake3::hash(uhoh_dir.to_string_lossy().as_bytes())
-            .to_hex()
-            .to_string();
-        let mutex_name = format!("Local\\uhoh-{}\0", &dir_hash[..16]);
-        let name: Vec<u16> = OsStr::new(&mutex_name).encode_wide().collect();
-        unsafe {
-            let handle = winapi::um::synchapi::CreateMutexW(
-                std::ptr::null_mut(),
-                winapi::shared::minwindef::FALSE,
-                name.as_ptr(),
-            );
-            if handle.is_null() {
-                anyhow::bail!("Failed to create daemon mutex");
-            }
-            if winapi::um::errhandlingapi::GetLastError()
-                == winapi::shared::winerror::ERROR_ALREADY_EXISTS
-            {
-                winapi::um::handleapi::CloseHandle(handle);
-                anyhow::bail!("Another uhoh daemon is already running");
-            }
-            handle
-        }
-    };
-
-    // Write PID file with exclusive lock to avoid races
-    let pid_path = uhoh_dir.join("daemon.pid");
-    let mut pid_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&pid_path)?;
-    {
-        use fs4::FileExt;
-        // If another daemon holds the lock, this will fail.
-        // fs4 supports file locking on all platforms.
-        pid_file
-            .try_lock_exclusive()
-            .context("Another uhoh daemon is already running (PID file locked)")?;
-    }
-    // Truncate and write PID
-    #[cfg(unix)]
-    {
-        use std::io::Write as _;
-        let _ = pid_file.set_len(0);
-        let start_ticks =
-            crate::platform::read_process_start_ticks(std::process::id()).unwrap_or(0);
-        let record = format!("{} {}\n", std::process::id(), start_ticks);
-        let f = &mut pid_file;
-        let _ = f.write_all(record.as_bytes());
-        let _ = f.sync_all();
-    }
-    #[cfg(not(unix))]
-    {
-        use std::io::{Seek, SeekFrom, Write};
-        let f = &mut pid_file;
-        let _ = f.set_len(0);
-        let _ = f.seek(SeekFrom::Start(0));
-        let start_ticks =
-            crate::platform::read_process_start_ticks(std::process::id()).unwrap_or(0);
-        let record = format!("{} {}\n", std::process::id(), start_ticks);
-        let _ = f.write_all(record.as_bytes());
-        let _ = f.sync_all();
-    }
 
     // Set up logging to file
     let log_path = uhoh_dir.join("daemon.log");
@@ -719,7 +733,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                         }
                     }
                     other => {
-                        handle_watch_event(&mut project_states, &other, &config);
+                        handle_watch_event(&mut project_states, &other, &config, &uhoh_dir);
                     }
                 }
             }
@@ -976,6 +990,7 @@ fn handle_watch_event(
     states: &mut HashMap<String, ProjectDaemonState>,
     event: &WatchEvent,
     _config: &Config,
+    uhoh_dir: &Path,
 ) {
     // Global overflow: mark all projects to rescan
     if let WatchEvent::Overflow = event {
@@ -1004,9 +1019,10 @@ fn handle_watch_event(
 
     let is_delete = matches!(event, WatchEvent::FileDeleted(_));
 
-    // Filter out paths under the uhoh data directory to prevent self-monitoring loops
-    let uhoh_data_dir = crate::uhoh_dir();
-    if path.starts_with(&uhoh_data_dir) {
+    // Filter out paths under the uhoh data directory to prevent self-monitoring loops.
+    // Uses the resolved uhoh_dir passed in, not the global getter, to correctly handle
+    // UHOH_DIR overrides that may point inside a project directory.
+    if path.starts_with(uhoh_dir) {
         return;
     }
 
