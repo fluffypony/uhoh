@@ -1115,7 +1115,6 @@ fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Re
                             payload_json
                         );
 
-                        PERFORM pg_notify('uhoh_events', payload_json);
                     END LOOP;
                 END;
                 $$ LANGUAGE plpgsql;

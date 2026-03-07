@@ -58,6 +58,12 @@ pub(crate) static GLOBAL_SIDECAR: Lazy<Mutex<Option<GlobalSidecar>>> =
 static SIDECAR_IDLE_SECS: AtomicU64 = AtomicU64::new(300);
 static SIDECAR_MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 
+/// Lock the global sidecar state.
+///
+/// Uses `std::sync::Mutex` (not `tokio::sync::Mutex`) because all callers run from
+/// `spawn_blocking` threads — never from async task context. This is safe because
+/// blocking a dedicated threadpool thread doesn't stall the async runtime.
+/// On poisoning, the lock is recovered with a warning.
 fn lock_global_sidecar() -> std::sync::MutexGuard<'static, Option<GlobalSidecar>> {
     match GLOBAL_SIDECAR.lock() {
         Ok(guard) => guard,
@@ -157,7 +163,10 @@ pub fn get_or_spawn_port_with_ctx(
         let mut last_err: Option<anyhow::Error> = None;
         let mut out: Option<(Child, u16)> = None;
         for _ in 0..5 {
-            // Bind to port 0 to get an OS-assigned ephemeral port, then release
+            // Bind to port 0 to get an OS-assigned ephemeral port, then release.
+            // TOCTOU: another process could claim the port between release and sidecar bind.
+            // We retry up to 5 times to mitigate this. fd-passing would eliminate the race
+            // but llama-server/mlx_lm.server don't support it.
             let ephemeral_port = match std::net::TcpListener::bind("127.0.0.1:0") {
                 Ok(listener) => {
                     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);

@@ -38,20 +38,36 @@ pub fn should_run_ai_with(config: &AiConfig, sys: &sysinfo::System) -> bool {
     available_mb >= config.min_available_memory_gb * 1024
 }
 
-/// Check if on AC power. Defaults to true (assume AC) on any error.
+/// Check if on AC power.
+/// - No battery hardware (e.g., desktop, VM) → true (AC)
+/// - Battery present and discharging → false
+/// - API error → false (conservative: skip AI rather than drain battery)
 fn on_ac_power() -> bool {
     let manager = match battery::Manager::new() {
         Ok(m) => m,
-        Err(_) => return true,
+        Err(_) => {
+            // Manager creation failed — likely no battery subsystem (desktop/VM). Assume AC.
+            return true;
+        }
     };
-    let batteries = match manager.batteries() {
+    let mut batteries = match manager.batteries() {
         Ok(b) => b,
-        Err(_) => return true,
+        Err(_) => {
+            // API error enumerating batteries — conservative: skip AI
+            tracing::debug!("Battery API error; assuming battery power to be safe");
+            return false;
+        }
     };
-    for b in batteries.flatten() {
+    // If no batteries found at all, this is a desktop/VM — assume AC
+    let mut found_any = false;
+    for b in batteries.by_ref().flatten() {
+        found_any = true;
         if b.state() == battery::State::Discharging {
             return false;
         }
+    }
+    if !found_any {
+        return true; // No battery hardware → AC
     }
     true
 }

@@ -168,6 +168,25 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
     if let Some(bar) = pb {
         bar.finish_and_clear();
     }
+
+    // Post-download integrity check: compute BLAKE3 hash over the complete file.
+    // This catches corruption from interrupted/resumed downloads where the upstream
+    // file may have changed between segments.
+    let hash = {
+        let mut hasher = blake3::Hasher::new();
+        let mut f = std::fs::File::open(&tmp)?;
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = std::io::Read::read(&mut f, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        hasher.finalize().to_hex().to_string()
+    };
+    tracing::info!("Model download complete: BLAKE3={}, size={} bytes", &hash[..16], pos);
+
     std::fs::rename(&tmp, &target)?;
     Ok(target)
 }

@@ -302,9 +302,14 @@ impl AgentSubsystem {
                         return Ok(());
                     }
                 }
-                if self.proxy_failures >= 10 {
-                    tracing::error!("MCP proxy permanently disabled after 10 failures");
+                if self.proxy_failures >= 20 {
+                    tracing::error!("MCP proxy permanently disabled after 20 failures");
                     return Ok(());
+                }
+                // Clear fatal_error on successful restart attempt to allow recovery
+                if self.proxy_failures > 0 {
+                    self.fatal_error = None;
+                    self.healthy = true;
                 }
                 self.proxy_started = true;
                 let ctx_cl = ctx.clone();

@@ -26,6 +26,9 @@ struct GithubAsset {
     size: u64,
 }
 
+/// Map (os, arch) to substrings found in llama.cpp GitHub release asset names.
+/// Updated to match current upstream naming (llama.cpp b5000+).
+/// Fallback priority: CUDA > CPU for GPU-capable machines.
 fn detect_platform_asset_substring() -> Result<&'static str> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -34,9 +37,11 @@ fn detect_platform_asset_substring() -> Result<&'static str> {
         ("macos", "x86_64") => Ok("macos-x64"),
         ("linux", "x86_64") => {
             if has_nvidia_gpu() {
+                // Prefer CUDA build; upstream uses "cuda" in asset names
                 Ok("linux-cuda")
             } else {
-                Ok("ubuntu-x64")
+                // CPU-only; upstream uses "linux-x64" (was "ubuntu-x64" in older releases)
+                Ok("linux-x64")
             }
         }
         ("linux", "aarch64") => Ok("linux-arm64"),
@@ -44,7 +49,7 @@ fn detect_platform_asset_substring() -> Result<&'static str> {
             if has_nvidia_gpu() {
                 Ok("win-cuda")
             } else {
-                Ok("win-cpu-x64")
+                Ok("win-x64")
             }
         }
         ("windows", "aarch64") => Ok("win-arm64"),

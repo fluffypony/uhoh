@@ -2,7 +2,16 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 
 /// Ed25519 public key for release signature verification.
-/// IMPORTANT: Replace this with your actual public key before release.
+///
+/// RELEASE CHECKLIST: Confirm this key matches the actual release-signing pipeline.
+/// If this is still a placeholder, Ed25519 verification will silently fail and the
+/// updater falls back to DNS-only verification.
+///
+/// NOTE: The verify_ed25519_signature function pre-hashes the binary with BLAKE3
+/// before passing the digest to Ed25519 verify. This means standard tools (openssl,
+/// ssh-keygen) cannot generate compatible signatures — use the project's custom
+/// signing script. This coupling is intentional for performance (avoids loading
+/// large binaries into Ed25519's internal SHA-512).
 const UPDATE_PUBLIC_KEY: &[u8; 32] = &[
     0xe2, 0xb0, 0x6e, 0x9b, 0x57, 0x1c, 0x96, 0x80, 0x74, 0xc3, 0xcb, 0xde, 0x70, 0xf2, 0xe5, 0xb8,
     0x3e, 0x33, 0x5d, 0xab, 0xbb, 0x75, 0xb7, 0x63, 0x49, 0x52, 0x94, 0xc8, 0x55, 0x21, 0xb1, 0xd2,
