@@ -59,7 +59,7 @@ pub async fn websocket_handler(
 
 fn websocket_auth_ok(
     headers: &HeaderMap,
-    query_token: Option<&str>,
+    _query_token: Option<&str>,
     cached_token: Option<&str>,
 ) -> bool {
     let expected = match cached_token {
@@ -67,6 +67,7 @@ fn websocket_auth_ok(
         _ => return false,
     };
 
+    // Authorization: Bearer <token>
     if let Some(auth_header) = headers.get("authorization") {
         if let Ok(auth) = auth_header.to_str() {
             if let Some(provided) = auth.strip_prefix("Bearer ") {
@@ -77,30 +78,15 @@ fn websocket_auth_ok(
         }
     }
 
-    if let Some(token) = query_token {
-        if token.as_bytes().ct_eq(expected.as_bytes()).into() {
-            return true;
-        }
-    }
-
+    // Sec-WebSocket-Protocol: bearer, <token>
     if let Some(protocol_header) = headers.get("sec-websocket-protocol") {
         if let Ok(protocols) = protocol_header.to_str() {
-            // Accept token transport via protocol list, e.g.:
-            // Sec-WebSocket-Protocol: bearer, <token>
             let mut iter = protocols.split(',').map(|s| s.trim());
             while let Some(name) = iter.next() {
                 if name.eq_ignore_ascii_case("bearer") {
                     if let Some(token) = iter.next() {
                         return token.as_bytes().ct_eq(expected.as_bytes()).into();
                     }
-                }
-            }
-
-            // Also accept a single token-prefixed protocol value:
-            // Sec-WebSocket-Protocol: bearer.<token>
-            for value in protocols.split(',').map(|s| s.trim()) {
-                if let Some(token) = value.strip_prefix("bearer.") {
-                    return token.as_bytes().ct_eq(expected.as_bytes()).into();
                 }
             }
         }

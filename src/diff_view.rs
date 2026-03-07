@@ -251,7 +251,18 @@ pub fn cmd_diff(
             .and_then(|h| cas::read_blob(&blob_root, h).ok().flatten());
         let new_bytes = if is_current_tree {
             let file_on_disk = project_path.join(cas::decode_relpath_to_os(path));
-            std::fs::read(&file_on_disk).ok()
+            // Use symlink_metadata to avoid following symlinks; read symlink target as content
+            if let Ok(meta) = std::fs::symlink_metadata(&file_on_disk) {
+                if meta.file_type().is_symlink() {
+                    std::fs::read_link(&file_on_disk)
+                        .ok()
+                        .map(|t| t.to_string_lossy().into_owned().into_bytes())
+                } else {
+                    std::fs::read(&file_on_disk).ok()
+                }
+            } else {
+                None
+            }
         } else {
             new_hash
                 .and_then(|h| cas::read_blob(&blob_root, h).ok().flatten())

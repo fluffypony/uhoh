@@ -595,7 +595,7 @@
     }
 
     function authHeaders(base = {}) {
-      const token = window.localStorage.getItem('uhoh_token') || '';
+      const token = window.sessionStorage.getItem('uhoh_token') || '';
       const headers = Object.assign({}, base);
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
@@ -630,7 +630,7 @@
         if (error.status !== 401) throw error;
         const token = prompt(TOKEN_HELP_TEXT + ':');
         if (!token) throw error;
-        window.localStorage.setItem('uhoh_token', token.trim());
+        window.sessionStorage.setItem('uhoh_token', token.trim());
         return fn();
       });
     }
@@ -652,7 +652,7 @@
         if (e.status === 401) {
           const token = prompt(TOKEN_HELP_TEXT + ':');
           if (token) {
-            window.localStorage.setItem('uhoh_token', token.trim());
+            window.sessionStorage.setItem('uhoh_token', token.trim());
             await loadProjects();
           } else {
             throw e;
@@ -1143,7 +1143,7 @@
     let wsRetryDelay = 1000;
     function connectWs() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const token = window.localStorage.getItem('uhoh_token') || '';
+      const token = window.sessionStorage.getItem('uhoh_token') || '';
       const wsUrl = `${proto}//${location.host}/ws`;
       // Send token via Sec-WebSocket-Protocol header instead of URL query
       // to avoid credential leakage in browser history, server logs, and proxies.

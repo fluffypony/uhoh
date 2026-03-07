@@ -269,16 +269,34 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
 
     let hook_path = hooks_dir.join("pre-commit");
 
-    // Try PATH first; if not found, fall back to ~/.uhoh/bin/uhoh for GUI clients with stripped PATH
+    // Try PATH first, then current exe path, then common install locations.
+    // GUI clients may have stripped PATH so we need robust fallback.
     let exe_str = if which("uhoh").is_ok() {
         "uhoh".to_string()
+    } else if let Ok(exe) = std::env::current_exe() {
+        exe.to_string_lossy().to_string()
     } else {
         let bin_name = format!("uhoh{}", std::env::consts::EXE_SUFFIX);
-        crate::platform::uhoh_dir()
-            .join("bin")
-            .join(bin_name)
-            .to_string_lossy()
-            .to_string()
+        // Try ~/.uhoh/bin, /usr/local/bin, ~/.local/bin in order
+        let candidates = [
+            crate::platform::uhoh_dir().join("bin").join(&bin_name),
+            std::path::PathBuf::from("/usr/local/bin").join(&bin_name),
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".local/bin")
+                .join(&bin_name),
+        ];
+        candidates
+            .iter()
+            .find(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| {
+                crate::platform::uhoh_dir()
+                    .join("bin")
+                    .join(&bin_name)
+                    .to_string_lossy()
+                    .to_string()
+            })
     };
 
     let uhoh_hook_content = format!(

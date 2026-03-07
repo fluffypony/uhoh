@@ -1518,34 +1518,12 @@ impl Database {
         Ok(())
     }
 
+    /// Return the event ID and any descendants linked via causal_parent.
+    /// Currently causal_parent is never populated, so this returns just the root ID.
+    /// The recursive CTE has been removed since it was dead code; if causal_parent
+    /// is populated in the future, re-add the recursive walk.
     pub fn event_ledger_descendant_ids(&self, root_id: i64) -> Result<Vec<i64>> {
-        let limit = 10_000i64;
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "WITH RECURSIVE descendants(id, depth) AS (
-                 SELECT ?1, 0
-                 UNION ALL
-                 SELECT e.id, d.depth + 1
-                 FROM event_ledger e
-                 JOIN descendants d ON e.causal_parent = d.id
-                 WHERE d.depth < ?2
-             )
-             SELECT id FROM descendants LIMIT ?3",
-        )?;
-
-        let rows = stmt.query_map(params![root_id, limit, limit], |row| row.get::<_, i64>(0))?;
-        let mut out = Vec::new();
-        for id in rows {
-            out.push(id?);
-        }
-        if out.len() as i64 >= limit {
-            anyhow::bail!(
-                "Cascade descendant expansion reached limit of {} entries for root event #{}",
-                limit,
-                root_id
-            );
-        }
-        Ok(out)
+        Ok(vec![root_id])
     }
 
     pub fn event_ledger_mark_resolved_cascade(&self, root_id: i64) -> Result<usize> {

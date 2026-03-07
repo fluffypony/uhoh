@@ -2152,6 +2152,7 @@ async fn run_doctor(
                         tracing::warn!("FTS5 index rebuild after restore failed: {e}");
                     } else {
                         println!("FTS5 search index rebuilt.");
+                        println!("Note: search results may be incomplete for snapshots that existed in the original DB but not in the backup.");
                     }
                 }
             } else {
