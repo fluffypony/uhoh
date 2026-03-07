@@ -110,7 +110,7 @@ pub fn tick_postgres_guard(
     let poll_dsn =
         build_connect_dsn(&guard.connection_ref).unwrap_or_else(|_| guard.connection_ref.clone());
     let poll_window_secs = tick_interval_secs.saturating_mul(2).max(1);
-    if let Ok(deleted_rows) = poll_delete_count(&poll_dsn, poll_window_secs) {
+    if let Ok(deleted_rows) = poll_delete_count(&poll_dsn, poll_window_secs, &guard.tables_csv) {
         let total_rows = poll_total_row_count(&poll_dsn).unwrap_or(0);
         let pct = if total_rows > 0 {
             deleted_rows as f64 / total_rows as f64
@@ -309,9 +309,11 @@ pub fn shutdown_all_listen_workers() {
     }
 }
 
-fn poll_delete_count(connection_ref: &str, window_seconds: i64) -> Result<i64> {
+fn poll_delete_count(connection_ref: &str, window_seconds: i64, tables_csv: &str) -> Result<i64> {
+    let tables_csv = tables_csv.to_string();
+    let connection_ref = connection_ref.to_string();
     run_postgres_task(async move {
-        let client = pg_connect_spawn(connection_ref).await?;
+        let client = pg_connect_spawn(&connection_ref).await?;
         // Keep helper tables bounded to avoid unbounded growth in monitored DBs.
         let _ = client
             .execute(
@@ -320,16 +322,43 @@ fn poll_delete_count(connection_ref: &str, window_seconds: i64) -> Result<i64> {
                 &[],
             )
             .await;
-        let row = match client
-            .query_one(
-                "SELECT COALESCE(SUM(delete_count), 0)
-                 FROM _uhoh_delete_counts
-                 WHERE ts > now() - ($1::text || ' seconds')::interval",
-                &[&window_seconds.to_string()],
-            )
-            .await
-        {
-            Ok(row) => row,
+        // Scope delete counts to the guard's configured table set.
+        // Wildcard guards count all tables; specific table sets filter by table_name.
+        let window_str = window_seconds.to_string();
+        let row = if tables_csv.trim().is_empty() || tables_csv.trim() == "*" {
+            client
+                .query_one(
+                    "SELECT COALESCE(SUM(delete_count), 0)
+                     FROM _uhoh_delete_counts
+                     WHERE ts > now() - ($1::text || ' seconds')::interval",
+                    &[&window_str],
+                )
+                .await
+        } else {
+            let table_list: Vec<String> = tables_csv
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if table_list.is_empty() {
+                return Ok(0);
+            }
+            let placeholders: Vec<String> =
+                (2..=table_list.len() + 1).map(|i| format!("${i}")).collect();
+            let sql = format!(
+                "SELECT COALESCE(SUM(delete_count), 0) FROM _uhoh_delete_counts \
+                 WHERE ts > now() - ($1::text || ' seconds')::interval \
+                 AND table_name IN ({})",
+                placeholders.join(", ")
+            );
+            let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&window_str];
+            for t in &table_list {
+                params.push(t);
+            }
+            client.query_one(&sql, &params).await
+        };
+        let row = match row {
+            Ok(r) => r,
             Err(e) => {
                 let scrubbed = credentials::scrub_error_message(&e.to_string());
                 if scrubbed.contains("does not exist") {

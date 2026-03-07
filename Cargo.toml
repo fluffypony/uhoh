@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Local filesystem snapshots — ctrl-z for AI agents"
-license = "MIT"
+license = "BSD-3-Clause"
 repository = "https://github.com/fluffypony/uhoh"
 
 [[bin]]
