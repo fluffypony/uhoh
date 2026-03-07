@@ -27,6 +27,21 @@ pub use recovery::decrypt_recovery_payload;
 pub use recovery::write_postgres_schema_baseline;
 pub use recovery::write_sqlite_baseline;
 
+fn normalize_guard_mode(engine: &str, mode: &str) -> String {
+    let mode_l = mode.trim().to_ascii_lowercase();
+    if engine == "postgres" {
+        if mode_l == "schema_polling" {
+            "schema_polling".to_string()
+        } else {
+            "triggers".to_string()
+        }
+    } else if engine == "mysql" {
+        "schema_polling".to_string()
+    } else {
+        mode_l
+    }
+}
+
 pub fn quote_pg_ident(input: &str) -> Result<String> {
     if input.trim().is_empty() {
         anyhow::bail!("Postgres identifier cannot be empty");
@@ -228,6 +243,7 @@ impl DbGuardSubsystem {
         }
 
         for guard in guards {
+            let effective_mode = normalize_guard_mode(&guard.engine, &guard.mode);
             match guard.engine.as_str() {
                 "sqlite" => {
                     let mut engine = SqliteEngine {
@@ -266,6 +282,17 @@ impl DbGuardSubsystem {
                     &recovery_dir,
                     ctx.config.db_guard.recovery_retention_days,
                 );
+            }
+
+            let configured_mode = guard.mode.trim().to_ascii_lowercase();
+            if configured_mode != effective_mode {
+                let mut event = new_event("db_guard", "guard_mode_normalized", "info");
+                event.guard_name = Some(guard.name.clone());
+                event.detail = Some(format!(
+                    "engine={}, configured_mode={}, effective_mode={}",
+                    guard.engine, configured_mode, effective_mode
+                ));
+                let _ = ctx.event_ledger.append(event);
             }
         }
         Ok(())

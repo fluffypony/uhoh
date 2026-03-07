@@ -43,17 +43,26 @@ impl Drop for FanotifyFd {
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) -> Result<()> {
-    // Use all active project roots from the database instead of cwd,
-    // which is typically / or ~ when running as a daemon.
+    // Backward-compatible entrypoint: derive monitor roots from database.
     let projects = ctx.database.list_projects().unwrap_or_default();
-    let monitor_roots: Vec<PathBuf> = if projects.is_empty() {
+    let monitor_roots: Vec<PathBuf> = projects
+        .into_iter()
+        .map(|p| PathBuf::from(p.current_path))
+        .collect();
+    run_permission_monitor_with_roots(ctx, _agents, &monitor_roots)
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+pub fn run_permission_monitor_with_roots(
+    ctx: &SubsystemContext,
+    _agents: &[AgentEntry],
+    monitor_roots: &[PathBuf],
+) -> Result<()> {
+    let monitor_roots: Vec<PathBuf> = if monitor_roots.is_empty() {
         vec![std::env::current_dir()
-            .context("No project roots found and unable to resolve current directory")?]
+            .context("No monitor roots found and unable to resolve current directory")?]
     } else {
-        projects
-            .into_iter()
-            .map(|p| PathBuf::from(p.current_path))
-            .collect()
+        monitor_roots.to_vec()
     };
     let fan_fd_raw = unsafe {
         libc::fanotify_init(
@@ -227,6 +236,15 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
 pub fn run_permission_monitor(
     _ctx: &SubsystemContext,
     _agents: &[AgentEntry],
+) -> anyhow::Result<()> {
+    anyhow::bail!("fanotify permission monitor requires Linux + audit-trail feature")
+}
+
+#[cfg(not(all(target_os = "linux", feature = "audit-trail")))]
+pub fn run_permission_monitor_with_roots(
+    _ctx: &SubsystemContext,
+    _agents: &[AgentEntry],
+    _monitor_roots: &[std::path::PathBuf],
 ) -> anyhow::Result<()> {
     anyhow::bail!("fanotify permission monitor requires Linux + audit-trail feature")
 }

@@ -129,6 +129,7 @@ pub struct DbGuardEntry {
     pub engine: String,
     pub connection_ref: String,
     pub tables_csv: String,
+    pub watched_tables_cache: Option<String>,
     pub mode: String,
     pub created_at: String,
     pub last_baseline_at: Option<String>,
@@ -1628,14 +1629,23 @@ impl Database {
         engine: &str,
         connection_ref: &str,
         tables_csv: &str,
+        watched_tables_cache: Option<&str>,
         mode: &str,
     ) -> Result<()> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO db_guards (name, engine, connection_ref, tables_csv, mode, created_at, active)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
-            params![name, engine, connection_ref, tables_csv, mode, now],
+            "INSERT INTO db_guards (name, engine, connection_ref, tables_csv, watched_tables_cache, mode, created_at, active)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
+            params![
+                name,
+                engine,
+                connection_ref,
+                tables_csv,
+                watched_tables_cache,
+                mode,
+                now
+            ],
         )?;
         Ok(())
     }
@@ -1643,7 +1653,7 @@ impl Database {
     pub fn list_db_guards(&self) -> Result<Vec<DbGuardEntry>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, engine, connection_ref, tables_csv, mode, created_at, last_baseline_at, active
+            "SELECT id, name, engine, connection_ref, tables_csv, watched_tables_cache, mode, created_at, last_baseline_at, active
              FROM db_guards ORDER BY id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1653,10 +1663,11 @@ impl Database {
                 engine: row.get(2)?,
                 connection_ref: row.get(3)?,
                 tables_csv: row.get(4)?,
-                mode: row.get(5)?,
-                created_at: row.get(6)?,
-                last_baseline_at: row.get(7)?,
-                active: row.get::<_, i32>(8)? != 0,
+                watched_tables_cache: row.get(5)?,
+                mode: row.get(6)?,
+                created_at: row.get(7)?,
+                last_baseline_at: row.get(8)?,
+                active: row.get::<_, i32>(9)? != 0,
             })
         })?;
         let mut out = Vec::new();
@@ -1664,6 +1675,15 @@ impl Database {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    pub fn set_db_guard_watched_tables_cache(&self, name: &str, cache: Option<&str>) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE db_guards SET watched_tables_cache = ?1 WHERE name = ?2",
+            params![cache, name],
+        )?;
+        Ok(())
     }
 
     pub fn remove_db_guard(&self, name: &str) -> Result<()> {

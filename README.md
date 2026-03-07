@@ -326,9 +326,10 @@ Database guard is designed for emergency detection and recovery prep. It is not 
 - `agent.enabled` (default false): enable agent monitoring subsystem.
 - `agent.mcp_proxy_enabled` (default true): enable MCP proxy tick processing.
 - `agent.mcp_proxy_port` (default 22823): MCP proxy listen port.
+- `agent.mcp_proxy_require_auth` (default true): require JSON-RPC `uhoh/auth` handshake on MCP proxy connections.
 - `agent.intercept_enabled` (default true): enable session log tailing fallback.
 - `agent.audit_enabled` (default false): enable OS-level audit loop.
-- `agent.audit_scope` (default `project`): audit scope. Currently only `project` scope is implemented (monitors active project roots).
+- `agent.audit_scope` (default `project`): audit scope (`project` monitors active project roots, `home` monitors your home directory).
 - `agent.audit_max_events_per_second` (default 500): rate limit for fanotify/audit events per second.
 - `agent.sandbox_enabled` (default false): enable sandbox integrations when available.
 - `agent.on_dangerous_change` (default `none`): dangerous-action policy (`none` or `pause`).

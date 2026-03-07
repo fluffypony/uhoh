@@ -293,7 +293,7 @@ pub struct AgentConfig {
     pub mcp_proxy_enabled: bool,
     #[serde(default = "default_agent_proxy_port")]
     pub mcp_proxy_port: u16,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub mcp_proxy_require_auth: bool,
     #[serde(default = "default_true")]
     pub intercept_enabled: bool,
@@ -615,7 +615,7 @@ impl Default for AgentConfig {
             enabled: false,
             mcp_proxy_enabled: true,
             mcp_proxy_port: default_agent_proxy_port(),
-            mcp_proxy_require_auth: false,
+            mcp_proxy_require_auth: true,
             intercept_enabled: true,
             audit_enabled: false,
             audit_scope: default_agent_audit_scope(),

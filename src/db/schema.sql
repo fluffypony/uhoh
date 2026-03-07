@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS db_guards (
     engine TEXT NOT NULL,
     connection_ref TEXT NOT NULL,
     tables_csv TEXT NOT NULL,
+    watched_tables_cache TEXT,
     mode TEXT NOT NULL DEFAULT 'triggers',
     created_at TEXT NOT NULL,
     last_baseline_at TEXT,

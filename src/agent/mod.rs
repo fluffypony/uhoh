@@ -34,6 +34,8 @@ pub struct AgentSubsystem {
     fanotify_task: Option<tokio::task::JoinHandle<()>>,
     proxy_task: Option<tokio::task::JoinHandle<Result<()>>>,
     proxy_shutdown: Option<CancellationToken>,
+    #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+    fanotify_roots: Vec<std::path::PathBuf>,
 }
 
 impl AgentSubsystem {
@@ -52,6 +54,8 @@ impl AgentSubsystem {
             fanotify_task: None,
             proxy_task: None,
             proxy_shutdown: None,
+            #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+            fanotify_roots: Vec::new(),
         }
     }
 }
@@ -278,20 +282,54 @@ impl AgentSubsystem {
         }
 
         #[cfg(all(target_os = "linux", feature = "audit-trail"))]
-        if ctx.config.agent.audit_enabled
-            && ctx.config.agent.intercept_enabled
-            && !self.fanotify_started
         {
-            self.fanotify_started = true;
-            let ctx_cl = ctx.clone();
-            let agents_cl = agents.to_vec();
-            let failures = self.background_failures.clone();
-            self.fanotify_task = Some(tokio::task::spawn_blocking(move || {
-                if let Err(err) = fanotify::run_permission_monitor(&ctx_cl, &agents_cl) {
-                    failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::debug!("fanotify monitor unavailable: {err}");
+            let desired_roots = if ctx.config.agent.audit_scope.eq_ignore_ascii_case("home") {
+                dirs::home_dir().into_iter().collect::<Vec<_>>()
+            } else {
+                ctx.database
+                    .list_projects()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| std::path::PathBuf::from(p.current_path))
+                    .collect::<Vec<_>>()
+            };
+
+            let mut normalized = desired_roots;
+            normalized.sort();
+            normalized.dedup();
+
+            if !ctx.config.agent.audit_enabled {
+                if let Some(task) = self.fanotify_task.take() {
+                    task.abort();
                 }
-            }));
+                self.fanotify_started = false;
+                self.fanotify_roots.clear();
+            } else {
+                let roots_changed = self.fanotify_roots != normalized;
+                if roots_changed {
+                    if let Some(task) = self.fanotify_task.take() {
+                        task.abort();
+                    }
+                    self.fanotify_started = false;
+                    self.fanotify_roots = normalized.clone();
+                }
+
+                if !self.fanotify_started {
+                    self.fanotify_started = true;
+                    let ctx_cl = ctx.clone();
+                    let agents_cl = agents.to_vec();
+                    let roots_cl = self.fanotify_roots.clone();
+                    let failures = self.background_failures.clone();
+                    self.fanotify_task = Some(tokio::task::spawn_blocking(move || {
+                        if let Err(err) = fanotify::run_permission_monitor_with_roots(
+                            &ctx_cl, &agents_cl, &roots_cl,
+                        ) {
+                            failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::debug!("fanotify monitor unavailable: {err}");
+                        }
+                    }));
+                }
+            }
         }
 
         if ctx.config.agent.audit_enabled {

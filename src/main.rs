@@ -843,10 +843,21 @@ fn handle_db_commands(
             }
             let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
 
-            let valid_modes = ["triggers", "schema_polling"];
-            if !valid_modes.iter().any(|m| mode.eq_ignore_ascii_case(m)) {
-                anyhow::bail!("Supported modes: {}", valid_modes.join(", "));
-            }
+            let mode = if engine == "mysql" {
+                if !mode.eq_ignore_ascii_case("schema_polling") {
+                    tracing::warn!(
+                        "MySQL guard only supports schema_polling mode; normalizing requested mode '{}'",
+                        mode
+                    );
+                }
+                "schema_polling"
+            } else {
+                let valid_modes = ["triggers", "schema_polling"];
+                if !valid_modes.iter().any(|m| mode.eq_ignore_ascii_case(m)) {
+                    anyhow::bail!("Supported modes: {}", valid_modes.join(", "));
+                }
+                mode.as_str()
+            };
 
             let connection_ref = uhoh::db_guard::scrub_dsn(dsn);
             let embedded_creds = extract_dsn_credentials(dsn);
@@ -879,9 +890,13 @@ fn handle_db_commands(
 
             // Install remote infrastructure only after credentials are safely persisted.
             let mut postgres_infra_installed = false;
+            let mut watched_tables_cache: Option<String> = None;
             if engine == "postgres" {
                 match install_postgres_monitoring_infrastructure(dsn, tables_csv.as_str()) {
-                    Ok(()) => postgres_infra_installed = true,
+                    Ok(cache) => {
+                        postgres_infra_installed = true;
+                        watched_tables_cache = cache;
+                    }
                     Err(err) => {
                         if let Some(previous) = previous_stored_cred.clone() {
                             let restore = previous.unwrap_or(uhoh::db_guard::CredentialMaterial {
@@ -904,9 +919,14 @@ fn handle_db_commands(
                 }
             }
 
-            if let Err(err) =
-                database.add_db_guard(&guard_name, engine, &connection_ref, &tables_csv, mode)
-            {
+            if let Err(err) = database.add_db_guard(
+                &guard_name,
+                engine,
+                &connection_ref,
+                &tables_csv,
+                watched_tables_cache.as_deref(),
+                mode,
+            ) {
                 if let Some(previous) = previous_stored_cred {
                     let restore = previous.unwrap_or(uhoh::db_guard::CredentialMaterial {
                         username: None,
@@ -1062,7 +1082,10 @@ fn handle_db_commands(
     Ok(())
 }
 
-fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Result<()> {
+fn install_postgres_monitoring_infrastructure(
+    dsn: &str,
+    tables_csv: &str,
+) -> Result<Option<String>> {
     block_on_runtime(async move {
         let client = connect_postgres_client(dsn).await?;
 
@@ -1158,16 +1181,19 @@ fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Re
                 .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
             let table_names: Vec<String> =
                 rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
-            for table in table_names {
+            for table in &table_names {
                 install_delete_counter_trigger(&client, &table).await?;
             }
-            return Ok(());
+            let mut sorted = table_names;
+            sorted.sort();
+            sorted.dedup();
+            return Ok(Some(sorted.join(",")));
         }
         for table in tables {
             install_delete_counter_trigger(&client, &table).await?;
         }
 
-        Ok(())
+        Ok(None)
     })
 }
 
@@ -2154,7 +2180,7 @@ async fn run_doctor(
             }
         }
         // Re-open pool after restore
-        db::Database::open(uhoh_dir)?
+        db::Database::open(&uhoh_dir.join("uhoh.db"))?
     } else {
         database
     };

@@ -58,6 +58,12 @@ pub fn build_connect_dsn(connection_ref: &str) -> Result<String> {
 }
 
 static PG_DDL_CURSOR: Lazy<Mutex<HashMap<String, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static PG_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build postgres task runtime")
+});
 struct DdlPollWorker {
     queue: std::sync::Arc<Mutex<Vec<String>>>,
     cancel: CancellationToken,
@@ -71,6 +77,19 @@ pub fn tick_postgres_guard(
     guard: &DbGuardEntry,
     tick_interval_secs: i64,
 ) -> Result<()> {
+    let poll_dsn =
+        build_connect_dsn(&guard.connection_ref).unwrap_or_else(|_| guard.connection_ref.clone());
+
+    if guard.tables_csv.trim() == "*" {
+        if let Err(err) = reconcile_wildcard_delete_triggers(ctx, guard, &poll_dsn) {
+            tracing::warn!(
+                "postgres wildcard trigger reconcile failed for {}: {}",
+                guard.name,
+                err
+            );
+        }
+    }
+
     let baseline_interval = std::time::Duration::from_secs(
         ctx.config
             .db_guard
@@ -106,9 +125,23 @@ pub fn tick_postgres_guard(
         }
     }
 
+    // Respect configured guard mode: in schema_polling mode we intentionally skip
+    // row-level trigger counters and only rely on schema/DDL signal paths.
+    if guard.mode.eq_ignore_ascii_case("schema_polling") {
+        let mut event = new_event("db_guard", "postgres_tick", "info");
+        event.guard_name = Some(guard.name.clone());
+        event.detail = Some(format!(
+            "mode={}, dsn_ref={}, row_counters=disabled",
+            guard.mode,
+            scrub_ref(&guard.connection_ref)
+        ));
+        if let Err(err) = ctx.event_ledger.append(event) {
+            tracing::error!("failed to append postgres_tick event: {err}");
+        }
+        return Ok(());
+    }
+
     // Lightweight delete-counter polling (use resolved credentials).
-    let poll_dsn =
-        build_connect_dsn(&guard.connection_ref).unwrap_or_else(|_| guard.connection_ref.clone());
     let poll_window_secs = tick_interval_secs.saturating_mul(2).max(1);
     if let Ok(deleted_rows) = poll_delete_count(&poll_dsn, poll_window_secs, &guard.tables_csv) {
         let total_rows = poll_total_row_count(&poll_dsn).unwrap_or(0);
@@ -246,6 +279,136 @@ pub fn tick_postgres_guard(
     if let Err(err) = ctx.event_ledger.append(event) {
         tracing::error!("failed to append postgres_tick event: {err}");
     }
+    Ok(())
+}
+
+fn reconcile_wildcard_delete_triggers(
+    ctx: &SubsystemContext,
+    guard: &DbGuardEntry,
+    poll_dsn: &str,
+) -> Result<()> {
+    let current = fetch_current_schema_tables(poll_dsn)?;
+    if current.is_empty() {
+        return Ok(());
+    }
+
+    let mut current_sorted = current;
+    current_sorted.sort();
+    current_sorted.dedup();
+
+    let previous: std::collections::HashSet<String> = guard
+        .watched_tables_cache
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .collect();
+
+    let mut added = Vec::new();
+    for table in &current_sorted {
+        if !previous.contains(table) {
+            added.push(table.clone());
+        }
+    }
+
+    if !added.is_empty() {
+        install_delete_counter_triggers_for_tables(poll_dsn, &added)?;
+        let mut event = new_event("db_guard", "postgres_wildcard_trigger_reconciled", "info");
+        event.guard_name = Some(guard.name.clone());
+        event.detail = Some(
+            serde_json::json!({
+                "added_tables": added,
+                "guard": guard.name,
+            })
+            .to_string(),
+        );
+        let _ = ctx.event_ledger.append(event);
+    }
+
+    let cache = current_sorted.join(",");
+    let _ = ctx
+        .database
+        .set_db_guard_watched_tables_cache(&guard.name, Some(&cache));
+    Ok(())
+}
+
+fn fetch_current_schema_tables(connection_ref: &str) -> Result<Vec<String>> {
+    let connection_ref = connection_ref.to_string();
+    run_postgres_task(async move {
+        let client = pg_connect_spawn(&connection_ref).await?;
+        let rows = client
+            .query(
+                "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = current_schema()",
+                &[],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<_, String>(0))
+            .collect::<Vec<_>>())
+    })
+}
+
+fn install_delete_counter_triggers_for_tables(
+    connection_ref: &str,
+    tables: &[String],
+) -> Result<()> {
+    if tables.is_empty() {
+        return Ok(());
+    }
+    let connection_ref = connection_ref.to_string();
+    let tables = tables.to_vec();
+    run_postgres_task(async move {
+        let client = pg_connect_spawn(&connection_ref).await?;
+        for table in tables {
+            install_delete_counter_trigger_sql(&client, &table).await?;
+        }
+        Ok(())
+    })
+}
+
+async fn install_delete_counter_trigger_sql(
+    client: &tokio_postgres::Client,
+    table: &str,
+) -> Result<()> {
+    let table_safe = table.replace('\'', "''");
+    let table_quoted = crate::db_guard::quote_pg_ident(table)?;
+    let fn_ident = crate::db_guard::quote_pg_ident(&format!(
+        "_uhoh_count_deletes_{}",
+        blake3::hash(table.as_bytes()).to_hex()
+    ))?;
+    let trigger_ident = crate::db_guard::quote_pg_ident(&format!(
+        "uhoh_delete_counter_{}",
+        blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
+    ))?;
+
+    let install_sql = format!(
+        "
+        CREATE OR REPLACE FUNCTION {fn_ident}() RETURNS trigger AS $$
+        BEGIN
+            INSERT INTO _uhoh_delete_counts (table_name, txid, delete_count)
+            VALUES ('{table_safe}', txid_current(), 1)
+            ON CONFLICT (table_name, txid)
+            DO UPDATE SET delete_count = _uhoh_delete_counts.delete_count + 1,
+                          ts = now();
+            RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        DROP TRIGGER IF EXISTS {trigger_ident} ON {table_quoted};
+        CREATE TRIGGER {trigger_ident}
+            BEFORE DELETE ON {table_quoted}
+            FOR EACH ROW EXECUTE FUNCTION {fn_ident}();
+        "
+    );
+
+    client
+        .batch_execute(&install_sql)
+        .await
+        .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
     Ok(())
 }
 
@@ -570,14 +733,9 @@ pub(crate) fn run_postgres_task<T, F>(fut: F) -> Result<T>
 where
     F: std::future::Future<Output = Result<T>>,
 {
-    // Always create a new single-threaded runtime. block_in_place panics when
-    // called from spawn_blocking threads, and try_current() succeeds there,
-    // so we cannot safely distinguish contexts.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Failed to build runtime for postgres operation")?;
-    rt.block_on(fut)
+    // Reuse a dedicated runtime for postgres task execution to avoid creating
+    // a fresh Tokio runtime on every polling tick.
+    PG_RUNTIME.block_on(fut)
 }
 
 /// Certificate verifier that accepts any server certificate (for sslmode=require).
