@@ -1344,16 +1344,9 @@ impl Database {
         }
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut next_id: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(id), 0) + 1 FROM event_ledger",
-            [],
-            |row| row.get(0),
-        )?;
         let mut prev_hash = self.latest_ledger_hash_with_conn(&tx)?.unwrap_or_default();
         for event in events {
             let ts = chrono::Utc::now().to_rfc3339();
-            let chain_hash =
-                ledger::compute_event_chain_hash_with_id(&prev_hash, next_id, event, &ts);
             tx.execute(
                 "INSERT INTO event_ledger (
                     ts, source, event_type, severity, project_hash, agent_name, guard_name,
@@ -1371,12 +1364,18 @@ impl Database {
                     event.detail,
                     event.pre_state_ref,
                     event.post_state_ref,
-                    chain_hash,
+                    "", // placeholder, updated after obtaining canonical row id
                     event.causal_parent,
                 ],
             )?;
+            let actual_id = tx.last_insert_rowid();
+            let chain_hash =
+                ledger::compute_event_chain_hash_with_id(&prev_hash, actual_id, event, &ts);
+            tx.execute(
+                "UPDATE event_ledger SET prev_hash = ?1 WHERE id = ?2",
+                params![chain_hash, actual_id],
+            )?;
             prev_hash = chain_hash;
-            next_id += 1;
         }
         tx.commit()?;
         Ok(events.len())
