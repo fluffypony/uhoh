@@ -2045,6 +2045,7 @@ fn check_inotify_limit() {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn check_inotify_limit() {}
 
 /// Parse "Mass delete detected: X/Y files (Z%)" from the snapshot message
