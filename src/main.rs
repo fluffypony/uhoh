@@ -802,9 +802,14 @@ fn handle_db_commands(
             }
 
             let connection_ref = uhoh::db_guard::scrub_dsn(dsn);
+            let embedded_creds = extract_dsn_credentials(dsn);
+            let mut previous_stored_cred: Option<Option<uhoh::db_guard::CredentialMaterial>> = None;
 
             // Persist credentials first (fail fast if UHOH_MASTER_KEY is missing)
-            if let Some(creds) = extract_dsn_credentials(dsn) {
+            if let Some(creds) = embedded_creds.as_ref() {
+                previous_stored_cred = Some(
+                    uhoh::db_guard::resolve_stored_credentials(&connection_ref).unwrap_or(None),
+                );
                 uhoh::db_guard::store_encrypted_credential(&connection_ref, &creds)
                     .with_context(|| {
                         format!(
@@ -825,12 +830,64 @@ fn handle_db_commands(
                 }
             }
 
-            // Install remote infrastructure only after credentials are safely persisted
+            // Install remote infrastructure only after credentials are safely persisted.
+            let mut postgres_infra_installed = false;
             if engine == "postgres" {
-                install_postgres_monitoring_infrastructure(dsn, tables_csv.as_str())?;
+                match install_postgres_monitoring_infrastructure(dsn, tables_csv.as_str()) {
+                    Ok(()) => postgres_infra_installed = true,
+                    Err(err) => {
+                        if let Some(previous) = previous_stored_cred.clone() {
+                            let restore = previous.unwrap_or(uhoh::db_guard::CredentialMaterial {
+                                username: None,
+                                password: None,
+                            });
+                            if let Err(clean_err) = uhoh::db_guard::store_encrypted_credential(
+                                &connection_ref,
+                                &restore,
+                            ) {
+                                tracing::warn!(
+                                    "Failed to restore stored credentials after postgres infra install failure for '{}': {}",
+                                    guard_name,
+                                    clean_err
+                                );
+                            }
+                        }
+                        return Err(err);
+                    }
+                }
             }
 
-            database.add_db_guard(&guard_name, engine, &connection_ref, &tables_csv, mode)?;
+            if let Err(err) =
+                database.add_db_guard(&guard_name, engine, &connection_ref, &tables_csv, mode)
+            {
+                if let Some(previous) = previous_stored_cred {
+                    let restore = previous.unwrap_or(uhoh::db_guard::CredentialMaterial {
+                        username: None,
+                        password: None,
+                    });
+                    if let Err(clean_err) =
+                        uhoh::db_guard::store_encrypted_credential(&connection_ref, &restore)
+                    {
+                        tracing::warn!(
+                            "Failed to restore stored credentials after local DB add failure for '{}': {}",
+                            guard_name,
+                            clean_err
+                        );
+                    }
+                }
+                if postgres_infra_installed {
+                    if let Err(clean_err) =
+                        drop_postgres_monitoring_infrastructure(dsn, tables_csv.as_str())
+                    {
+                        tracing::warn!(
+                            "Failed to roll back postgres monitoring infrastructure after local DB add failure for '{}': {}",
+                            guard_name,
+                            clean_err
+                        );
+                    }
+                }
+                return Err(err);
+            }
             println!("Added db guard '{guard_name}' ({engine})");
         }
         DbAction::Remove { name } => {
@@ -1225,15 +1282,13 @@ fn test_postgres_monitoring_infrastructure(dsn: &str) -> Result<()> {
 }
 
 fn block_on_runtime<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(fut))
-    } else {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("Failed to build tokio runtime for postgres guard operation")?;
-        rt.block_on(fut)
-    }
+    // Always create a dedicated runtime. block_in_place panics when invoked
+    // from spawn_blocking threads, and these DB commands can execute there.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build tokio runtime for postgres guard operation")?;
+    rt.block_on(fut)
 }
 
 fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
@@ -1432,50 +1487,7 @@ fn apply_postgres_recovery(connection_ref: &str, sql: &str) -> Result<()> {
 }
 
 fn build_connect_dsn_with_resolved_credentials(connection_ref: &str) -> Result<String> {
-    let creds = uhoh::db_guard::resolve_postgres_credentials_cli(connection_ref)?;
-    if connection_ref.starts_with("postgres://") || connection_ref.starts_with("postgresql://") {
-        let mut url = Url::parse(connection_ref)
-            .with_context(|| format!("Invalid Postgres connection ref: {connection_ref}"))?;
-
-        if let Some(ref user) = creds.username {
-            url.set_username(user)
-                .map_err(|_| anyhow::anyhow!("Failed to set Postgres DSN username"))?;
-        }
-        if let Some(ref password) = creds.password {
-            url.set_password(Some(password))
-                .map_err(|_| anyhow::anyhow!("Failed to set Postgres DSN password"))?;
-        }
-
-        return Ok(url.to_string());
-    }
-
-    // keyword-value DSN fallback
-    let mut parts: Vec<String> = connection_ref
-        .split_whitespace()
-        .map(|p| p.to_string())
-        .collect();
-
-    let has_user = parts.iter().any(|p| {
-        p.split_once('=')
-            .is_some_and(|(k, _)| k.eq_ignore_ascii_case("user"))
-    });
-    let has_password = parts.iter().any(|p| {
-        p.split_once('=')
-            .is_some_and(|(k, _)| k.eq_ignore_ascii_case("password"))
-    });
-
-    if let Some(ref pw) = creds.password {
-        if !has_password {
-            parts.push(format!("password={pw}"));
-        }
-    }
-    if let Some(ref user) = creds.username {
-        if !has_user {
-            parts.push(format!("user={user}"));
-        }
-    }
-
-    Ok(parts.join(" "))
+    uhoh::db_guard::postgres::build_connect_dsn(connection_ref)
 }
 
 fn session_matches_event(entry: &db::EventLedgerEntry, session_id: &str) -> bool {
@@ -1671,6 +1683,7 @@ fn handle_agent_commands(
         }
         AgentAction::Resume => {
             let runtime = uhoh::uhoh_dir().join("agents/runtime");
+            std::fs::create_dir_all(&runtime)?;
             // Approval logic is pure file I/O — works on all platforms.
             let mut resumed_any = false;
             if let Ok(entries) = std::fs::read_dir(&runtime) {
@@ -1689,18 +1702,16 @@ fn handle_agent_commands(
                         Ok(v) => v,
                         Err(_) => continue,
                     };
-                    let pending_json: serde_json::Value =
-                        match serde_json::from_str(&pending_raw) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
+                    let pending_json: serde_json::Value = match serde_json::from_str(&pending_raw) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
                     let Some(approval_id) =
                         pending_json.get("approval_id").and_then(|v| v.as_str())
                     else {
                         continue;
                     };
-                    let Some(challenge) =
-                        pending_json.get("challenge").and_then(|v| v.as_str())
+                    let Some(challenge) = pending_json.get("challenge").and_then(|v| v.as_str())
                     else {
                         continue;
                     };
@@ -1775,8 +1786,7 @@ tool_call_format = "jsonl"
                     default_profile.display()
                 );
             }
-        }
-        // AgentAction::UpdateProfiles removed — no longer needed pre-release
+        } // AgentAction::UpdateProfiles removed — no longer needed pre-release
     }
     Ok(())
 }
@@ -2086,9 +2096,9 @@ async fn run_doctor(
                 let _ = std::fs::remove_file(uhoh_dir.join("uhoh.db-shm"));
                 // Rebuild FTS5 search index after database restore
                 if let Ok(conn) = rusqlite::Connection::open(uhoh_dir.join("uhoh.db")) {
-                    if let Err(e) = conn.execute_batch(
-                        "INSERT INTO search_index(search_index) VALUES('rebuild');",
-                    ) {
+                    if let Err(e) = conn
+                        .execute_batch("INSERT INTO search_index(search_index) VALUES('rebuild');")
+                    {
                         tracing::warn!("FTS5 index rebuild after restore failed: {e}");
                     } else {
                         println!("FTS5 search index rebuilt.");

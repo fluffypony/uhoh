@@ -106,5 +106,13 @@ pub fn compute_event_chain_hash_with_id(
     hasher.update(event.pre_state_ref.as_deref().unwrap_or("").as_bytes());
     hasher.update(&[0u8]);
     hasher.update(event.post_state_ref.as_deref().unwrap_or("").as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(
+        event
+            .causal_parent
+            .map(|v| v.to_string())
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     hasher.finalize().to_hex().to_string()
 }

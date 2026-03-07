@@ -197,7 +197,7 @@ impl Database {
     /// Create a consistent backup of the database to the given path.
     /// Uses SQLite online backup API under the hood.
     pub fn backup_to(&self, path: &std::path::Path) -> Result<()> {
-        let src = self.conn();
+        let src = self.conn()?;
         let mut dest = rusqlite::Connection::open(path)?;
         let backup = rusqlite::backup::Backup::new(&src, &mut dest)?;
         backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
@@ -209,21 +209,24 @@ impl Database {
         Ok(())
     }
 
-    fn conn(&self) -> DbConn {
+    fn conn(&self) -> Result<DbConn> {
         const MAX_ATTEMPTS: u32 = 50; // 50 × 100ms = 5 seconds max
         for attempt in 1..=MAX_ATTEMPTS {
             match self.pool.get() {
-                Ok(conn) => return conn,
+                Ok(conn) => return Ok(conn),
                 Err(err) => {
                     if attempt == MAX_ATTEMPTS {
-                        panic!(
+                        return Err(anyhow::anyhow!(
                             "Database connection pool unavailable after {} attempts: {}",
-                            MAX_ATTEMPTS, err
-                        );
+                            MAX_ATTEMPTS,
+                            err
+                        ));
                     }
                     tracing::error!(
                         "Database connection pool unavailable (attempt {}/{}, retrying): {}",
-                        attempt, MAX_ATTEMPTS, err
+                        attempt,
+                        MAX_ATTEMPTS,
+                        err
                     );
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
@@ -233,7 +236,7 @@ impl Database {
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         // All DDL uses CREATE TABLE/INDEX IF NOT EXISTS, safe to run every startup
         conn.execute_batch(include_str!("db/schema.sql"))?;
@@ -243,7 +246,7 @@ impl Database {
     // === Projects ===
 
     pub fn add_project(&self, hash: &str, path: &str) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO projects (hash, current_path, created_at) VALUES (?1, ?2, ?3)",
@@ -253,7 +256,7 @@ impl Database {
     }
 
     pub fn get_project(&self, hash: &str) -> Result<Option<ProjectEntry>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT hash, current_path, created_at FROM projects WHERE hash = ?1",
             params![hash],
@@ -270,7 +273,7 @@ impl Database {
     }
 
     pub fn find_project_by_path(&self, path: &Path) -> Result<Option<ProjectEntry>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let path_str = path.to_string_lossy();
         conn.query_row(
             "SELECT hash, current_path, created_at FROM projects WHERE current_path = ?1",
@@ -288,7 +291,7 @@ impl Database {
     }
 
     pub fn find_project_by_hash_prefix(&self, prefix: &str) -> Result<Option<ProjectEntry>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         // Escape SQL wildcards in user-provided prefix using backslash + ESCAPE clause
         let esc = prefix
             .replace('\\', "\\\\")
@@ -324,7 +327,7 @@ impl Database {
     }
 
     pub fn update_project_path(&self, hash: &str, new_path: &str) -> Result<()> {
-        let mut conn = self.conn();
+        let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute(
             "UPDATE projects SET current_path = ?1 WHERE hash = ?2",
@@ -335,7 +338,7 @@ impl Database {
     }
 
     pub fn remove_project(&self, hash: &str) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "DELETE FROM search_index WHERE project_hash = ?1",
             params![hash],
@@ -345,7 +348,7 @@ impl Database {
     }
 
     pub fn list_projects(&self) -> Result<Vec<ProjectEntry>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn
             .prepare("SELECT hash, current_path, created_at FROM projects ORDER BY created_at")?;
         let rows = stmt.query_map([], |row| {
@@ -377,7 +380,7 @@ impl Database {
         files: &[SnapFileEntry],
         deleted: &[DeletedFile],
     ) -> Result<(i64, u64)> {
-        let mut conn = self.conn();
+        let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
         // Allocate snapshot_id inside the same transaction if zero passed
@@ -409,7 +412,7 @@ impl Database {
     }
 
     pub fn list_snapshots(&self, project_hash: &str) -> Result<Vec<SnapshotRow>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
@@ -443,7 +446,7 @@ impl Database {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<SnapshotRow>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
@@ -478,7 +481,7 @@ impl Database {
         from_ts: Option<&str>,
         to_ts: Option<&str>,
     ) -> Result<Vec<SnapshotSummary>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         match (from_ts, to_ts) {
             (None, None) => {
                 let mut stmt = conn.prepare(
@@ -573,7 +576,7 @@ impl Database {
 
     /// Lookup a snapshot by its internal rowid
     pub fn get_snapshot_by_rowid(&self, rowid: i64) -> Result<Option<SnapshotRow>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                         s.ai_summary,
@@ -598,7 +601,7 @@ impl Database {
     }
 
     pub fn snapshot_count(&self, project_hash: &str) -> Result<u64> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM snapshots WHERE project_hash = ?1",
             params![project_hash],
@@ -613,7 +616,7 @@ impl Database {
         base58_id: &str,
     ) -> Result<Option<SnapshotRow>> {
         let snapshot_id = crate::cas::base58_to_id(base58_id).context("Invalid snapshot ID")?;
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
@@ -639,7 +642,7 @@ impl Database {
     }
 
     pub fn get_snapshot_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT path, hash, size, stored, executable, mtime, storage_method, is_symlink
              FROM snapshot_files WHERE snapshot_rowid = ?1",
@@ -672,7 +675,7 @@ impl Database {
     }
 
     pub fn get_snapshot_deleted_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT path, hash, size, stored, storage_method FROM snapshot_deleted WHERE snapshot_rowid = ?1",
         )?;
@@ -702,7 +705,7 @@ impl Database {
 
     /// Get the most recent snapshot rowid for a project
     pub fn latest_snapshot_rowid(&self, project_hash: &str) -> Result<Option<i64>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT rowid FROM snapshots WHERE project_hash = ?1 ORDER BY snapshot_id DESC LIMIT 1",
             params![project_hash],
@@ -719,7 +722,7 @@ impl Database {
         file_path: &str,
     ) -> Result<Vec<(u64, String, String, String)>> {
         // Returns (snapshot_id, timestamp, hash, trigger)
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT s.snapshot_id, s.timestamp, f.hash, s.trigger
              FROM snapshot_files f
@@ -744,7 +747,7 @@ impl Database {
 
     /// All blob hashes referenced by any snapshot or event ledger entry
     pub fn all_referenced_blob_hashes(&self) -> Result<std::collections::HashSet<String>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut set = std::collections::HashSet::new();
         let mut stmt = conn.prepare("SELECT DISTINCT hash FROM snapshot_files WHERE stored = 1")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -771,7 +774,7 @@ impl Database {
 
     /// Set or clear the pinned flag on a snapshot.
     pub fn pin_snapshot(&self, rowid: i64, pinned: bool) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "UPDATE snapshots SET pinned = ?1 WHERE rowid = ?2",
             params![pinned as i32, rowid],
@@ -781,7 +784,7 @@ impl Database {
 
     /// Delete old snapshots (used by compaction)
     pub fn delete_snapshot(&self, rowid: i64) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "DELETE FROM search_index WHERE snapshot_rowid = ?1",
             params![rowid],
@@ -791,7 +794,7 @@ impl Database {
     }
 
     pub fn set_ai_summary(&self, snapshot_rowid: i64, summary: &str) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "UPDATE snapshots SET ai_summary = ?1 WHERE rowid = ?2",
             params![summary, snapshot_rowid],
@@ -809,7 +812,7 @@ impl Database {
         ai_summary: &str,
         file_paths: &str,
     ) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO search_index(snapshot_rowid, project_hash, trigger_type, message, ai_summary, file_paths)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -819,7 +822,7 @@ impl Database {
     }
 
     pub fn update_search_index_summary(&self, snapshot_rowid: i64, ai_summary: &str) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let row: Option<(String, String, String, String)> = conn
             .query_row(
                 "SELECT project_hash, trigger_type, message, file_paths
@@ -849,7 +852,7 @@ impl Database {
         project_hash: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
 
         // Conservative query normalization for FTS5 parser safety.
         // Strip operator/syntax characters and collapse to plain terms.
@@ -937,7 +940,7 @@ impl Database {
 
     /// Enqueue a snapshot for deferred AI summary generation (idempotent per rowid).
     pub fn enqueue_ai_summary(&self, snapshot_rowid: i64, project_hash: &str) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT OR IGNORE INTO pending_ai_summaries (snapshot_rowid, project_hash, queued_at, attempts)
@@ -949,7 +952,7 @@ impl Database {
 
     /// Fetch up to `limit` oldest pending summaries across all projects.
     pub fn dequeue_pending_ai(&self, limit: u32) -> Result<Vec<(i64, String, i64, String)>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT snapshot_rowid, project_hash, attempts, queued_at
              FROM pending_ai_summaries
@@ -972,7 +975,7 @@ impl Database {
     }
 
     pub fn delete_pending_ai(&self, snapshot_rowid: i64) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "DELETE FROM pending_ai_summaries WHERE snapshot_rowid = ?1",
             params![snapshot_rowid],
@@ -981,7 +984,7 @@ impl Database {
     }
 
     pub fn increment_ai_attempts(&self, snapshot_rowid: i64) -> Result<i64> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "UPDATE pending_ai_summaries SET attempts = attempts + 1 WHERE snapshot_rowid = ?1",
             params![snapshot_rowid],
@@ -998,7 +1001,7 @@ impl Database {
 
     /// Remove queue entries older than `ttl_days` days.
     pub fn prune_ai_queue_ttl(&self, ttl_days: i64) -> Result<u64> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let cutoff = chrono::Utc::now() - chrono::Duration::days(ttl_days);
         let cutoff_s = cutoff.to_rfc3339();
         let affected = conn.execute(
@@ -1011,7 +1014,7 @@ impl Database {
     // === Operations ===
 
     pub fn create_operation(&self, project_hash: &str, label: &str) -> Result<i64> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO operations (project_hash, label, started_at) VALUES (?1, ?2, ?3)",
@@ -1026,7 +1029,7 @@ impl Database {
         first_snapshot_id: u64,
         last_snapshot_id: u64,
     ) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE operations SET ended_at = ?1, first_snapshot_id = ?2, last_snapshot_id = ?3
@@ -1038,7 +1041,7 @@ impl Database {
 
     /// Set the first snapshot id of an operation (typically at operation start)
     pub fn set_operation_first_snapshot(&self, op_id: i64, first_snapshot_id: u64) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "UPDATE operations SET first_snapshot_id = ?1 WHERE id = ?2",
             params![first_snapshot_id, op_id],
@@ -1048,7 +1051,7 @@ impl Database {
 
     /// Update the last snapshot id of an operation without closing it.
     pub fn update_operation_last_snapshot(&self, op_id: i64, last_snapshot_id: u64) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "UPDATE operations SET last_snapshot_id = ?1 WHERE id = ?2",
             params![last_snapshot_id, op_id],
@@ -1058,7 +1061,7 @@ impl Database {
 
     /// Set the last snapshot id and close an operation (preserves first_snapshot_id)
     pub fn close_operation_with_last(&self, op_id: i64, last_snapshot_id: u64) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE operations SET ended_at = ?1, last_snapshot_id = ?2 WHERE id = ?3",
@@ -1068,7 +1071,7 @@ impl Database {
     }
 
     pub fn get_active_operation(&self, project_hash: &str) -> Result<Option<(i64, String)>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT id, label FROM operations WHERE project_hash = ?1 AND ended_at IS NULL
              ORDER BY id DESC LIMIT 1",
@@ -1080,7 +1083,7 @@ impl Database {
     }
 
     pub fn list_operations(&self, project_hash: &str) -> Result<Vec<OperationListRow>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, label, started_at, ended_at, first_snapshot_id, last_snapshot_id
              FROM operations WHERE project_hash = ?1 ORDER BY id DESC LIMIT 50",
@@ -1106,7 +1109,7 @@ impl Database {
         &self,
         project_hash: &str,
     ) -> Result<Option<(i64, String, u64, u64)>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT id, label, first_snapshot_id, last_snapshot_id
              FROM operations
@@ -1132,7 +1135,7 @@ impl Database {
         project_hash: &str,
         snapshot_id: u64,
     ) -> Result<Option<SnapshotRow>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
@@ -1160,7 +1163,7 @@ impl Database {
 
     /// List snapshots oldest-first for pruning
     pub fn list_snapshots_oldest_first(&self, project_hash: &str) -> Result<Vec<SnapshotRow>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
@@ -1190,7 +1193,7 @@ impl Database {
 
     /// Total size of stored blobs referenced by a project's snapshots (approximate, counts duplicates)
     pub fn total_blob_size_for_project(&self, project_hash: &str) -> Result<u64> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let size: i64 = conn.query_row(
             "SELECT COALESCE(SUM(t.size), 0) FROM (
                 SELECT DISTINCT sf.hash, sf.size AS size
@@ -1206,7 +1209,7 @@ impl Database {
 
     /// Increment the cached blob bytes counter by delta (can be negative).
     pub fn add_blob_bytes(&self, delta: i64) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO stats (key, value) VALUES ('blob_bytes', 0)
              ON CONFLICT(key) DO UPDATE SET value = value + excluded.value",
@@ -1221,7 +1224,7 @@ impl Database {
 
     /// Get the cached blob bytes total; returns 0 if missing.
     pub fn get_blob_bytes(&self) -> Result<u64> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let v: i64 = conn
             .query_row(
                 "SELECT value FROM stats WHERE key = 'blob_bytes'",
@@ -1234,14 +1237,14 @@ impl Database {
 
     /// Run incremental vacuum to reclaim free pages without exclusive lock.
     pub fn vacuum(&self) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute_batch("PRAGMA incremental_vacuum(100);")?;
         Ok(())
     }
 
     /// Estimate the total size of stored blobs referenced by a single snapshot
     pub fn estimate_snapshot_blob_size(&self, snapshot_rowid: i64) -> Result<u64> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let size: i64 = conn.query_row(
             "SELECT COALESCE(SUM(size), 0) FROM snapshot_files WHERE snapshot_rowid = ?1 AND stored = 1",
             params![snapshot_rowid],
@@ -1251,7 +1254,7 @@ impl Database {
     }
 
     pub fn insert_event_ledger(&self, event: &NewEventLedgerEntry) -> Result<i64> {
-        let mut conn = self.conn();
+        let mut conn = self.conn()?;
         let ts = chrono::Utc::now().to_rfc3339();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let next_id: i64 = tx.query_row(
@@ -1293,7 +1296,7 @@ impl Database {
         if events.is_empty() {
             return Ok(0);
         }
-        let mut conn = self.conn();
+        let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut next_id: i64 = tx.query_row(
             "SELECT COALESCE(MAX(id), 0) + 1 FROM event_ledger",
@@ -1334,7 +1337,7 @@ impl Database {
     }
 
     pub fn verify_event_ledger_chain(&self) -> Result<(usize, Vec<i64>)> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
                     path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
@@ -1393,7 +1396,7 @@ impl Database {
         session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<EventLedgerEntry>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let (sql, param_values) = ledger::build_recent_query(
             ledger::LedgerRecentFilters {
                 source,
@@ -1416,7 +1419,7 @@ impl Database {
     }
 
     pub fn event_ledger_get(&self, id: i64) -> Result<Option<EventLedgerEntry>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.query_row(
             "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
                     path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
@@ -1453,7 +1456,7 @@ impl Database {
     }
 
     pub fn event_ledger_mark_resolved(&self, id: i64) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "UPDATE event_ledger SET resolved = 1 WHERE id = ?1",
             params![id],
@@ -1463,7 +1466,7 @@ impl Database {
 
     pub fn event_ledger_descendant_ids(&self, root_id: i64) -> Result<Vec<i64>> {
         let limit = 10_000i64;
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "WITH RECURSIVE descendants(id, depth) AS (
                  SELECT ?1, 0
@@ -1493,7 +1496,7 @@ impl Database {
 
     pub fn event_ledger_mark_resolved_cascade(&self, root_id: i64) -> Result<usize> {
         let limit = 10_000i64;
-        let conn = self.conn();
+        let conn = self.conn()?;
         let count: i64 = conn.query_row(
             "WITH RECURSIVE descendants(id, depth) AS (
                  SELECT ?1, 0
@@ -1537,7 +1540,7 @@ impl Database {
         session_id: &str,
     ) -> Result<usize> {
         let limit = 10_000i64;
-        let conn = self.conn();
+        let conn = self.conn()?;
         let count: i64 = conn.query_row(
             "WITH RECURSIVE descendants(id, depth) AS (
                  SELECT ?1, 0
@@ -1591,7 +1594,7 @@ impl Database {
         tables_csv: &str,
         mode: &str,
     ) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO db_guards (name, engine, connection_ref, tables_csv, mode, created_at, active)
@@ -1602,7 +1605,7 @@ impl Database {
     }
 
     pub fn list_db_guards(&self) -> Result<Vec<DbGuardEntry>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, engine, connection_ref, tables_csv, mode, created_at, last_baseline_at, active
              FROM db_guards ORDER BY id ASC",
@@ -1628,13 +1631,13 @@ impl Database {
     }
 
     pub fn remove_db_guard(&self, name: &str) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute("DELETE FROM db_guards WHERE name = ?1", params![name])?;
         Ok(())
     }
 
     pub fn set_db_guard_baseline_time(&self, name: &str, ts: &str) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute(
             "UPDATE db_guards SET last_baseline_at = ?1 WHERE name = ?2",
             params![ts, name],
@@ -1649,7 +1652,7 @@ impl Database {
         profile_version: i64,
         data_dir: Option<&str>,
     ) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO agents (name, profile_path, profile_version, data_dir, registered_at, active)
@@ -1660,7 +1663,7 @@ impl Database {
     }
 
     pub fn list_agents(&self) -> Result<Vec<AgentEntry>> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, profile_path, profile_version, data_dir, registered_at, active
              FROM agents ORDER BY id ASC",
@@ -1684,11 +1687,10 @@ impl Database {
     }
 
     pub fn remove_agent(&self, name: &str) -> Result<()> {
-        let conn = self.conn();
+        let conn = self.conn()?;
         conn.execute("DELETE FROM agents WHERE name = ?1", params![name])?;
         Ok(())
     }
-
 }
 
 // Type aliases to simplify complex tuple signatures used around snapshot creation

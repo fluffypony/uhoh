@@ -279,6 +279,45 @@ fn mcp_proxy_dangerous_patterns_use_exact_match_semantics() {
 }
 
 #[test]
+fn mcp_proxy_auth_requires_jsonrpc_handshake_only() {
+    let proxy = std::fs::read_to_string("src/agent/mcp_proxy.rs").expect("read mcp proxy");
+    assert!(proxy.contains("method") && proxy.contains("uhoh/auth"));
+    assert!(!proxy.contains("secure_eq(trimmed.as_bytes(), expected_token.as_bytes())"));
+}
+
+#[test]
+fn mcp_transports_share_tool_definitions_module() {
+    let stdio = std::fs::read_to_string("src/mcp_stdio.rs").expect("read stdio mcp");
+    let http = std::fs::read_to_string("src/server/mcp.rs").expect("read http mcp");
+    assert!(stdio.contains("crate::mcp_tools::tool_definitions()"));
+    assert!(http.contains("crate::mcp_tools::tool_definitions()"));
+}
+
+#[test]
+fn db_pool_connection_failures_return_error_not_panic() {
+    let source = std::fs::read_to_string("src/db.rs").expect("read db module");
+    assert!(source.contains("fn conn(&self) -> Result<DbConn>"));
+    assert!(source.contains("Database connection pool unavailable after"));
+    assert!(!source
+        .contains("panic!(\n                            \"Database connection pool unavailable"));
+}
+
+#[test]
+fn daemon_uses_bounded_watcher_channel_and_overflow_backpressure() {
+    let daemon = std::fs::read_to_string("src/daemon.rs").expect("read daemon");
+    let watcher = std::fs::read_to_string("src/watcher.rs").expect("read watcher");
+    assert!(daemon.contains("mpsc::channel::<WatchEvent>(100_000)"));
+    assert!(watcher.contains("send_watch_event"));
+    assert!(watcher.contains("WatchEvent::Overflow"));
+}
+
+#[test]
+fn ledger_hash_chain_includes_causal_parent_field() {
+    let source = std::fs::read_to_string("src/db/ledger.rs").expect("read ledger hash module");
+    assert!(source.contains("event.causal_parent"));
+}
+
+#[test]
 fn postgres_listen_worker_queries_use_monotonic_id_cursor() {
     let source = std::fs::read_to_string("src/db_guard/postgres.rs")
         .expect("read postgres guard implementation");
@@ -335,11 +374,20 @@ fn cargo_features_include_core_gates() {
 fn postgres_db_ops_use_runtime_bridge_instead_of_nested_runtime_builder() {
     let source = std::fs::read_to_string("src/main.rs").expect("read main command handler");
     assert!(source.contains("fn block_on_runtime<T>"));
-    assert!(source.contains("tokio::task::block_in_place(|| handle.block_on(fut))"));
+    assert!(source.contains("Builder::new_current_thread()"));
+    assert!(!source.contains("tokio::task::block_in_place(|| handle.block_on(fut))"));
     assert!(
         !source.contains("postgres guard install")
             || source.contains("block_on_runtime(async move")
     );
+}
+
+#[test]
+fn db_add_rolls_back_remote_and_credentials_on_local_failure() {
+    let source = std::fs::read_to_string("src/main.rs").expect("read main command handler");
+    assert!(source.contains("drop_postgres_monitoring_infrastructure"));
+    assert!(source.contains("resolve_stored_credentials"));
+    assert!(source.contains("store_encrypted_credential"));
 }
 
 #[test]

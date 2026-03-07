@@ -199,13 +199,13 @@ uhoh includes two subsystem-style safety layers that feed a shared `event_ledger
 
 **Agent monitor** combines MCP proxy interception with fallback session-log tailing. If your agent talks MCP through uhoh, calls are classified before they execute. When a call matches dangerous patterns and pause mode is enabled, uhoh records a pending approval and waits for `uhoh agent approve` or timeout.
 
-MCP proxy clients must authenticate on connection by sending a first-line JSON-RPC message:
+When `agent.mcp_proxy_require_auth = true`, MCP proxy clients must authenticate on connection by sending a first-line JSON-RPC message:
 
 ```json
 {"jsonrpc":"2.0","id":"uhoh-auth","method":"uhoh/auth","params":{"token":"<token-from-~/.uhoh/server.token>"}}
 ```
 
-The proxy also accepts the raw token value as the first line for minimal clients that cannot emit JSON-RPC before opening an MCP session.
+Raw-token first-line authentication has been removed; clients should send the JSON-RPC `uhoh/auth` handshake when auth is required.
 
 When you launch tools through `uhoh run`, the following environment variables are exported automatically:
 
@@ -453,7 +453,6 @@ There is no standalone CLI search command; use the API or UI.
 
 Every file in a snapshot records a `storage_method`:
 - `reflink`: same bytes, no extra space until modified; best case
-- `hardlink`: shares disk blocks; safe when the original isn't modified in place
 - `copy`: a full copy; always available, but costs space
 - `none`: hash only; content wasn't stored (too big for the relevant size limit, or an error)
 
@@ -575,8 +574,8 @@ On macOS this creates a launchd agent (`~/Library/LaunchAgents/com.uhoh.daemon.p
 - `uhoh agent remove <name>` / `uhoh agent list`
 - `uhoh agent log [name] [--session <id>]`
 - `uhoh agent undo [event-id] [--cascade <event-id>] [--session <id>]`
-- `uhoh agent approve` / `uhoh agent resume` / `uhoh agent setup`
-- `uhoh agent test <name>` / `uhoh agent init` / `uhoh agent update-profiles`
+- `uhoh agent approve` / `uhoh agent deny` / `uhoh agent resume` / `uhoh agent setup`
+- `uhoh agent test <name>` / `uhoh agent init`
 - `uhoh trace <event-id>` / `uhoh blame <path>`
 - `uhoh timeline [--source fs|db|agent] [--since 30m|1h|2d]`
 - `uhoh ledger verify` — verify tamper-evident event ledger hash chain

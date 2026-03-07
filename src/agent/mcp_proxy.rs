@@ -178,6 +178,12 @@ pub enum InterceptResult {
     },
 }
 
+enum ApprovalDecision {
+    Approved,
+    Denied,
+    TimedOut,
+}
+
 async fn intercept_tool_call(
     call: &serde_json::Value,
     uhoh_dir: &Path,
@@ -261,7 +267,7 @@ async fn intercept_tool_call(
                 config.agent.pause_timeout_seconds,
             )?;
 
-            let approved = wait_for_approval(
+            let approval = wait_for_approval(
                 uhoh_dir,
                 &approval_id,
                 &approval_hmac,
@@ -269,23 +275,20 @@ async fn intercept_tool_call(
                 ledger,
             )
             .await?;
-            if !approved {
-                // Determine if this was a timeout or explicit denial
-                let pending_path = pending_approval_path(uhoh_dir, &approval_id);
-                let was_denied = !pending_path.exists();
-                let (event_type, reason) = if was_denied {
-                    (
+            if !matches!(approval, ApprovalDecision::Approved) {
+                let (event_type, reason) = match approval {
+                    ApprovalDecision::Denied => (
                         "dangerous_action_denied",
                         format!("Dangerous tool call '{}' was explicitly denied", tool),
-                    )
-                } else {
-                    (
+                    ),
+                    ApprovalDecision::TimedOut => (
                         "dangerous_action_timeout",
                         format!(
                             "Dangerous tool call '{}' was not approved within {} seconds",
                             tool, config.agent.pause_timeout_seconds
                         ),
-                    )
+                    ),
+                    ApprovalDecision::Approved => unreachable!(),
                 };
                 let mut block_event = new_event("agent", event_type, "warn");
                 block_event.path = path.clone();
@@ -301,10 +304,7 @@ async fn intercept_tool_call(
                     tracing::error!("failed to append {event_type} event: {err}");
                 }
 
-                let call_id = call
-                    .get("id")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
+                let call_id = call.get("id").cloned().unwrap_or(serde_json::Value::Null);
                 return Ok(InterceptResult::Block {
                     id: call_id,
                     reason,
@@ -436,7 +436,7 @@ async fn wait_for_approval(
     expected_response: &str,
     timeout_seconds: u64,
     ledger: &crate::event_ledger::EventLedger,
-) -> Result<bool> {
+) -> Result<ApprovalDecision> {
     let pending = pending_approval_path(uhoh_dir, approval_id);
     let approved = approved_path(uhoh_dir, approval_id);
     let timeout = std::time::Duration::from_secs(timeout_seconds.max(1));
@@ -467,25 +467,21 @@ async fn wait_for_approval(
             }
             let _ = std::fs::remove_file(&approved);
             let _ = std::fs::remove_file(&pending);
-            return Ok(true);
+            return Ok(ApprovalDecision::Approved);
         }
         // Explicit denial: if pending file was deleted externally, treat as rejection
         if !pending.exists() {
-            return Ok(false);
+            return Ok(ApprovalDecision::Denied);
         }
         if std::time::Instant::now() >= deadline {
             let _ = std::fs::remove_file(&pending);
-            return Ok(false);
+            return Ok(ApprovalDecision::TimedOut);
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 
 fn validate_auth_line(line: &str, expected_token: &str) -> Result<bool> {
-    let trimmed = line.trim();
-    if secure_eq(trimmed.as_bytes(), expected_token.as_bytes()) {
-        return Ok(true);
-    }
     let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
         return Ok(false);
     };
@@ -652,7 +648,7 @@ pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_dangerous_tool_call;
+    use super::{is_dangerous_tool_call, validate_auth_line};
 
     #[test]
     fn dangerous_tool_pattern_exact_and_substring() {
@@ -679,5 +675,19 @@ mod tests {
         ));
         assert!(is_dangerous_tool_call("other", Some("/tmp/a"), &patterns));
         assert!(!is_dangerous_tool_call("other", Some("/tmp/b"), &patterns));
+    }
+
+    #[test]
+    fn auth_accepts_jsonrpc_handshake_and_rejects_raw_token() {
+        let token = "abcd1234";
+        let handshake = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "uhoh-auth",
+            "method": "uhoh/auth",
+            "params": { "token": token }
+        })
+        .to_string();
+        assert!(validate_auth_line(&handshake, token).expect("valid handshake"));
+        assert!(!validate_auth_line(token, token).expect("raw token should fail"));
     }
 }

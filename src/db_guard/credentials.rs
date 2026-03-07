@@ -279,7 +279,10 @@ fn encrypt_credentials_map(
             hex_key.zeroize();
             (CRED_KDF_BLAKE3, k)
         } else {
-            (CRED_KDF_ARGON2ID, derive_argon2_key(&master, &salt)?)
+            (
+                CRED_KDF_ARGON2ID,
+                derive_argon2_key_zeroizing(&mut master, &salt)?,
+            )
         };
         master.zeroize();
         result
@@ -369,7 +372,7 @@ fn decrypt_credentials_map(
                 hex_key.zeroize();
                 derived
             }
-            CRED_KDF_ARGON2ID => derive_argon2_key(&master, &salt)?,
+            CRED_KDF_ARGON2ID => derive_argon2_key_zeroizing(&mut master, &salt)?,
             _ => anyhow::bail!("Unsupported credentials file KDF"),
         };
         master.zeroize();
@@ -381,9 +384,7 @@ fn decrypt_credentials_map(
         machine_key.zeroize();
         k
     } else {
-        anyhow::bail!(
-            "UHOH_MASTER_KEY is required to decrypt Argon2-based credentials"
-        );
+        anyhow::bail!("UHOH_MASTER_KEY is required to decrypt Argon2-based credentials");
     };
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
@@ -454,6 +455,12 @@ fn decode_hex_key(v: &str) -> Option<[u8; 32]> {
     let mut out = [0u8; 32];
     hex::decode_to_slice(v, &mut out).ok()?;
     Some(out)
+}
+
+fn derive_argon2_key_zeroizing(master: &mut String, salt: &[u8; 16]) -> Result<[u8; 32]> {
+    let result = derive_argon2_key(master, salt);
+    master.zeroize();
+    result
 }
 
 fn resolve_env_credentials(engine_prefix: &str) -> Option<CredentialMaterial> {

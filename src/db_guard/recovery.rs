@@ -377,8 +377,16 @@ fn decrypt_v2(payload: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {
                     "Encrypted artifact requires UHOH_MASTER_KEY for Argon2id decryption"
                 )
             })?;
-            let derived = derive_argon2_key(&master, &salt)?;
-            master.zeroize();
+            let derived = match derive_argon2_key(&master, &salt) {
+                Ok(v) => {
+                    master.zeroize();
+                    v
+                }
+                Err(e) => {
+                    master.zeroize();
+                    return Err(e);
+                }
+            };
             derived
         }
         ENC_KDF_BLAKE3 => {
