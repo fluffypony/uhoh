@@ -580,17 +580,26 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn safe_remove_dir_tree_rejects_nested_symlink() {
+    fn safe_remove_dir_tree_handles_nested_symlink_safely() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         let victim = project.join("victim");
         let outside = temp.path().join("outside");
         std::fs::create_dir_all(&victim).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("important.txt"), "do not delete").unwrap();
         std::os::unix::fs::symlink(&outside, victim.join("escape")).unwrap();
 
-        let err = safe_remove_dir_tree_within(&project, &victim).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("containing symlink"));
+        // Should succeed: symlink is removed without following it
+        safe_remove_dir_tree_within(&project, &victim).unwrap();
+
+        // The symlink target (outside directory) must NOT have been affected
+        assert!(outside.exists(), "outside directory should still exist");
+        assert!(
+            outside.join("important.txt").exists(),
+            "file in outside directory should be untouched"
+        );
+        // The victim directory itself should be gone
+        assert!(!victim.exists(), "victim directory should be removed");
     }
 }
