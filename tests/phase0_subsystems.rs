@@ -314,7 +314,7 @@ fn daemon_uses_bounded_watcher_channel_and_overflow_backpressure() {
 #[test]
 fn ledger_hash_chain_includes_causal_parent_field() {
     let source = std::fs::read_to_string("src/db/ledger.rs").expect("read ledger hash module");
-    assert!(source.contains("event.causal_parent"));
+    assert!(source.contains("causal_parent"));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 mod credentials;
 mod mysql;
-mod postgres;
+pub mod postgres;
 mod recovery;
 mod sqlite_guard;
 use std::collections::HashMap;
@@ -22,10 +22,10 @@ pub use credentials::scrub_error_message;
 pub use credentials::store_encrypted_credential;
 pub use credentials::store_postgres_credentials_cli;
 pub use credentials::CredentialMaterial;
+pub use postgres::pg_connect_spawn;
 pub use recovery::decrypt_recovery_payload;
 pub use recovery::write_postgres_schema_baseline;
 pub use recovery::write_sqlite_baseline;
-pub use postgres::pg_connect_spawn;
 
 const GUARD_TICK_INTERVAL_SECS: i64 = 30;
 

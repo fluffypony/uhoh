@@ -57,67 +57,7 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
             },
             "tools/list" => JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
-                result: Some(json!({
-                    "tools": [
-                        {
-                            "name": "create_snapshot",
-                            "description": "Create a manual snapshot of a project directory.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "path": { "type": "string" },
-                                    "project_hash": { "type": "string" },
-                                    "message": { "type": "string" }
-                                }
-                            }
-                        },
-                        {
-                            "name": "list_snapshots",
-                            "description": "List snapshots for a project.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "path": { "type": "string" },
-                                    "project_hash": { "type": "string" },
-                                    "limit": { "type": "integer", "default": 20 },
-                                    "offset": { "type": "integer", "default": 0 }
-                                }
-                            }
-                        },
-                        {
-                            "name": "restore_snapshot",
-                            "description": "Restore a project to a previous snapshot. Defaults to dry_run.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "snapshot_id": { "type": "string" },
-                                    "path": { "type": "string" },
-                                    "project_hash": { "type": "string" },
-                                    "target_path": {
-                                        "type": "string",
-                                        "description": "Optional single file path to restore within the snapshot"
-                                    },
-                                    "dry_run": { "type": "boolean", "default": true },
-                                    "confirm": { "type": "boolean", "default": false }
-                                },
-                                "required": ["snapshot_id"]
-                            }
-                        },
-                        {
-                            "name": "uhoh_pre_notify",
-                            "description": "Notify uhoh before an agent action for audit logging.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "agent": { "type": "string" },
-                                    "action": { "type": "string" },
-                                    "path": { "type": "string" }
-                                },
-                                "required": ["agent", "action"]
-                            }
-                        }
-                    ]
-                })),
+                result: Some(crate::mcp_tools::tool_definitions()),
                 error: None,
                 id: request.id,
             },

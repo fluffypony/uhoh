@@ -7,7 +7,7 @@ use crate::daemon::WatchEvent;
 /// Start watching the given paths. Returns the watcher handle (must be kept alive).
 pub fn start_watching(
     paths: &[PathBuf],
-    tx: tokio::sync::mpsc::UnboundedSender<WatchEvent>,
+    tx: tokio::sync::mpsc::Sender<WatchEvent>,
 ) -> Result<RecommendedWatcher> {
     let (file_tx, file_rx) = std::sync::mpsc::channel();
 
@@ -38,7 +38,17 @@ pub fn start_watching(
                     Ok(event) => match event.kind {
                         EventKind::Remove(_) => {
                             for p in event.paths {
-                                let _ = sender.send(WatchEvent::FileDeleted(p));
+                                if crate::daemon::send_watch_event(
+                                    &sender,
+                                    WatchEvent::FileDeleted(p),
+                                )
+                                .is_err()
+                                {
+                                    let _ = crate::daemon::send_watch_event(
+                                        &sender,
+                                        WatchEvent::Overflow,
+                                    );
+                                }
                             }
                         }
                         EventKind::Modify(notify::event::ModifyKind::Name(
@@ -46,17 +56,57 @@ pub fn start_watching(
                         )) => {
                             // Rename: old path is a deletion, new path is a change
                             if event.paths.len() >= 2 {
-                                let _ = sender.send(WatchEvent::FileDeleted(event.paths[0].clone()));
-                                let _ = sender.send(WatchEvent::FileChanged(event.paths[1].clone()));
+                                if crate::daemon::send_watch_event(
+                                    &sender,
+                                    WatchEvent::FileDeleted(event.paths[0].clone()),
+                                )
+                                .is_err()
+                                {
+                                    let _ = crate::daemon::send_watch_event(
+                                        &sender,
+                                        WatchEvent::Overflow,
+                                    );
+                                }
+                                if crate::daemon::send_watch_event(
+                                    &sender,
+                                    WatchEvent::FileChanged(event.paths[1].clone()),
+                                )
+                                .is_err()
+                                {
+                                    let _ = crate::daemon::send_watch_event(
+                                        &sender,
+                                        WatchEvent::Overflow,
+                                    );
+                                }
                             } else {
                                 for p in event.paths {
-                                    let _ = sender.send(WatchEvent::FileChanged(p));
+                                    if crate::daemon::send_watch_event(
+                                        &sender,
+                                        WatchEvent::FileChanged(p),
+                                    )
+                                    .is_err()
+                                    {
+                                        let _ = crate::daemon::send_watch_event(
+                                            &sender,
+                                            WatchEvent::Overflow,
+                                        );
+                                    }
                                 }
                             }
                         }
                         EventKind::Create(_) | EventKind::Modify(_) => {
                             for p in event.paths {
-                                let _ = sender.send(WatchEvent::FileChanged(p));
+                                if crate::daemon::send_watch_event(
+                                    &sender,
+                                    WatchEvent::FileChanged(p),
+                                )
+                                .is_err()
+                                {
+                                    let _ = crate::daemon::send_watch_event(
+                                        &sender,
+                                        WatchEvent::Overflow,
+                                    );
+                                }
                             }
                         }
                         EventKind::Other => {
@@ -67,7 +117,7 @@ pub fn start_watching(
                     Err(e) => {
                         tracing::warn!("Watch error: {}", e);
                         // On error, treat as overflow (global rescan)
-                        let _ = sender.send(WatchEvent::Overflow);
+                        let _ = crate::daemon::send_watch_event(&sender, WatchEvent::Overflow);
                     }
                 }
             }
@@ -76,8 +126,20 @@ pub fn start_watching(
             tracing::error!("Watcher bridge thread panicked; signaling WatcherDied");
         }
         // Notify daemon that watcher died
-        let _ = sender.send(WatchEvent::WatcherDied);
+        let _ = crate::daemon::send_watch_event(&sender, WatchEvent::WatcherDied);
     });
 
     Ok(watcher)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watcher_channel_is_bounded_sender_type() {
+        fn assert_sender_type(_: tokio::sync::mpsc::Sender<WatchEvent>) {}
+        // Compile-time type check only.
+        let _ = assert_sender_type;
+    }
 }

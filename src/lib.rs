@@ -15,6 +15,7 @@ pub mod git;
 pub mod ignore_rules;
 pub mod marker;
 pub mod mcp_stdio;
+pub mod mcp_tools;
 pub mod notifications;
 pub mod operations;
 pub mod platform;

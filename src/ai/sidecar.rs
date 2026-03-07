@@ -24,8 +24,6 @@ impl Backend {
     }
 }
 
-// Deprecated: we no longer pre-bind ephemeral ports to avoid TOCTOU.
-
 fn find_sidecar_binary(uhoh_dir: &Path) -> Result<PathBuf> {
     let sidecar_dir = uhoh_dir.join("sidecar");
     let candidates = [
@@ -82,27 +80,25 @@ fn ensure_idle_monitor_thread() {
         return;
     }
 
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_secs(1));
-            let idle_secs = SIDECAR_IDLE_SECS.load(Ordering::SeqCst).max(60);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let idle_secs = SIDECAR_IDLE_SECS.load(Ordering::SeqCst).max(60);
 
-            let mut kill = false;
-            {
-                let guard = lock_global_sidecar();
-                if let Some(ref gs) = *guard {
-                    if gs.last_used.elapsed().as_secs() >= idle_secs {
-                        kill = true;
-                    }
+        let mut kill = false;
+        {
+            let guard = lock_global_sidecar();
+            if let Some(ref gs) = *guard {
+                if gs.last_used.elapsed().as_secs() >= idle_secs {
+                    kill = true;
                 }
             }
+        }
 
-            if kill {
-                let mut guard = lock_global_sidecar();
-                if let Some(mut gs) = guard.take() {
-                    let _ = gs.child.kill();
-                    let _ = gs.child.wait();
-                }
+        if kill {
+            let mut guard = lock_global_sidecar();
+            if let Some(mut gs) = guard.take() {
+                let _ = gs.child.kill();
+                let _ = gs.child.wait();
             }
         }
     });

@@ -16,7 +16,7 @@ use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
 
 /// Build a connection string with resolved credentials injected.
-pub(crate) fn build_connect_dsn(connection_ref: &str) -> Result<String> {
+pub fn build_connect_dsn(connection_ref: &str) -> Result<String> {
     let creds = credentials::resolve_postgres_credentials(connection_ref)?;
     if connection_ref.starts_with("postgres://") || connection_ref.starts_with("postgresql://") {
         let mut url = url::Url::parse(connection_ref)
@@ -601,7 +601,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 }
 
-fn native_rustls_connector_for_sslmode(sslmode: &str) -> Result<MakeRustlsConnect> {
+pub(crate) fn native_rustls_connector_for_sslmode(sslmode: &str) -> Result<MakeRustlsConnect> {
     let config = match sslmode {
         "verify-ca" | "verify-full" => {
             let mut roots = RootCertStore::empty();
@@ -616,9 +616,7 @@ fn native_rustls_connector_for_sslmode(sslmode: &str) -> Result<MakeRustlsConnec
                 }
             }
             if roots.is_empty() {
-                anyhow::bail!(
-                    "No trusted root certificates available for Postgres TLS connection"
-                )
+                anyhow::bail!("No trusted root certificates available for Postgres TLS connection")
             }
             rustls::ClientConfig::builder()
                 .with_root_certificates(roots)

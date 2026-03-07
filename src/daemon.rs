@@ -315,6 +315,13 @@ pub fn spawn_detached_daemon() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn send_watch_event(
+    tx: &tokio::sync::mpsc::Sender<WatchEvent>,
+    event: WatchEvent,
+) -> std::result::Result<(), tokio::sync::mpsc::error::TrySendError<WatchEvent>> {
+    tx.try_send(event)
+}
+
 /// Stop the daemon by reading PID file and sending signal.
 pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
     let pid_path = uhoh_dir.join("daemon.pid");
@@ -503,9 +510,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     #[cfg(target_os = "linux")]
     check_inotify_limit();
 
-    // Channel for events from watcher (larger buffer to handle bursts)
-    // Unbounded channel avoids blocking OS event thread under bursts
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<WatchEvent>();
+    // Channel for events from watcher (large bounded buffer to cap memory under bursts).
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<WatchEvent>(100_000);
 
     // Load registered projects (initial), dynamic discovery runs on ticks
     let projects = &database.list_projects()?;
@@ -683,7 +689,11 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                                 let tx = event_tx.clone();
                                 tokio::spawn(async move {
                                     tokio::time::sleep(remaining).await;
-                                    let _ = tx.send(WatchEvent::WatcherDied);
+                                    if send_watch_event(&tx, WatchEvent::WatcherDied).is_err() {
+                                        tracing::warn!(
+                                            "Watcher recovery signal dropped due to full event queue"
+                                        );
+                                    }
                                 });
                                 continue;
                             }
@@ -923,7 +933,12 @@ fn restore_marker_active(uhoh_dir: &Path) -> bool {
                 let expected_start = text
                     .lines()
                     .find(|l| l.starts_with("start_ticks="))
-                    .and_then(|l| l.trim_start_matches("start_ticks=").trim().parse::<u64>().ok());
+                    .and_then(|l| {
+                        l.trim_start_matches("start_ticks=")
+                            .trim()
+                            .parse::<u64>()
+                            .ok()
+                    });
                 if !crate::platform::is_uhoh_process_alive_with_start(pid, expected_start) {
                     let _ = std::fs::remove_file(&marker_path);
                     return false;
@@ -1114,6 +1129,10 @@ async fn run_tick_maintenance(
                     .to_string_lossy()
                     .starts_with(".uhoh-restore-tmp-")
                 {
+                    // Never recurse into symlinked staging paths.
+                    if entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false) {
+                        continue;
+                    }
                     if let Ok(meta) = entry.metadata() {
                         let stale = meta
                             .modified()
@@ -2026,7 +2045,6 @@ fn check_inotify_limit() {
 }
 
 #[cfg(not(target_os = "linux"))]
-#[allow(dead_code)]
 fn check_inotify_limit() {}
 
 /// Parse "Mass delete detected: X/Y files (Z%)" from the snapshot message
