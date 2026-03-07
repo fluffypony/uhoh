@@ -317,11 +317,19 @@ pub fn cmd_restore(
             validate_restore_path(project_path, &file.path)?;
             let rel = crate::cas::decode_relpath_to_os(&file.path);
             let abs_path = project_path.join(&rel);
-            // Skip if current file already has the same hash (avoids unnecessary I/O)
+            // Skip if current file already matches target (hash, type, and exec bit)
             if abs_path.exists() && !file.is_symlink {
-                if let Ok(current_hash) = quick_hash_file(&abs_path) {
-                    if current_hash == file.hash {
-                        continue;
+                if let Ok(meta) = std::fs::symlink_metadata(&abs_path) {
+                    // Only skip regular files (not symlinks masquerading as files)
+                    if meta.file_type().is_file() {
+                        let exec_matches = crate::cas::is_executable(&abs_path) == file.executable;
+                        if exec_matches {
+                            if let Ok(current_hash) = quick_hash_file(&abs_path) {
+                                if current_hash == file.hash {
+                                    continue;
+                                }
+                            }
+                        }
                     }
                 }
             }

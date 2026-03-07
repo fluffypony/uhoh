@@ -22,7 +22,7 @@ uhoh watches your project folders, takes content-addressable snapshots as files 
 - Event forensics commands: `uhoh trace <event-id>`, `uhoh blame <path>`, `uhoh timeline [--source ...] [--since ...]`, and `uhoh ledger verify`
 - Database guardian for PostgreSQL and SQLite with baseline/recovery artifact generation, plus MySQL phase-1 schema polling
 - Agent monitoring with MCP proxy interception, session-tail fallback, dangerous-action pause/approve flow, and profile-based registration
-- Bearer token auth for mutating server operations (token stored in `~/.uhoh/server.token`)
+- Bearer token auth for API and MCP endpoints (token stored in `~/.uhoh/server.token`; `/health` exempt)
 - Git integration: pre-commit hooks, snapshot-to-stash, worktree support
 - Safe auto-updates: Ed25519 signatures, DNS TXT fallback, atomically applied
 - GC, compaction, storage limit enforcement, and a `doctor` command
@@ -176,7 +176,7 @@ When enabled, the daemon starts a unified localhost server (default `127.0.0.1:2
 
 WebSocket events: `snapshot_created`, `snapshot_restored`, `ai_summary_completed`, `sidecar_updated`, `mlx_update_status`, `mlx_update_failed`, `db_guard_alert`, `agent_alert`, `project_added`, `project_removed`.
 
-All `/api/*` and `/mcp` requests require a bearer token by default. The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery. The server validates both `Host` and `Origin` headers against expected loopback values to prevent DNS rebinding.
+All `/api/*` and `/mcp` requests require a bearer token by default (`/health` and `/ws` are exempt). The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery. The server validates `Host` headers on all requests. `Origin` headers are validated on `/mcp` and `/ws` endpoints to prevent DNS rebinding.
 
 ## MCP tools
 
@@ -355,7 +355,7 @@ Optional subsystems are feature-gated to keep default builds lean: `audit-trail`
 - `server.bind_address` (default `127.0.0.1`): bind address. Keep loopback-only for security.
 - `server.ui_enabled` (default true): serve Time Machine UI at `/`.
 - `server.mcp_enabled` (default true): serve MCP HTTP endpoint at `/mcp`.
-- `server.require_auth` (default true): require bearer auth for mutating requests.
+- `server.require_auth` (default true): require bearer auth for all `/api/*` and `/mcp` requests (`/health` and `/ws` exempt).
 
 ### Sidecar update settings
 

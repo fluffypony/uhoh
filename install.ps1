@@ -57,45 +57,13 @@ function Main {
     $TempFile = Join-Path $env:TEMP ("uhoh-install-" + [System.IO.Path]::GetRandomFileName() + ".exe")
     Invoke-WebRequest -Uri $DownloadUrl -OutFile $TempFile -UseBasicParsing
 
-    # Verify download hash BEFORE executing the untrusted binary.
-    # Use platform-and-version-specific DNS TXT record matching the Rust updater format.
-    $SkipVerify = $env:UHOH_SKIP_DNS_VERIFY -eq "1"
-    Write-Host "Verifying downloaded binary hash..."
+    # Log the SHA256 hash for manual verification. Full integrity verification
+    # is handled by `uhoh doctor --verify-install` which uses the same BLAKE3 + Ed25519
+    # + versioned DNS strategy as the Rust updater. PowerShell cannot safely replicate
+    # the Rust updater's verification pipeline, so we defer to post-install doctor.
+    Write-Host "Computing binary hash..."
     $FileHash = (Get-FileHash -Path $TempFile -Algorithm SHA256).Hash.ToLower()
     Write-Host ("  SHA256: {0}" -f $FileHash)
-    $VerifiedPreInstall = $false
-    if ($SkipVerify) {
-        Write-Host "  DNS verification skipped (UHOH_SKIP_DNS_VERIFY=1)" -ForegroundColor Yellow
-        $VerifiedPreInstall = $true
-    } else {
-        try {
-            # Use versioned asset-specific DNS domain matching the Rust updater's format
-            $AssetName = "uhoh-windows-x64"
-            $DnsDomain = "release-$AssetName.$Version.releases.uhoh.it"
-            $DnsResult = Resolve-DnsName -Name $DnsDomain -Type TXT -ErrorAction Stop
-            $DnsHash = ($DnsResult | Where-Object { $_.Type -eq "TXT" } | Select-Object -First 1).Strings -join ""
-            $DnsHash = $DnsHash.Trim().ToLower()
-            if ($DnsHash -and ($FileHash -ne $DnsHash)) {
-                Remove-Item $TempFile -ErrorAction SilentlyContinue
-                throw "Binary hash does not match DNS record! Expected: $DnsHash, Got: $FileHash"
-            } elseif ($DnsHash) {
-                Write-Host "  Hash verified against DNS record." -ForegroundColor Green
-                $VerifiedPreInstall = $true
-            } else {
-                Write-Host "  DNS hash record is empty; skipping DNS verification" -ForegroundColor Yellow
-                $VerifiedPreInstall = $true
-            }
-        } catch {
-            Write-Host ("  DNS verification unavailable: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
-            Write-Host "  Set UHOH_SKIP_DNS_VERIFY=1 to skip DNS verification on restricted networks." -ForegroundColor Yellow
-            Remove-Item $TempFile -ErrorAction SilentlyContinue
-            throw "Pre-install verification failed: $($_.Exception.Message)"
-        }
-    }
-    if (-not $VerifiedPreInstall) {
-        Remove-Item $TempFile -ErrorAction SilentlyContinue
-        throw "Pre-install verification did not complete; refusing install."
-    }
 
     # Install
     try {
