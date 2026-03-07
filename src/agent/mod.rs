@@ -244,7 +244,8 @@ impl AgentSubsystem {
         if ctx.config.agent.intercept_enabled {
             // Detect agent set changes and restart the tailer if needed
             let current_names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
-            let agents_changed = self.intercept_started && current_names != self.intercept_agent_names;
+            let agents_changed =
+                self.intercept_started && current_names != self.intercept_agent_names;
             if agents_changed {
                 // Cancel old tailer so it restarts with the updated agent list
                 if let Some(task) = self.intercept_task.take() {
