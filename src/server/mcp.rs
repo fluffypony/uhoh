@@ -83,6 +83,11 @@ pub async fn handle_mcp(
         );
     }
 
+    // JSON-RPC notifications (no id) must not receive responses per spec.
+    if request.id.is_none() {
+        return (StatusCode::ACCEPTED, Json(JsonRpcResponse::success(None, json!({}))));
+    }
+
     let response = match request.method.as_str() {
         "initialize" => JsonRpcResponse::success(
             request.id,
@@ -332,9 +337,10 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
 
     let mut _lock_guard: Option<McpRestoreLockGuard> = None;
     if !dry_run {
-        let lock_key = path
+        // Use hash preferentially to match REST API lock key behavior
+        let lock_key = hash
             .clone()
-            .or(hash.clone())
+            .or(path.clone())
             .unwrap_or_else(|| "default".to_string());
         let mut locks = match restore_locks.lock() {
             Ok(guard) => guard,

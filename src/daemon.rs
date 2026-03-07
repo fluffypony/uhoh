@@ -1200,6 +1200,7 @@ async fn run_tick_maintenance(
         watcher_handle,
         project_states,
         server_event_tx,
+        database,
     );
 
     use std::collections::HashSet;
@@ -2137,6 +2138,7 @@ fn check_for_new_projects(
     watcher: &mut notify::RecommendedWatcher,
     states: &mut HashMap<String, ProjectDaemonState>,
     event_tx: &broadcast::Sender<crate::server::events::ServerEvent>,
+    database: &Database,
 ) {
     for p in projects {
         let key = p.current_path.clone();
@@ -2150,6 +2152,24 @@ fn check_for_new_projects(
                     );
                     continue;
                 } else {
+                    // Seed cached manifest from latest snapshot (same as startup)
+                    let (cached_count, cached_manifest) =
+                        if let Ok(Some(rowid)) = database.latest_snapshot_rowid(&p.hash) {
+                            if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
+                                let file_count = row.file_count;
+                                let manifest: std::collections::BTreeSet<String> =
+                                    if let Ok(files) = database.get_snapshot_files(rowid) {
+                                        files.iter().map(|f| f.path.clone()).collect()
+                                    } else {
+                                        std::collections::BTreeSet::new()
+                                    };
+                                (Some(file_count), Some(manifest))
+                            } else {
+                                (None, None)
+                            }
+                        } else {
+                            (None, None)
+                        };
                     e.insert(ProjectDaemonState {
                         hash: p.hash.clone(),
                         last_snapshot: Instant::now() - Duration::from_secs(60),
@@ -2160,8 +2180,8 @@ fn check_for_new_projects(
                         cumulative_deletes: 0,
                         cumulative_window_start: None,
                         last_emergency_at: None,
-                        cached_prev_file_count: None,
-                        cached_prev_manifest: None,
+                        cached_prev_file_count: cached_count,
+                        cached_prev_manifest: cached_manifest,
                         overflow_occurred: false,
                         restore_completed_at: None,
                     });

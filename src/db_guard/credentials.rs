@@ -85,9 +85,11 @@ pub fn scrub_dsn(dsn: &str) -> String {
         }
         return parsed.to_string();
     }
-    // Fallback for keyword-value DSNs: redact password=... segments
+    // Fallback for keyword-value DSNs: redact password=... segments (case-insensitive)
     dsn.split_whitespace()
-        .filter(|seg| !seg.starts_with("password="))
+        .filter(|seg| {
+            !seg.to_ascii_lowercase().starts_with("password=")
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }

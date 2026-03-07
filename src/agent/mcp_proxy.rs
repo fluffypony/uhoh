@@ -275,42 +275,60 @@ async fn intercept_tool_call(
                 ledger,
             )
             .await?;
-            if !matches!(approval, ApprovalDecision::Approved) {
-                let (event_type, reason) = match approval {
-                    ApprovalDecision::Denied => (
-                        "dangerous_action_denied",
-                        format!("Dangerous tool call '{}' was explicitly denied", tool),
-                    ),
-                    ApprovalDecision::TimedOut => (
-                        "dangerous_action_timeout",
-                        format!(
-                            "Dangerous tool call '{}' was not approved within {} seconds",
-                            tool, config.agent.pause_timeout_seconds
-                        ),
-                    ),
-                    ApprovalDecision::Approved => {
-                        anyhow::bail!("unexpected Approved state after deny check")
-                    }
-                };
-                let mut block_event = new_event("agent", event_type, "warn");
-                block_event.path = path.clone();
-                block_event.detail = Some(
-                    serde_json::json!({
-                        "approval_id": approval_id,
-                        "tool": tool,
-                        "action": "blocked",
-                    })
-                    .to_string(),
-                );
-                if let Err(err) = ledger.append(block_event) {
-                    tracing::error!("failed to append {event_type} event: {err}");
+            match approval {
+                ApprovalDecision::Approved => {
+                    // Approved — fall through to proceed with the call
                 }
-
-                let call_id = call.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                return Ok(InterceptResult::Block {
-                    id: call_id,
-                    reason,
-                });
+                ApprovalDecision::TimedOut => {
+                    // Timeout: auto-resume the action (matching documented behavior)
+                    // and log a timeout event for audit purposes.
+                    let mut timeout_event =
+                        new_event("agent", "dangerous_action_timeout", "warn");
+                    timeout_event.path = path.clone();
+                    timeout_event.detail = Some(
+                        serde_json::json!({
+                            "approval_id": approval_id,
+                            "tool": tool,
+                            "action": "auto_resumed",
+                            "timeout_seconds": config.agent.pause_timeout_seconds,
+                        })
+                        .to_string(),
+                    );
+                    if let Err(err) = ledger.append(timeout_event) {
+                        tracing::error!("failed to append timeout event: {err}");
+                    }
+                    tracing::warn!(
+                        "Dangerous tool call '{}' auto-resumed after {} second timeout",
+                        tool,
+                        config.agent.pause_timeout_seconds
+                    );
+                    // Fall through to proceed with the call
+                }
+                ApprovalDecision::Denied => {
+                    let mut block_event =
+                        new_event("agent", "dangerous_action_denied", "warn");
+                    block_event.path = path.clone();
+                    block_event.detail = Some(
+                        serde_json::json!({
+                            "approval_id": approval_id,
+                            "tool": tool,
+                            "action": "blocked",
+                        })
+                        .to_string(),
+                    );
+                    if let Err(err) = ledger.append(block_event) {
+                        tracing::error!("failed to append denied event: {err}");
+                    }
+                    let call_id =
+                        call.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    return Ok(InterceptResult::Block {
+                        id: call_id,
+                        reason: format!(
+                            "Dangerous tool call '{}' was explicitly denied",
+                            tool
+                        ),
+                    });
+                }
             }
         }
     }

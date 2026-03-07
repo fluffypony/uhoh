@@ -35,6 +35,11 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
             }
         };
 
+        // JSON-RPC notifications (no id) must not receive a response per spec.
+        if request.id.is_none() {
+            continue;
+        }
+
         let response = match request.method.as_str() {
             "initialize" => JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),

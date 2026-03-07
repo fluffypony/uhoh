@@ -684,11 +684,7 @@ fn extract_sslmode(connection_ref: &str) -> Option<&'static str> {
 }
 
 fn scrub_ref(connection_ref: &str) -> String {
-    connection_ref
-        .split('@')
-        .last()
-        .unwrap_or(connection_ref)
-        .to_string()
+    crate::db_guard::credentials::scrub_dsn(connection_ref)
 }
 
 pub(crate) fn connection_requires_tls(connection_ref: &str) -> bool {
