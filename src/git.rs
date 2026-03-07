@@ -269,10 +269,10 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
 
     let hook_path = hooks_dir.join("pre-commit");
 
-    // Try PATH first, then current exe path, then common install locations.
-    // GUI clients may have stripped PATH so we need robust fallback.
-    let exe_str = if which("uhoh").is_ok() {
-        "uhoh".to_string()
+    // Always resolve to an absolute path for hooks. GUI Git clients often have
+    // stripped PATH, so bare "uhoh" would fail even if it was in PATH at install time.
+    let exe_str = if let Ok(path) = which("uhoh") {
+        path.to_string_lossy().to_string()
     } else if let Ok(exe) = std::env::current_exe() {
         exe.to_string_lossy().to_string()
     } else {

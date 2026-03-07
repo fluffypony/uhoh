@@ -412,13 +412,13 @@ pub fn create_snapshot(
             if let Some(cached) = prev_files.get(rel_path) {
                 let fs_mtime_ms = mtime_to_millis(mtime);
                 let cached_mtime_ms = mtime_to_millis(cached.mtime);
-                if cached.size == size && cached_mtime_ms == fs_mtime_ms {
+                if cached.size == size && cached_mtime_ms == fs_mtime_ms && cached.executable == executable {
                     files_for_manifest.push(crate::db::SnapFileEntry {
                         path: rel_path.clone(),
                         hash: cached.hash.clone(),
                         size: cached.size,
                         stored: cached.stored,
-                        executable: cached.executable,
+                        executable,
                         mtime: Some(cached_mtime_ms),
                         storage_method: cached.storage_method,
                         is_symlink: cached.is_symlink,
