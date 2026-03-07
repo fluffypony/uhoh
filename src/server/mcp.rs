@@ -80,7 +80,7 @@ pub async fn handle_mcp(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(request): Json<JsonRpcRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // JSON-RPC notifications (no id) must not receive JSON-RPC responses.
     // Check this first so invalid host/origin/jsonrpc metadata on notifications
     // does not produce `id: null` error payloads.
@@ -96,7 +96,8 @@ pub async fn handle_mcp(
                 -32600,
                 "Invalid Host header".to_string(),
             )),
-        );
+        )
+            .into_response();
     }
 
     if !super::auth::validate_origin(&headers) {
@@ -107,7 +108,8 @@ pub async fn handle_mcp(
                 -32600,
                 "Invalid Origin header".to_string(),
             )),
-        );
+        )
+            .into_response();
     }
 
     if request.jsonrpc != "2.0" {
@@ -118,7 +120,8 @@ pub async fn handle_mcp(
                 -32600,
                 "Invalid jsonrpc version".to_string(),
             )),
-        );
+        )
+            .into_response();
     }
 
     let response = match request.method.as_str() {
@@ -144,7 +147,7 @@ pub async fn handle_mcp(
         ),
     };
 
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 async fn handle_tools_call(
