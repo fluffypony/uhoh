@@ -447,7 +447,11 @@ async fn main() -> Result<()> {
             if verify_install {
                 return run_verify_install().await;
             }
-            run_doctor(&uhoh, database.clone_handle(), fix, restore_latest).await?;
+            // Drop the main database handle so run_doctor has sole ownership
+            // of the pool — necessary for safe backup restore on Windows.
+            drop(database);
+            let doctor_db = db::Database::open(&uhoh.join("uhoh.db"))?;
+            run_doctor(&uhoh, doctor_db, fix, restore_latest).await?;
         }
 
         Commands::Status => {
