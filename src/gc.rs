@@ -96,6 +96,18 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
 
     for path in &orphaned {
         let sz = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        // Clear read-only attribute before deletion (blobs are set read-only;
+        // on Windows this is mandatory or remove_file fails).
+        #[cfg(not(unix))]
+        {
+            if let Ok(meta) = std::fs::metadata(path) {
+                let mut perms = meta.permissions();
+                if perms.readonly() {
+                    perms.set_readonly(false);
+                    let _ = std::fs::set_permissions(path, perms);
+                }
+            }
+        }
         std::fs::remove_file(path)
             .with_context(|| format!("Failed to delete: {}", path.display()))?;
         // Decrement cached blob bytes counter if available

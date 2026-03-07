@@ -126,7 +126,7 @@ main() {
   case ":${PATH}:" in *":${INSTALL_DIR}:"*) : ;; *)
     echo ""
     echo -e "${YELLOW}Warning:${NC} ${INSTALL_DIR} is not in your PATH."
-    local EXPORT_LINE="export PATH=\"${INSTALL_DIR}:$PATH\""
+    local EXPORT_LINE='export PATH="'"${INSTALL_DIR}"':$PATH"'
     for RC in "${HOME}/.bashrc" "${HOME}/.zshrc" "${HOME}/.profile"; do
       if [ -f "$RC" ] && ! grep -qF "${INSTALL_DIR}" "$RC"; then
         echo "" >> "$RC"; echo "# Added by uhoh installer" >> "$RC"; echo "$EXPORT_LINE" >> "$RC"

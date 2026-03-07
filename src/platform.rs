@@ -137,7 +137,8 @@ fn install_systemd_user_unit() -> Result<()> {
     let bin_dir = uhoh.join("bin");
     std::fs::create_dir_all(&bin_dir)?;
     let target_bin = bin_dir.join("uhoh");
-    std::fs::copy(&current_exe, &target_bin).ok();
+    std::fs::copy(&current_exe, &target_bin)
+        .with_context(|| format!("Failed to copy binary to {}", target_bin.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

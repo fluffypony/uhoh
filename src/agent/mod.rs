@@ -132,6 +132,16 @@ impl Subsystem for AgentSubsystem {
         if let Some(task) = self.proxy_task.take() {
             let _ = task.await;
         }
+        // Cancel and await intercept tailer task
+        if let Some(task) = self.intercept_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        // Cancel and await fanotify monitor task
+        if let Some(task) = self.fanotify_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         Ok(())
     }
 
@@ -268,7 +278,7 @@ impl AgentSubsystem {
         }
 
         #[cfg(all(target_os = "linux", feature = "audit-trail"))]
-        if ctx.config.agent.intercept_enabled && !self.fanotify_started {
+        if ctx.config.agent.audit_enabled && ctx.config.agent.intercept_enabled && !self.fanotify_started {
             self.fanotify_started = true;
             let ctx_cl = ctx.clone();
             let agents_cl = agents.to_vec();

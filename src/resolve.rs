@@ -29,11 +29,13 @@ pub fn resolve_project(
             {
                 return Ok(project.clone());
             }
-            for project in &projects {
-                let project_path = Path::new(&project.current_path);
-                if canonical.starts_with(project_path) {
-                    return Ok(project.clone());
-                }
+            // Return the most specific (deepest path) match for nested projects
+            let best = projects
+                .iter()
+                .filter(|p| canonical.starts_with(Path::new(&p.current_path)))
+                .max_by_key(|p| p.current_path.len());
+            if let Some(project) = best {
+                return Ok(project.clone());
             }
             bail!("Path '{canonical_s}' is not within a tracked project");
         }
@@ -56,11 +58,16 @@ pub fn resolve_project(
     if let Some(default_path) = default_path {
         let canonical = dunce::canonicalize(default_path)
             .with_context(|| format!("Cannot resolve default path: {}", default_path.display()))?;
-        for project in &projects {
-            let project_path = Path::new(&project.current_path);
-            if canonical.starts_with(project_path) || project_path.starts_with(&canonical) {
-                return Ok(project.clone());
-            }
+        // Return the most specific (deepest path) match for nested projects
+        let best = projects
+            .iter()
+            .filter(|p| {
+                let pp = Path::new(&p.current_path);
+                canonical.starts_with(pp) || pp.starts_with(&canonical)
+            })
+            .max_by_key(|p| p.current_path.len());
+        if let Some(project) = best {
+            return Ok(project.clone());
         }
     }
 

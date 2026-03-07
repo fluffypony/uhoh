@@ -235,12 +235,34 @@ pub fn cmd_gitstash(
     Ok(())
 }
 
-/// Install a pre-commit hook (checks for existing hooks first).
-pub fn install_hook(project_path: &Path) -> Result<()> {
-    let git_dir = project_path.join(".git");
-    if !git_dir.exists() {
+/// Resolve the actual git directory, handling worktrees where `.git` is a file
+/// containing `gitdir: <path>` pointing to the real gitdir.
+fn resolve_git_dir(project_path: &Path) -> Result<std::path::PathBuf> {
+    let git_path = project_path.join(".git");
+    if !git_path.exists() {
         bail!("Not a git repository.");
     }
+    if git_path.is_file() {
+        // Worktree: .git is a file with "gitdir: <actual-gitdir-path>"
+        let content = std::fs::read_to_string(&git_path)
+            .with_context(|| format!("Failed to read .git file: {}", git_path.display()))?;
+        if let Some(gitdir) = content.trim().strip_prefix("gitdir: ") {
+            let resolved = if Path::new(gitdir).is_absolute() {
+                std::path::PathBuf::from(gitdir)
+            } else {
+                project_path.join(gitdir)
+            };
+            return dunce::canonicalize(&resolved)
+                .with_context(|| format!("Failed to resolve gitdir: {gitdir}"));
+        }
+        bail!("Invalid .git file format in {}", git_path.display());
+    }
+    Ok(git_path)
+}
+
+/// Install a pre-commit hook (checks for existing hooks first).
+pub fn install_hook(project_path: &Path) -> Result<()> {
+    let git_dir = resolve_git_dir(project_path)?;
 
     let hooks_dir = git_dir.join("hooks");
     std::fs::create_dir_all(&hooks_dir)?;
@@ -295,7 +317,8 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
 }
 
 pub fn remove_hook(project_path: &Path) -> Result<()> {
-    let hook_path = project_path.join(".git/hooks/pre-commit");
+    let git_dir = resolve_git_dir(project_path)?;
+    let hook_path = git_dir.join("hooks/pre-commit");
     if !hook_path.exists() {
         println!("No pre-commit hook found.");
         return Ok(());

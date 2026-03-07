@@ -72,6 +72,17 @@ pub async fn handle_mcp(
         );
     }
 
+    if !super::auth::validate_origin(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(JsonRpcResponse::error(
+                request.id,
+                -32600,
+                "Invalid Origin header".to_string(),
+            )),
+        );
+    }
+
     if request.jsonrpc != "2.0" {
         return (
             StatusCode::BAD_REQUEST,

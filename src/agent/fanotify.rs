@@ -13,6 +13,8 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+use std::os::unix::io::FromRawFd;
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use std::path::{Path, PathBuf};
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
@@ -183,7 +185,7 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
                         if sec_count >= max_per_sec {
                             dropped = dropped.saturating_add(1);
                         } else if let Err(err) =
-                            capture_preimage(&ctx.uhoh_dir, path, metadata.pid, &mut batch)
+                            capture_preimage_from_fd(&ctx.uhoh_dir, path, metadata.fd, metadata.pid, &mut batch)
                         {
                             tracing::warn!("fanotify pre-image capture failed: {}", err);
                         } else {
@@ -251,18 +253,44 @@ fn path_within(root: &Path, path: &Path) -> bool {
 }
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
-fn capture_preimage(
+const PREIMAGE_MAX_BYTES: u64 = 5 * 1024 * 1024; // 5 MiB cap for pre-image capture
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn capture_preimage_from_fd(
     uhoh_dir: &Path,
     path: &Path,
+    event_fd: i32,
     pid: i32,
     batch: &mut VecDeque<PendingAudit>,
 ) -> Result<()> {
-    if !path.exists() || !path.is_file() {
+    if !path.is_file() {
         return Ok(());
     }
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open pre-image source: {}", path.display()))?;
-    let mut bytes = Vec::new();
+    // Use dup() on the fanotify-provided fd instead of File::open() to avoid
+    // generating a second FAN_OPEN_PERM event that would deadlock the monitor.
+    let dup_fd = unsafe { libc::dup(event_fd) };
+    if dup_fd < 0 {
+        anyhow::bail!("dup() failed for pre-image fd");
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+    // Check file size before reading to prevent OOM
+    let file_len = file
+        .metadata()
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if file_len > PREIMAGE_MAX_BYTES {
+        tracing::debug!(
+            "Skipping pre-image for {} ({} bytes > {} limit)",
+            path.display(),
+            file_len,
+            PREIMAGE_MAX_BYTES,
+        );
+        return Ok(());
+    }
+    // Seek to start in case fd position is not at 0
+    use std::io::Seek;
+    let _ = file.seek(std::io::SeekFrom::Start(0));
+    let mut bytes = Vec::with_capacity(file_len as usize);
     file.read_to_end(&mut bytes)
         .with_context(|| format!("Failed reading pre-image source: {}", path.display()))?;
     let (hash, _) = crate::cas::store_blob(&uhoh_dir.join("blobs"), &bytes)?;

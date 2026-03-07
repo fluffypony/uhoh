@@ -538,11 +538,12 @@ fn encode_relpath_bytes(rel: &Path) -> String {
     {
         use std::os::windows::ffi::OsStrExt;
         let wide: Vec<u16> = rel.as_os_str().encode_wide().collect();
-        let bytes: &[u8] =
-            unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
+        // Use explicit little-endian conversion instead of unsafe pointer cast
+        // to guarantee consistent encoding regardless of host CPU endianness.
+        let bytes: Vec<u8> = wide.iter().flat_map(|w| w.to_le_bytes()).collect();
         format!(
             "b64:{}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes)
         )
     }
     #[cfg(not(any(unix, windows)))]

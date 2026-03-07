@@ -51,43 +51,56 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
         .create()?;
     ruleset.set_no_new_privs(true);
 
-    let mut allow_paths = vec![
+    // System paths: read-only access (prevents escalation even with root)
+    let system_paths = vec![
         "/usr".to_string(),
+        "/bin".to_string(),
+        "/sbin".to_string(),
         "/lib".to_string(),
-        "/lib64".to_string(), // Required for x86_64 Linux dynamic linker
+        "/lib64".to_string(),
         "/etc".to_string(),
         "/etc/ld.so.cache".to_string(),
-        "/tmp".to_string(),
         "/dev/null".to_string(),
         "/dev/urandom".to_string(),
         "/proc/self".to_string(),
     ];
-    if let Ok(cwd) = std::env::current_dir() {
-        allow_paths.push(cwd.display().to_string());
-    }
-    allow_paths.push(crate::uhoh_dir().display().to_string());
-    allow_paths.extend(profile.data_dirs.clone());
-    allow_paths.extend(profile.memory_dirs.clone());
-    allow_paths.extend(profile.config_files.clone());
-    allow_paths.extend(profile.personality_files.clone());
 
-    let refs = allow_paths
-        .iter()
-        .map(|path| crate::util::expand_home(path))
-        .filter_map(|path| {
-            let candidate = std::path::PathBuf::from(&path);
-            if candidate.exists() {
-                dunce::canonicalize(&candidate).ok().or(Some(candidate))
-            } else {
-                None
-            }
-        })
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    ruleset = ruleset.add_rules(path_beneath_rules(&refs, AccessFs::from_all(abi)))?;
+    // Workspace paths: full read/write access
+    let mut workspace_paths = vec!["/tmp".to_string()];
+    if let Ok(cwd) = std::env::current_dir() {
+        workspace_paths.push(cwd.display().to_string());
+    }
+    workspace_paths.push(crate::uhoh_dir().display().to_string());
+    workspace_paths.extend(profile.data_dirs.clone());
+    workspace_paths.extend(profile.memory_dirs.clone());
+    workspace_paths.extend(profile.config_files.clone());
+    workspace_paths.extend(profile.personality_files.clone());
+
+    let canonicalize_paths = |paths: &[String]| -> Vec<String> {
+        paths
+            .iter()
+            .map(|p| crate::util::expand_home(p))
+            .filter_map(|p| {
+                let candidate = std::path::PathBuf::from(&p);
+                if candidate.exists() {
+                    dunce::canonicalize(&candidate).ok().or(Some(candidate))
+                } else {
+                    None
+                }
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|p| p.display().to_string())
+            .collect()
+    };
+
+    let sys_refs = canonicalize_paths(&system_paths);
+    let sys_strs: Vec<&str> = sys_refs.iter().map(String::as_str).collect();
+    ruleset = ruleset.add_rules(path_beneath_rules(&sys_strs, AccessFs::from_read(abi)))?;
+
+    let ws_refs = canonicalize_paths(&workspace_paths);
+    let ws_strs: Vec<&str> = ws_refs.iter().map(String::as_str).collect();
+    ruleset = ruleset.add_rules(path_beneath_rules(&ws_strs, AccessFs::from_all(abi)))?;
     let status = ruleset.restrict_self()?;
     log_restriction_status(&status.restriction);
     match status.ruleset {

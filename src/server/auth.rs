@@ -131,3 +131,26 @@ pub fn validate_host(headers: &HeaderMap, expected_port: u16) -> bool {
     }
     true
 }
+
+/// Validate the Origin header to defend against DNS rebinding attacks.
+/// If an Origin header is present, it must be a loopback address.
+/// Requests without an Origin header are allowed (non-browser clients).
+pub fn validate_origin(headers: &HeaderMap) -> bool {
+    if let Some(origin) = headers.get("origin") {
+        if let Ok(origin_s) = origin.to_str() {
+            let allowed_prefixes = [
+                "http://127.0.0.1",
+                "http://localhost",
+                "https://127.0.0.1",
+                "https://localhost",
+                "http://[::1]",
+                "https://[::1]",
+            ];
+            return allowed_prefixes
+                .iter()
+                .any(|prefix| origin_s.starts_with(prefix));
+        }
+        return false;
+    }
+    true // No Origin header (non-browser client) — allow
+}
