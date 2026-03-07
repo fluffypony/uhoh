@@ -43,7 +43,7 @@ pub async fn websocket_handler(
     // If HTTP auth is enabled, require the same bearer token for /ws via
     // Authorization or Sec-WebSocket-Protocol, since /ws is auth-middleware exempt.
     if state.config.server.require_auth {
-        if !websocket_auth_ok(&headers, query.token.as_deref(), &state.uhoh_dir) {
+        if !websocket_auth_ok(&headers, query.token.as_deref(), state.cached_token.as_deref()) {
             return Err(StatusCode::UNAUTHORIZED);
         }
     }
@@ -60,15 +60,12 @@ pub async fn websocket_handler(
 fn websocket_auth_ok(
     headers: &HeaderMap,
     query_token: Option<&str>,
-    uhoh_dir: &std::path::Path,
+    cached_token: Option<&str>,
 ) -> bool {
-    let expected = match std::fs::read_to_string(uhoh_dir.join("server.token")) {
-        Ok(token) => token.trim().to_string(),
-        Err(_) => return false,
+    let expected = match cached_token {
+        Some(t) if !t.is_empty() => t,
+        _ => return false,
     };
-    if expected.is_empty() {
-        return false;
-    }
 
     if let Some(auth_header) = headers.get("authorization") {
         if let Ok(auth) = auth_header.to_str() {

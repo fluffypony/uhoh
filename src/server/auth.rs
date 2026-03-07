@@ -58,7 +58,7 @@ pub async fn auth_middleware(
 
     // Exempt health, WebSocket, and UI HTML routes from auth.
     // The UI page must load before the JS auth flow can prompt for a token.
-    if path == "/health" || path == "/ws" || (!path.starts_with("/api/") && path != "/mcp") {
+    if path == "/health" || path == "/api/v1/health" || path == "/ws" || (!path.starts_with("/api/") && path != "/mcp") {
         return next.run(request).await;
     }
 

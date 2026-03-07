@@ -33,6 +33,8 @@ pub struct AppState {
     pub restore_in_progress: Arc<std::sync::atomic::AtomicBool>,
     pub restore_locks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
+    /// Cached server auth token, read once at startup.
+    pub cached_token: Option<String>,
 }
 
 pub async fn start_server(
@@ -70,6 +72,7 @@ pub async fn start_server(
         restore_in_progress,
         restore_locks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         subsystem_manager,
+        cached_token: Some(auth_token.clone()),
     };
 
     let mut app = Router::new();
@@ -106,7 +109,8 @@ pub async fn start_server(
         .route("/api/v1/search", get(api::search))
         .route("/api/v1/projects/{hash}/timeline", get(api::get_timeline))
         .route("/ws", get(ws::websocket_handler))
-        .route("/health", get(health_check));
+        .route("/health", get(health_check))
+        .route("/api/v1/health", get(health_check));
 
     if config.ui_enabled {
         app = app.fallback(get(serve_ui));

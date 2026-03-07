@@ -283,21 +283,30 @@ pub fn store_blob_from_file(
                     .unwrap_or_default()
                     .as_nanos()
             ));
-            let cfile = create_restricted_file(&compressed_tmp)?;
-            let mut cwriter = std::io::BufWriter::new(cfile);
-            cwriter.write_all(COMPRESSION_MAGIC)?;
-            let mut encoder = zstd::stream::write::Encoder::new(cwriter, level)?;
-
-            loop {
-                let n = src_reader.read(&mut buf)?;
-                if n == 0 {
-                    break;
+            // Ensure compressed_tmp is cleaned up if compression fails
+            let compress_result: anyhow::Result<_> = (|| {
+                let cfile = create_restricted_file(&compressed_tmp)?;
+                let mut cwriter = std::io::BufWriter::new(cfile);
+                cwriter.write_all(COMPRESSION_MAGIC)?;
+                let mut encoder = zstd::stream::write::Encoder::new(cwriter, level)?;
+                loop {
+                    let n = src_reader.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    encoder.write_all(&buf[..n])?;
                 }
-                encoder.write_all(&buf[..n])?;
-            }
-
-            let mut writer = encoder.finish()?;
-            writer.flush()?;
+                let mut writer = encoder.finish()?;
+                writer.flush()?;
+                Ok(writer)
+            })();
+            let writer = match compress_result {
+                Ok(w) => w,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&compressed_tmp);
+                    return Err(e);
+                }
+            };
             let file_handle = writer
                 .into_inner()
                 .map_err(|e| anyhow::anyhow!("Failed to get temp file handle: {e}"))?;
