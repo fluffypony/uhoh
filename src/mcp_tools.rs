@@ -1,6 +1,10 @@
 use serde_json::json;
 
 /// Shared MCP tool definitions used by both HTTP and STDIO transports.
+///
+/// Tool *handling* is currently duplicated between `server/mcp.rs` (handle_tools_call)
+/// and `mcp_stdio.rs` (handle_stdio_tool_call) due to async/sync transport differences.
+/// When modifying tool behavior, update both implementations to keep them in sync.
 pub fn tool_definitions() -> serde_json::Value {
     json!({
         "tools": [

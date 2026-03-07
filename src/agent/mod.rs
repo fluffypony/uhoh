@@ -8,7 +8,7 @@ mod sandbox;
 mod undo;
 use std::path::Path;
 
-pub use profiles::load_agent_profile;
+pub use profiles::{load_agent_profile, resolve_session_log_path};
 pub use sandbox::{apply_landlock, sandbox_supported};
 pub use undo::resolve_event;
 

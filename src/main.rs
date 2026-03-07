@@ -1803,11 +1803,41 @@ tool_call_format = "jsonl"
             );
         }
         AgentAction::Test { name } => {
-            let exists = database.list_agents()?.into_iter().any(|a| a.name == *name);
-            if !exists {
+            let agent = database
+                .list_agents()?
+                .into_iter()
+                .find(|a| a.name == *name);
+            let Some(agent) = agent else {
                 anyhow::bail!("Agent not registered");
-            }
+            };
             println!("Agent '{name}' is registered");
+
+            // Validate profile TOML
+            let profile_path = std::path::Path::new(&agent.profile_path);
+            if profile_path.exists() {
+                match uhoh::agent::load_agent_profile(profile_path) {
+                    Ok(profile) => {
+                        println!("  Profile: {} (OK)", profile_path.display());
+                        // Check session log path
+                        if !profile.session_log_pattern.is_empty() {
+                            match uhoh::agent::resolve_session_log_path(
+                                &profile.session_log_pattern,
+                            ) {
+                                Ok(Some(p)) => {
+                                    println!("  Session log: {} (found)", p.display())
+                                }
+                                Ok(None) => {
+                                    println!("  Session log: no match for pattern '{}'", profile.session_log_pattern)
+                                }
+                                Err(e) => println!("  Session log: error resolving: {e}"),
+                            }
+                        }
+                    }
+                    Err(e) => println!("  Profile: {} (ERROR: {e})", profile_path.display()),
+                }
+            } else {
+                println!("  Profile: {} (NOT FOUND)", profile_path.display());
+            }
         }
         AgentAction::Init => {
             let profile_dir = uhoh::uhoh_dir().join("agents");

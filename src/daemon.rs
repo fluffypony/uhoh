@@ -361,6 +361,9 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        if crate::platform::is_uhoh_process_alive_with_start(pid, expected_start) {
+            eprintln!("Warning: daemon process {} did not exit after SIGTERM. PID file removed but process may still be running.", pid);
+        }
     }
 
     #[cfg(windows)]
