@@ -29,10 +29,7 @@ pub fn start_watching(
     }
 
     // Helper: send event, return false if receiver dropped (daemon exiting)
-    fn send(
-        tx: &tokio::sync::mpsc::Sender<WatchEvent>,
-        event: WatchEvent,
-    ) -> bool {
+    fn send(tx: &tokio::sync::mpsc::Sender<WatchEvent>, event: WatchEvent) -> bool {
         crate::daemon::send_watch_event(tx, event).is_ok()
     }
 
@@ -57,16 +54,10 @@ pub fn start_watching(
                             notify::event::RenameMode::Both,
                         )) => {
                             if event.paths.len() >= 2 {
-                                if !send(
-                                    &sender,
-                                    WatchEvent::FileDeleted(event.paths[0].clone()),
-                                ) {
+                                if !send(&sender, WatchEvent::FileDeleted(event.paths[0].clone())) {
                                     return;
                                 }
-                                if !send(
-                                    &sender,
-                                    WatchEvent::FileChanged(event.paths[1].clone()),
-                                ) {
+                                if !send(&sender, WatchEvent::FileChanged(event.paths[1].clone())) {
                                     return;
                                 }
                             } else {

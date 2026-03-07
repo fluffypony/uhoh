@@ -148,9 +148,8 @@ fn safe_remove_dir_tree_within(project_base: &Path, target: &Path) -> Result<()>
             let meta = std::fs::symlink_metadata(&path)?;
             if meta.file_type().is_symlink() {
                 // Remove the symlink itself, never follow it
-                std::fs::remove_file(&path).with_context(|| {
-                    format!("Failed to remove symlink: {}", path.display())
-                })?;
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("Failed to remove symlink: {}", path.display()))?;
             } else if meta.is_dir() {
                 // Verify the real directory is still within project bounds
                 if let Ok(canon) = dunce::canonicalize(&path) {

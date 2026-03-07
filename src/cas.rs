@@ -649,9 +649,7 @@ pub fn cleanup_stale_temp_files(blob_root: &Path, max_age: std::time::Duration) 
     let now = std::time::SystemTime::now();
 
     let is_temp_file = |name: &str| -> bool {
-        name.starts_with(".tmp.")
-            || name.starts_with(".blob.")
-            || name.starts_with(".cblob.")
+        name.starts_with(".tmp.") || name.starts_with(".blob.") || name.starts_with(".cblob.")
     };
 
     let cleanup_dir = |dir: &Path| {

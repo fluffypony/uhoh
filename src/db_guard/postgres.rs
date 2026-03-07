@@ -343,8 +343,9 @@ fn poll_delete_count(connection_ref: &str, window_seconds: i64, tables_csv: &str
             if table_list.is_empty() {
                 return Ok(0);
             }
-            let placeholders: Vec<String> =
-                (2..=table_list.len() + 1).map(|i| format!("${i}")).collect();
+            let placeholders: Vec<String> = (2..=table_list.len() + 1)
+                .map(|i| format!("${i}"))
+                .collect();
             let sql = format!(
                 "SELECT COALESCE(SUM(delete_count), 0) FROM _uhoh_delete_counts \
                  WHERE ts > now() - ($1::text || ' seconds')::interval \

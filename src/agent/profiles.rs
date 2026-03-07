@@ -69,11 +69,7 @@ pub fn validate_profile_path(path: &std::path::Path) -> Result<()> {
         anyhow::bail!("Profile path must be inside the user home directory");
     }
 
-    let mut forbidden = vec![
-        home.join(".ssh"),
-        home.join(".gnupg"),
-        home.join(".aws"),
-    ];
+    let mut forbidden = vec![home.join(".ssh"), home.join(".gnupg"), home.join(".aws")];
     #[cfg(target_os = "macos")]
     forbidden.push(home.join("Library/Application Support"));
     for forbidden_path in forbidden {

@@ -32,7 +32,11 @@ pub async fn websocket_handler(
     // If HTTP auth is enabled, require the same bearer token for /ws via
     // Authorization or Sec-WebSocket-Protocol, since /ws is auth-middleware exempt.
     if state.config.server.require_auth {
-        if !websocket_auth_ok(&headers, query.token.as_deref(), state.cached_token.as_deref()) {
+        if !websocket_auth_ok(
+            &headers,
+            query.token.as_deref(),
+            state.cached_token.as_deref(),
+        ) {
             return Err(StatusCode::UNAUTHORIZED);
         }
     }

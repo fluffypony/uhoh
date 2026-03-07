@@ -98,12 +98,10 @@ async fn handle_connection_async(
 
     if !authed {
         // Read the first line for auth handshake before connecting upstream
-        let auth_line = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            client_lines.next_line(),
-        )
-        .await
-        .context("MCP proxy auth timeout")??;
+        let auth_line =
+            tokio::time::timeout(std::time::Duration::from_secs(30), client_lines.next_line())
+                .await
+                .context("MCP proxy auth timeout")??;
         if let Some(line) = auth_line {
             authed = validate_auth_line(&line, &expected_token)?;
         }
@@ -302,8 +300,7 @@ async fn intercept_tool_call(
                 ApprovalDecision::TimedOut => {
                     // Timeout: auto-resume the action (matching documented behavior)
                     // and log a timeout event for audit purposes.
-                    let mut timeout_event =
-                        new_event("agent", "dangerous_action_timeout", "warn");
+                    let mut timeout_event = new_event("agent", "dangerous_action_timeout", "warn");
                     timeout_event.path = path.clone();
                     timeout_event.detail = Some(
                         serde_json::json!({
@@ -325,8 +322,7 @@ async fn intercept_tool_call(
                     // Fall through to proceed with the call
                 }
                 ApprovalDecision::Denied => {
-                    let mut block_event =
-                        new_event("agent", "dangerous_action_denied", "warn");
+                    let mut block_event = new_event("agent", "dangerous_action_denied", "warn");
                     block_event.path = path.clone();
                     block_event.detail = Some(
                         serde_json::json!({
@@ -339,14 +335,10 @@ async fn intercept_tool_call(
                     if let Err(err) = ledger.append(block_event) {
                         tracing::error!("failed to append denied event: {err}");
                     }
-                    let call_id =
-                        call.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let call_id = call.get("id").cloned().unwrap_or(serde_json::Value::Null);
                     return Ok(InterceptResult::Block {
                         id: call_id,
-                        reason: format!(
-                            "Dangerous tool call '{}' was explicitly denied",
-                            tool
-                        ),
+                        reason: format!("Dangerous tool call '{}' was explicitly denied", tool),
                     });
                 }
             }
@@ -700,13 +692,10 @@ pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(
-                    &token_path,
-                    std::fs::Permissions::from_mode(0o600),
-                )
-                .with_context(|| {
-                    format!("Failed to set permissions on {}", token_path.display())
-                })?;
+                std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
+                    .with_context(|| {
+                        format!("Failed to set permissions on {}", token_path.display())
+                    })?;
             }
             Ok(token)
         }
@@ -720,9 +709,7 @@ pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
             }
             Ok(token)
         }
-        Err(e) => {
-            Err(e).with_context(|| format!("Failed creating {}", token_path.display()))
-        }
+        Err(e) => Err(e).with_context(|| format!("Failed creating {}", token_path.display())),
     }
 }
 

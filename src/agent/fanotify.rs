@@ -184,9 +184,13 @@ pub fn run_permission_monitor(ctx: &SubsystemContext, _agents: &[AgentEntry]) ->
                         }
                         if sec_count >= max_per_sec {
                             dropped = dropped.saturating_add(1);
-                        } else if let Err(err) =
-                            capture_preimage_from_fd(&ctx.uhoh_dir, path, metadata.fd, metadata.pid, &mut batch)
-                        {
+                        } else if let Err(err) = capture_preimage_from_fd(
+                            &ctx.uhoh_dir,
+                            path,
+                            metadata.fd,
+                            metadata.pid,
+                            &mut batch,
+                        ) {
                             tracing::warn!("fanotify pre-image capture failed: {}", err);
                         } else {
                             sec_count = sec_count.saturating_add(1);
@@ -274,10 +278,7 @@ fn capture_preimage_from_fd(
     }
     let mut file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
     // Check file size before reading to prevent OOM
-    let file_len = file
-        .metadata()
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
     if file_len > PREIMAGE_MAX_BYTES {
         tracing::debug!(
             "Skipping pre-image for {} ({} bytes > {} limit)",

@@ -229,9 +229,8 @@ async fn origin_validation_middleware(
 ) -> axum::response::Response {
     let path = request.uri().path();
     let method = request.method();
-    let should_validate = path.starts_with("/api/")
-        || path == "/mcp"
-        || (path == "/ws" && *method == Method::GET);
+    let should_validate =
+        path.starts_with("/api/") || path == "/mcp" || (path == "/ws" && *method == Method::GET);
 
     if should_validate && !auth::validate_origin(&headers) {
         return (

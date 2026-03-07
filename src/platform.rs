@@ -399,10 +399,7 @@ fn install_windows_task() -> Result<()> {
         ])
         .status()?;
     if !status.success() {
-        anyhow::bail!(
-            "schtasks /Create failed with status {:?}",
-            status.code()
-        );
+        anyhow::bail!("schtasks /Create failed with status {:?}", status.code());
     }
     Ok(())
 }

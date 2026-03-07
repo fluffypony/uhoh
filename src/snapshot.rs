@@ -115,8 +115,10 @@ pub fn create_snapshot(
             // Skip .git internals and .uhoh directory
             if let Ok(rel) = p.strip_prefix(project_path) {
                 let rel_str = rel.to_string_lossy();
-                if rel_str.starts_with(".git/") || rel_str.starts_with(".git\\")
-                    || rel_str == ".git" || rel_str == ".uhoh"
+                if rel_str.starts_with(".git/")
+                    || rel_str.starts_with(".git\\")
+                    || rel_str == ".git"
+                    || rel_str == ".uhoh"
                 {
                     continue;
                 }
@@ -158,7 +160,10 @@ pub fn create_snapshot(
                     if let Some(cached) = prev_files.get(rel_path) {
                         let fs_mtime_ms = mtime_to_millis(mtime);
                         let cached_mtime_ms = mtime_to_millis(cached.mtime);
-                        if cached.size == size && cached_mtime_ms == fs_mtime_ms && cached.executable == executable {
+                        if cached.size == size
+                            && cached_mtime_ms == fs_mtime_ms
+                            && cached.executable == executable
+                        {
                             files_for_manifest.push(crate::db::SnapFileEntry {
                                 path: rel_path.clone(),
                                 hash: cached.hash.clone(),
@@ -412,7 +417,10 @@ pub fn create_snapshot(
             if let Some(cached) = prev_files.get(rel_path) {
                 let fs_mtime_ms = mtime_to_millis(mtime);
                 let cached_mtime_ms = mtime_to_millis(cached.mtime);
-                if cached.size == size && cached_mtime_ms == fs_mtime_ms && cached.executable == executable {
+                if cached.size == size
+                    && cached_mtime_ms == fs_mtime_ms
+                    && cached.executable == executable
+                {
                     files_for_manifest.push(crate::db::SnapFileEntry {
                         path: rel_path.clone(),
                         hash: cached.hash.clone(),

@@ -185,7 +185,11 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
         }
         hasher.finalize().to_hex().to_string()
     };
-    tracing::info!("Model download complete: BLAKE3={}, size={} bytes", &hash[..16], pos);
+    tracing::info!(
+        "Model download complete: BLAKE3={}, size={} bytes",
+        &hash[..16],
+        pos
+    );
 
     std::fs::rename(&tmp, &target)?;
     Ok(target)

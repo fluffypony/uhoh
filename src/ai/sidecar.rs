@@ -376,12 +376,8 @@ fn spawn_backend(
                         "mlx-community/Qwen3.5-35B-A3B-4bit".to_string()
                     }
                     s if s.contains("32b") => "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string(),
-                    s if s.contains("9b") => {
-                        "mlx-community/Qwen3.5-9B-Instruct-4bit".to_string()
-                    }
-                    s if s.contains("8b") => {
-                        "mlx-community/Qwen3.5-8B-Instruct-4bit".to_string()
-                    }
+                    s if s.contains("9b") => "mlx-community/Qwen3.5-9B-Instruct-4bit".to_string(),
+                    s if s.contains("8b") => "mlx-community/Qwen3.5-8B-Instruct-4bit".to_string(),
                     s if s.contains("7b") => "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string(),
                     s if s.contains("3b") => "mlx-community/Qwen3.5-3B-Instruct-4bit".to_string(),
                     _ => stem.to_string(),

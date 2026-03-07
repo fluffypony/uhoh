@@ -31,9 +31,10 @@ fn revert_event(uhoh_dir: &Path, database: &Database, event: &EventLedgerEntry) 
             let project_root = Path::new(root);
             // Check the target parent (or target itself) is within the project root
             let check_path = target.parent().unwrap_or(target);
-            if let (Ok(canon_check), Ok(canon_root)) =
-                (dunce::canonicalize(check_path), dunce::canonicalize(project_root))
-            {
+            if let (Ok(canon_check), Ok(canon_root)) = (
+                dunce::canonicalize(check_path),
+                dunce::canonicalize(project_root),
+            ) {
                 canon_check.starts_with(&canon_root)
             } else {
                 // If target doesn't exist yet, check the string prefix

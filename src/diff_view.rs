@@ -247,8 +247,7 @@ pub fn cmd_diff(
             continue;
         }
 
-        let old_bytes = old_hash
-            .and_then(|h| cas::read_blob(&blob_root, h).ok().flatten());
+        let old_bytes = old_hash.and_then(|h| cas::read_blob(&blob_root, h).ok().flatten());
         let new_bytes = if is_current_tree {
             let file_on_disk = project_path.join(cas::decode_relpath_to_os(path));
             // Use symlink_metadata to avoid following symlinks; read symlink target as content
@@ -264,8 +263,7 @@ pub fn cmd_diff(
                 None
             }
         } else {
-            new_hash
-                .and_then(|h| cas::read_blob(&blob_root, h).ok().flatten())
+            new_hash.and_then(|h| cas::read_blob(&blob_root, h).ok().flatten())
         };
 
         // Detect binary content before converting to string
@@ -280,7 +278,9 @@ pub fn cmd_diff(
 
         if old_is_binary || new_is_binary {
             let display_path = if path.strip_prefix("b64:").is_some() {
-                crate::cas::decode_relpath_to_os(path).to_string_lossy().into_owned()
+                crate::cas::decode_relpath_to_os(path)
+                    .to_string_lossy()
+                    .into_owned()
             } else {
                 path.to_string()
             };

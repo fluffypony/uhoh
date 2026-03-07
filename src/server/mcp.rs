@@ -366,8 +366,11 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
         let path_for_key = path.clone();
         let hash_for_key = hash.clone();
         match tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            let project =
-                resolve::resolve_project(&db_for_key, path_for_key.as_deref().or(hash_for_key.as_deref()), None)?;
+            let project = resolve::resolve_project(
+                &db_for_key,
+                path_for_key.as_deref().or(hash_for_key.as_deref()),
+                None,
+            )?;
             Ok(project.hash)
         })
         .await

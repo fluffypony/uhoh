@@ -1043,7 +1043,11 @@ impl Database {
             params![cutoff_s],
         )? as u64;
         if affected > 0 {
-            tracing::debug!("Pruned {} resolved event ledger entries older than {} days", affected, ttl_days);
+            tracing::debug!(
+                "Pruned {} resolved event ledger entries older than {} days",
+                affected,
+                ttl_days
+            );
         }
         Ok(affected)
     }

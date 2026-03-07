@@ -1789,7 +1789,10 @@ tool_call_format = "jsonl"
                                     println!("  Session log: {} (found)", p.display())
                                 }
                                 Ok(None) => {
-                                    println!("  Session log: no match for pattern '{}'", profile.session_log_pattern)
+                                    println!(
+                                        "  Session log: no match for pattern '{}'",
+                                        profile.session_log_pattern
+                                    )
                                 }
                                 Err(e) => println!("  Session log: error resolving: {e}"),
                             }

@@ -40,9 +40,7 @@ pub fn generate_summary_blocking(
         && crate::ai::sidecar::is_mlx_available(uhoh_dir);
     let model_path = if uses_mlx {
         // MLX doesn't use the local GGUF; provide the filename for sidecar mapping
-        uhoh_dir
-            .join("models")
-            .join(&model.filename)
+        uhoh_dir.join("models").join(&model.filename)
     } else {
         match crate::ai::models::ensure_model_downloaded(uhoh_dir, &model) {
             Ok(p) => p,
