@@ -41,6 +41,9 @@ Windows (PowerShell):
 
 ```powershell
 irm https://uhoh.it/install.ps1 | iex
+
+# Allow install to continue if DNS verification fails during pre-install check
+irm https://uhoh.it/install.ps1 | iex -SkipDnsVerify
 ```
 
 ### What the Install Script Does
@@ -48,9 +51,14 @@ irm https://uhoh.it/install.ps1 | iex
 1. Checks for existing installation and reports the current version
 2. Detects your OS and CPU architecture and selects the correct binary asset
 3. Downloads the latest release from GitHub
-4. Installs the binary to a directory on your PATH
-5. Verifies binary integrity via DNS TXT records using `uhoh doctor --verify-install`
-6. Prints success or a warning if verification could not complete
+4. Runs pre-install verification using the downloaded temporary binary (`doctor --verify-install`)
+5. Installs the binary to a directory on your PATH
+6. Runs post-install verification via DNS TXT records using `uhoh doctor --verify-install`
+7. Prints success or a warning if verification could not complete
+
+PowerShell installer flags:
+- `-SkipDnsVerify` allows install to continue when pre-install DNS verification returns code `2`.
+- `-SkipPreInstallVerify` skips pre-install `doctor --verify-install` entirely.
 
 You can re-verify at any time:
 

@@ -384,6 +384,14 @@ fn mcp_proxy_runs_as_async_task_with_shutdown_token() {
 }
 
 #[test]
+fn agent_undo_rejects_symlink_parent_and_non_absolute_targets() {
+    let source = std::fs::read_to_string("src/agent/undo.rs").expect("read agent undo module");
+    assert!(source.contains("Refusing to revert event #{}: path {} is not absolute"));
+    assert!(source.contains("Refusing to revert through symlinked directory"));
+    assert!(source.contains("check_no_symlink_parents"));
+}
+
+#[test]
 fn cargo_features_include_core_gates() {
     let cargo = std::fs::read_to_string("Cargo.toml").expect("read Cargo.toml");
     assert!(cargo.contains("audit-trail = []"));

@@ -11,6 +11,12 @@
     irm https://uhoh.it/install.ps1 | iex
 #>
 
+[CmdletBinding()]
+param(
+    [switch]$SkipDnsVerify,
+    [switch]$SkipPreInstallVerify
+)
+
 $ErrorActionPreference = "Stop"
 
 function Main {
@@ -57,13 +63,32 @@ function Main {
     $TempFile = Join-Path $env:TEMP ("uhoh-install-" + [System.IO.Path]::GetRandomFileName() + ".exe")
     Invoke-WebRequest -Uri $DownloadUrl -OutFile $TempFile -UseBasicParsing
 
-    # Log the SHA256 hash for manual verification. Full integrity verification
-    # is handled by `uhoh doctor --verify-install` which uses the same BLAKE3 + Ed25519
-    # + versioned DNS strategy as the Rust updater. PowerShell cannot safely replicate
-    # the Rust updater's verification pipeline, so we defer to post-install doctor.
+    # Log the SHA256 hash for manual verification.
+    # Integrity is then validated by `uhoh doctor --verify-install`.
     Write-Host "Computing binary hash..."
     $FileHash = (Get-FileHash -Path $TempFile -Algorithm SHA256).Hash.ToLower()
     Write-Host ("  SHA256: {0}" -f $FileHash)
+
+    if (-not $SkipPreInstallVerify) {
+        Write-Host "Running pre-install verification..."
+        $verifyOut = & $TempFile doctor --verify-install 2>&1
+        $verifyCode = $LASTEXITCODE
+        if ($verifyCode -eq 0) {
+            Write-Host "Pre-install integrity verification passed." -ForegroundColor Green
+        } elseif ($verifyCode -eq 2 -and -not $SkipDnsVerify) {
+            Remove-Item -Force -ErrorAction SilentlyContinue $TempFile
+            throw "Pre-install DNS verification failed; aborting install. Re-run with -SkipDnsVerify to allow install without DNS proof."
+        } elseif ($verifyCode -eq 2) {
+            Write-Host "WARNING: DNS verification failed during pre-install check; continuing because -SkipDnsVerify was requested." -ForegroundColor Yellow
+        } else {
+            Write-Host ("WARNING: Pre-install verification returned code {0}; continuing install." -f $verifyCode) -ForegroundColor Yellow
+            if ($verifyOut) {
+                Write-Host $verifyOut
+            }
+        }
+    } else {
+        Write-Host "Skipping pre-install verification due to -SkipPreInstallVerify." -ForegroundColor Yellow
+    }
 
     # Install
     try {

@@ -5,50 +5,81 @@ use crate::db::Database;
 use crate::db::EventLedgerEntry;
 use crate::event_ledger::EventLedger;
 
+fn check_no_symlink_parents(project_root: &Path, target: &Path) -> Result<()> {
+    let relative = target.strip_prefix(project_root).with_context(|| {
+        format!(
+            "Target {} is outside project root {}",
+            target.display(),
+            project_root.display()
+        )
+    })?;
+    let mut current = project_root.to_path_buf();
+    for component in relative.parent().unwrap_or(Path::new("")).components() {
+        current.push(component);
+        if let Ok(meta) = std::fs::symlink_metadata(&current) {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "Refusing to revert through symlinked directory: {}",
+                    current.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn revert_event(uhoh_dir: &Path, database: &Database, event: &EventLedgerEntry) -> Result<()> {
     let Some(path) = event.path.as_ref() else {
         return Ok(());
     };
 
     let target = Path::new(path);
+    if !target.is_absolute() {
+        anyhow::bail!(
+            "Refusing to revert event #{}: path {} is not absolute",
+            event.id,
+            target.display()
+        );
+    }
 
     // Validate target is within a known project root to prevent writes outside projects.
     // Fail-closed: if we can't verify the path is within a project, reject the revert.
+    let projects = database.list_projects().unwrap_or_default();
+    let mut matched_project_root: Option<std::path::PathBuf> = None;
+    for project in projects
+        .iter()
+        .filter(|p| {
+            event
+                .project_hash
+                .as_ref()
+                .map(|ph| &p.hash == ph)
+                .unwrap_or(true)
+        })
     {
-        let projects = database.list_projects().unwrap_or_default();
-        let project_roots: Vec<&str> = if let Some(ref ph) = event.project_hash {
-            // If event has a project_hash, validate against that specific project
-            projects
-                .iter()
-                .filter(|p| &p.hash == ph)
-                .map(|p| p.current_path.as_str())
-                .collect()
+        let project_root = Path::new(&project.current_path);
+        let check_path = target.parent().unwrap_or(target);
+        let within = if let (Ok(canon_check), Ok(canon_root)) = (
+            dunce::canonicalize(check_path),
+            dunce::canonicalize(project_root),
+        ) {
+            canon_check.starts_with(&canon_root)
         } else {
-            // No project_hash on event — check against ALL project roots
-            projects.iter().map(|p| p.current_path.as_str()).collect()
+            target.starts_with(project_root)
         };
-        let within_project = project_roots.iter().any(|root| {
-            let project_root = Path::new(root);
-            // Check the target parent (or target itself) is within the project root
-            let check_path = target.parent().unwrap_or(target);
-            if let (Ok(canon_check), Ok(canon_root)) = (
-                dunce::canonicalize(check_path),
-                dunce::canonicalize(project_root),
-            ) {
-                canon_check.starts_with(&canon_root)
-            } else {
-                // If target doesn't exist yet, check the string prefix
-                target.starts_with(project_root)
-            }
-        });
-        if !within_project {
-            anyhow::bail!(
-                "Refusing to revert event #{}: path {} is not within any tracked project",
-                event.id,
-                target.display()
-            );
+        if within {
+            matched_project_root = Some(project_root.to_path_buf());
+            break;
         }
     }
+    let project_root = matched_project_root.context(format!(
+        "Refusing to revert event #{}: path {} is not within any tracked project",
+        event.id,
+        target.display()
+    ))?;
+
+    // Reject symlinked parent directories to prevent writes escaping project root
+    // when intermediate paths are symlinks and deeper components do not exist yet.
+    check_no_symlink_parents(&project_root, target)?;
 
     // Reject symlink targets to prevent symlink-based escapes
     if target.exists() {
@@ -56,6 +87,13 @@ fn revert_event(uhoh_dir: &Path, database: &Database, event: &EventLedgerEntry) 
         if meta.file_type().is_symlink() {
             anyhow::bail!(
                 "Refusing to revert event #{}: target {} is a symlink",
+                event.id,
+                target.display()
+            );
+        }
+        if meta.is_dir() {
+            anyhow::bail!(
+                "Refusing to revert event #{}: target {} is a directory",
                 event.id,
                 target.display()
             );
