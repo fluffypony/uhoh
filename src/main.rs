@@ -687,6 +687,10 @@ async fn main() -> Result<()> {
             let mut cmd = std::process::Command::new(&command[0]);
             cmd.args(&command[1..]);
 
+            // Verify daemon is running before exporting proxy env vars
+            if !is_daemon_running(&uhoh) {
+                eprintln!("Warning: uhoh daemon is not running. Start it with `uhoh start` for full protection.");
+            }
             if cfg.agent.mcp_proxy_enabled {
                 let proxy_token = uhoh::agent::ensure_proxy_token(&uhoh)?;
                 let auth_line = uhoh::agent::proxy_auth_handshake_line(&proxy_token);

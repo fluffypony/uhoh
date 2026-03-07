@@ -151,6 +151,12 @@ impl DaemonMaintenanceSubsystem {
 
         let _ = ctx.database.prune_ai_queue_ttl(7);
 
+        // Prune old event ledger entries to prevent unbounded growth (BUG-M2).
+        // Keep 90 days of entries.
+        if let Err(e) = ctx.database.prune_event_ledger_ttl(90) {
+            tracing::debug!("Event ledger pruning failed: {}", e);
+        }
+
         let mut tick_sys = sysinfo::System::new();
         tick_sys.refresh_memory();
         if crate::ai::should_run_ai_with(&ctx.config.ai, &tick_sys) {
@@ -1974,12 +1980,16 @@ async fn process_ai_summary_queue(
                 }
                 Ok(_) => {
                     // Empty summary — likely model unavailable or download failed.
-                    // Warn so users know why AI summaries are missing.
                     tracing::warn!(
                         "AI summary returned empty for snapshot rowid={} (model may be unavailable or still downloading)",
                         rowid
                     );
-                    let _ = database.increment_ai_attempts(rowid);
+                    if let Ok(attempts) = database.increment_ai_attempts(rowid) {
+                        if attempts >= 2 {
+                            // Delete after 2 consecutive empty results to avoid queue buildup
+                            let _ = database.delete_pending_ai(rowid);
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Deferred AI summary failed for rowid={}: {}", rowid, e);

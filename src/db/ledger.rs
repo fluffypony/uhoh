@@ -37,7 +37,7 @@ pub fn build_recent_query(filters: LedgerRecentFilters<'_>, limit: i64) -> (Stri
 
     let mut sql = String::from(
         "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
+                path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
          FROM event_ledger",
     );
     if !where_clauses.is_empty() {
@@ -67,8 +67,8 @@ impl<'r> TryFrom<&Row<'r>> for EventLedgerEntry {
             detail: row.get(9)?,
             pre_state_ref: row.get(10)?,
             post_state_ref: row.get(11)?,
-            causal_parent: row.get(13)?,
-            resolved: row.get::<_, i32>(14)? != 0,
+            causal_parent: row.get(12)?,
+            resolved: row.get::<_, i32>(13)? != 0,
         })
     }
 }

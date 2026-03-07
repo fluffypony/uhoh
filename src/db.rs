@@ -865,7 +865,12 @@ impl Database {
                 " ",
             )
             .split_whitespace()
-            .filter(|w| !["AND", "OR", "NOT", "NEAR"].contains(w))
+            .filter(|w| {
+                let upper = w.to_ascii_uppercase();
+                // Filter FTS5 keywords and NEAR/N patterns
+                !matches!(upper.as_str(), "AND" | "OR" | "NOT" | "NEAR")
+                    && !upper.starts_with("NEAR/")
+            })
             .collect::<Vec<_>>()
             .join(" ");
         if safe.is_empty() {
@@ -881,6 +886,23 @@ impl Database {
         }
         let fts_query = terms.join(" ");
 
+        // Catch FTS5 parse errors gracefully instead of propagating
+        match self.search_snapshots_fts(&conn, &fts_query, project_hash, limit) {
+            Ok(results) => Ok(results),
+            Err(e) => {
+                tracing::debug!("FTS5 query failed (malformed query?): {}", e);
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    fn search_snapshots_fts(
+        &self,
+        conn: &DbConn,
+        fts_query: &str,
+        project_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
         let mut out = Vec::new();
 
         if let Some(ph) = project_hash {
@@ -1008,6 +1030,21 @@ impl Database {
             "DELETE FROM pending_ai_summaries WHERE queued_at < ?1",
             params![cutoff_s],
         )? as u64;
+        Ok(affected)
+    }
+
+    /// Remove event ledger entries older than `ttl_days` to prevent unbounded growth.
+    pub fn prune_event_ledger_ttl(&self, ttl_days: i64) -> Result<u64> {
+        let conn = self.conn()?;
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(ttl_days);
+        let cutoff_s = cutoff.to_rfc3339();
+        let affected = conn.execute(
+            "DELETE FROM event_ledger WHERE ts < ?1 AND resolved = 1",
+            params![cutoff_s],
+        )? as u64;
+        if affected > 0 {
+            tracing::debug!("Pruned {} resolved event ledger entries older than {} days", affected, ttl_days);
+        }
         Ok(affected)
     }
 
@@ -1439,7 +1476,7 @@ impl Database {
         let conn = self.conn()?;
         conn.query_row(
             "SELECT id, ts, source, event_type, severity, project_hash, agent_name, guard_name,
-                    path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
+                    path, detail, pre_state_ref, post_state_ref, causal_parent, resolved
              FROM event_ledger WHERE id = ?1",
             params![id],
             ledger::map_event_ledger_entry,
