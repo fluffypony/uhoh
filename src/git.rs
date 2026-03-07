@@ -16,9 +16,10 @@ pub fn cmd_gitstash(
     id_str: &str,
 ) -> Result<()> {
     let project_path = Path::new(&project.current_path);
+    let git_dir = resolve_git_dir(project_path)?;
 
     // Verify this is a git repo
-    if !project_path.join(".git").exists() {
+    if !git_dir.exists() {
         bail!("Not a git repository. Git stash requires a git repo.");
     }
 
@@ -90,7 +91,6 @@ pub fn cmd_gitstash(
     }
 
     // Step 2: Build tree object using temporary index to avoid corrupting user's index
-    let git_dir = project_path.join(".git");
     let tmp_index = git_dir.join("index.uhoh-tmp");
     // Use per-command environment to avoid global side effects
     run_git_with_index(project_path, &tmp_index, &["read-tree", "--empty"])?;

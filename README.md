@@ -176,7 +176,7 @@ When enabled, the daemon starts a unified localhost server (default `127.0.0.1:2
 
 WebSocket events: `snapshot_created`, `snapshot_restored`, `ai_summary_completed`, `sidecar_updated`, `mlx_update_status`, `mlx_update_failed`, `db_guard_alert`, `agent_alert`, `project_added`, `project_removed`.
 
-All `/api/*` and `/mcp` requests require a bearer token by default (`/health` and `/ws` are exempt). The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery. The server validates `Host` headers on all requests. `Origin` headers are validated on `/mcp` and `/ws` endpoints to prevent DNS rebinding.
+By default, `/api/*` mutating requests and `/mcp` require a bearer token, while read-only `GET` API routes stay open for local UI browsing. `/health`, `/api/v1/health`, and `/ws` are exempt from bearer auth. The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery. The server validates `Host` headers on all requests. `Origin` headers are validated on `/api/*`, `/mcp`, and `/ws` to prevent DNS rebinding.
 
 ## MCP tools
 
@@ -356,7 +356,8 @@ Optional subsystems are feature-gated to keep default builds lean: `audit-trail`
 - `server.bind_address` (default `127.0.0.1`): bind address. Keep loopback-only for security.
 - `server.ui_enabled` (default true): serve Time Machine UI at `/`.
 - `server.mcp_enabled` (default true): serve MCP HTTP endpoint at `/mcp`.
-- `server.require_auth` (default true): require bearer auth for all `/api/*` and `/mcp` requests (`/health` and `/ws` exempt).
+- `server.require_auth` (default true): require bearer auth for mutating `/api/*` requests (`GET` routes remain open), with `/health`, `/api/v1/health`, and `/ws` exempt.
+- `server.mcp_require_auth` (default true): require bearer auth for `/mcp`.
 
 ### Sidecar update settings
 
@@ -566,7 +567,7 @@ On macOS this creates a launchd agent (`~/Library/LaunchAgents/com.uhoh.daemon.p
 - `uhoh start [--service]` / `uhoh stop` / `uhoh restart`
 - `uhoh service-install` / `uhoh service-remove`
 - `uhoh mcp` — run MCP server over STDIO
-- `uhoh db add <dsn> [--tables ...] [--name ...] [--mode triggers]` (mode currently accepts `triggers` and `schema_polling` but both paths use trigger-based monitoring for Postgres)
+- `uhoh db add <dsn> [--tables ...] [--name ...] [--mode triggers|schema_polling]` (`schema_polling` disables row-trigger counters for Postgres)
 - `uhoh db remove <name>` / `uhoh db list`
 - `uhoh db events [name] [--table ...]`
 - `uhoh db recover <event-id> [--apply]`

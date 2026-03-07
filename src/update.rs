@@ -32,7 +32,9 @@ struct GithubAsset {
 pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
     let key_is_placeholder = UPDATE_PUBLIC_KEY.iter().all(|&b| b == 0);
     if key_is_placeholder {
-        tracing::debug!("Auto-update disabled: no signing key configured");
+        tracing::error!(
+            "Auto-update disabled: embedded UPDATE_PUBLIC_KEY is unset. Configure signing key before release."
+        );
         return Ok(());
     }
     let current_version = env!("CARGO_PKG_VERSION");
@@ -87,9 +89,7 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
 
     // Primary verification: Ed25519 signature
     let mut verified = false;
-    if key_is_placeholder {
-        tracing::warn!("UPDATE_PUBLIC_KEY is placeholder — skipping Ed25519 signature verification. DNS hash check still active.");
-    } else if let Ok(sig_resp) = sig_result {
+    if let Ok(sig_resp) = sig_result {
         if sig_resp.status().is_success() {
             let sig_bytes = sig_resp.bytes().await?;
             match verify_ed25519_signature(&binary, &sig_bytes) {
