@@ -1129,7 +1129,28 @@ fn install_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Re
             .batch_execute(
                 "DROP EVENT TRIGGER IF EXISTS uhoh_ddl_drop;
                  CREATE EVENT TRIGGER uhoh_ddl_drop ON sql_drop
-                     EXECUTE FUNCTION _uhoh_ddl_handler();",
+                     EXECUTE FUNCTION _uhoh_ddl_handler();
+
+                 -- Also track CREATE TABLE events for wildcard guard reconciliation
+                 CREATE OR REPLACE FUNCTION _uhoh_ddl_end_handler() RETURNS event_trigger AS $$
+                 DECLARE payload_json TEXT;
+                 BEGIN
+                     payload_json := json_build_object(
+                         'event_tag', tg_tag,
+                         'object_type', tg_event,
+                         'schema_name', '',
+                         'object_identity', ''
+                     )::text;
+                     INSERT INTO _uhoh_ddl_events (event_tag, object_type, schema_name, object_identity, payload)
+                     VALUES (tg_tag, tg_event, '', '', payload_json);
+                     PERFORM pg_notify('uhoh_events', payload_json);
+                 END;
+                 $$ LANGUAGE plpgsql;
+
+                 DROP EVENT TRIGGER IF EXISTS uhoh_ddl_end;
+                 CREATE EVENT TRIGGER uhoh_ddl_end ON ddl_command_end
+                     WHEN TAG IN ('CREATE TABLE', 'ALTER TABLE')
+                     EXECUTE FUNCTION _uhoh_ddl_end_handler();",
             )
             .await
         {
@@ -1284,7 +1305,9 @@ fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Resul
             .batch_execute(
                 "
                 DROP EVENT TRIGGER IF EXISTS uhoh_ddl_drop;
+                DROP EVENT TRIGGER IF EXISTS uhoh_ddl_end;
                 DROP FUNCTION IF EXISTS _uhoh_ddl_handler();
+                DROP FUNCTION IF EXISTS _uhoh_ddl_end_handler();
                 DROP TABLE IF EXISTS _uhoh_ddl_events;
                 DROP TABLE IF EXISTS _uhoh_delete_counts;
                 ",
