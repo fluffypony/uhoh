@@ -27,6 +27,23 @@ pub use recovery::decrypt_recovery_payload;
 pub use recovery::write_postgres_schema_baseline;
 pub use recovery::write_sqlite_baseline;
 
+pub fn quote_pg_ident(input: &str) -> Result<String> {
+    if input.trim().is_empty() {
+        anyhow::bail!("Postgres identifier cannot be empty");
+    }
+    if input.contains('\0') {
+        anyhow::bail!("Postgres identifier contains NUL byte");
+    }
+    let mut quoted_parts = Vec::new();
+    for part in input.split('.') {
+        if part.is_empty() {
+            anyhow::bail!("Postgres identifier segment cannot be empty");
+        }
+        quoted_parts.push(format!("\"{}\"", part.replace('"', "\"\"")));
+    }
+    Ok(quoted_parts.join("."))
+}
+
 const GUARD_TICK_INTERVAL_SECS: i64 = 30;
 
 pub struct DbGuardSubsystem {

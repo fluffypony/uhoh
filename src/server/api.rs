@@ -553,8 +553,36 @@ pub async fn restore_snapshot(
     let restore_in_progress = state.restore_in_progress.clone();
     let restore_locks = state.restore_locks.clone();
     let event_tx = state.event_tx.clone();
-    let restore_key = hash.clone();
     let target_path_for_task = target_path.clone();
+
+    let restore_key = if !dry_run {
+        let db_for_key = db.clone();
+        let hash_for_key = hash.clone();
+        match tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let project = resolve::resolve_project(&db_for_key, Some(&hash_for_key), None)?;
+            Ok(project.hash)
+        })
+        .await
+        {
+            Ok(Ok(key)) => Some(key),
+            Ok(Err(e)) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("Internal error: {e}") })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
 
     struct RestoreLockGuard {
         locks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
@@ -569,7 +597,7 @@ pub async fn restore_snapshot(
     }
 
     let mut lock_guard: Option<RestoreLockGuard> = None;
-    if !dry_run {
+    if let Some(restore_key) = restore_key {
         let mut locks = match restore_locks.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),

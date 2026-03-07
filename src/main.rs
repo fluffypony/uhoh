@@ -72,7 +72,7 @@ fn is_daemon_running(uhoh: &std::path::Path) -> bool {
 fn maybe_start_daemon(uhoh: &std::path::Path) -> Result<()> {
     if !is_daemon_running(uhoh) {
         tracing::info!("Daemon not running, starting automatically...");
-        daemon::spawn_detached_daemon()?;
+        daemon::spawn_detached_daemon(uhoh)?;
     }
     Ok(())
 }
@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
             maybe_start_daemon(&uhoh)?;
             let project_path = resolve_project_path(path)?;
 
-            let uhoh_home = uhoh::uhoh_dir();
+            let uhoh_home = uhoh.clone();
             if uhoh_home.starts_with(&project_path) {
                 anyhow::bail!(
                     "Refusing to watch parent directory '{}' because it contains {}",
@@ -372,7 +372,7 @@ async fn main() -> Result<()> {
             if service {
                 daemon::run_foreground(&uhoh, std::sync::Arc::new(database)).await?;
             } else {
-                daemon::spawn_detached_daemon()?;
+                daemon::spawn_detached_daemon(&uhoh)?;
             }
         }
         Commands::Stop => {
@@ -381,7 +381,7 @@ async fn main() -> Result<()> {
         Commands::Restart => {
             daemon::stop_daemon(&uhoh).ok();
             std::thread::sleep(std::time::Duration::from_secs(1));
-            daemon::spawn_detached_daemon()?;
+            daemon::spawn_detached_daemon(&uhoh)?;
         }
 
         Commands::Hook { action } => {
@@ -500,7 +500,7 @@ async fn main() -> Result<()> {
                 }
             );
             // Inception loop guard: warn if project includes ~/.uhoh
-            let uhoh_path = uhoh::uhoh_dir();
+            let uhoh_path = uhoh.clone();
             for p in &projects {
                 let proj_path = std::path::Path::new(&p.current_path);
                 if uhoh_path.starts_with(proj_path) {
@@ -1015,12 +1015,12 @@ fn handle_db_commands(
                         .strip_prefix("sqlite://")
                         .unwrap_or(&guard.connection_ref);
                     let _ = uhoh::db_guard::write_sqlite_baseline(
-                        &uhoh::uhoh_dir(),
+                        uhoh_dir,
                         &guard.name,
                         std::path::Path::new(sqlite_path),
                         true,
                         30,
-                        config::Config::load(&uhoh::uhoh_dir().join("config.toml"))?
+                        config::Config::load(&uhoh_dir.join("config.toml"))?
                             .db_guard
                             .max_baseline_size_mb,
                     )?;
@@ -1028,9 +1028,9 @@ fn handle_db_commands(
                 "postgres" => {
                     let creds =
                         uhoh::db_guard::resolve_postgres_credentials_cli(&guard.connection_ref)?;
-                    let cfg = config::Config::load(&uhoh::uhoh_dir().join("config.toml"))?;
+                    let cfg = config::Config::load(&uhoh_dir.join("config.toml"))?;
                     let _ = uhoh::db_guard::write_postgres_schema_baseline(
-                        &uhoh::uhoh_dir(),
+                        uhoh_dir,
                         &guard.name,
                         &guard.connection_ref,
                         &creds,
@@ -1176,12 +1176,12 @@ async fn install_delete_counter_trigger(
     table: &str,
 ) -> Result<()> {
     let table_safe = table.replace('\'', "''");
-    let table_quoted = quote_pg_ident(table)?;
-    let fn_ident = quote_pg_ident(&format!(
+    let table_quoted = uhoh::db_guard::quote_pg_ident(table)?;
+    let fn_ident = uhoh::db_guard::quote_pg_ident(&format!(
         "_uhoh_count_deletes_{}",
         blake3::hash(table.as_bytes()).to_hex()
     ))?;
-    let trigger_ident = quote_pg_ident(&format!(
+    let trigger_ident = uhoh::db_guard::quote_pg_ident(&format!(
         "uhoh_delete_counter_{}",
         blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
     ))?;
@@ -1261,15 +1261,15 @@ fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Resul
                 .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
         } else {
             for table in tables {
-                let trigger_ident = quote_pg_ident(&format!(
+                let trigger_ident = uhoh::db_guard::quote_pg_ident(&format!(
                     "uhoh_delete_counter_{}",
                     blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
                 ))?;
-                let fn_ident = quote_pg_ident(&format!(
+                let fn_ident = uhoh::db_guard::quote_pg_ident(&format!(
                     "_uhoh_count_deletes_{}",
                     blake3::hash(table.as_bytes()).to_hex()
                 ))?;
-                let table_quoted = quote_pg_ident(&table)?;
+                let table_quoted = uhoh::db_guard::quote_pg_ident(&table)?;
                 let sql = format!(
                     "DROP TRIGGER IF EXISTS {trigger_ident} ON {table_quoted}; DROP FUNCTION IF EXISTS {fn_ident}();"
                 );
@@ -1349,47 +1349,9 @@ fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
         .collect()
 }
 
-// Postgres TLS/connection helpers are shared from db_guard::postgres (pub(crate)).
+// Postgres TLS/connection helpers are shared from db_guard::postgres.
 async fn connect_postgres_client(dsn: &str) -> Result<tokio_postgres::Client> {
     uhoh::db_guard::pg_connect_spawn(dsn).await
-}
-
-fn quote_pg_ident(input: &str) -> Result<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("Postgres identifier must not be empty");
-    }
-    if trimmed.contains('\0') {
-        anyhow::bail!("Postgres identifier contains NUL byte");
-    }
-
-    let mut out = Vec::new();
-    for part in trimmed.split('.') {
-        if part.is_empty() {
-            anyhow::bail!("Postgres identifier has empty qualified segment");
-        }
-        out.push(format!("\"{}\"", part.replace('"', "\"\"")));
-    }
-    Ok(out.join("."))
-}
-
-#[cfg(test)]
-mod identifier_tests {
-    use super::quote_pg_ident;
-
-    #[test]
-    fn quote_pg_ident_handles_qualified_names() {
-        let out = quote_pg_ident("public.users").expect("quoted");
-        assert_eq!(out, "\"public\".\"users\"");
-    }
-
-    #[test]
-    fn quote_pg_ident_rejects_empty_segments() {
-        let err = quote_pg_ident("public..users").expect_err("must reject");
-        assert!(err
-            .to_string()
-            .contains("Postgres identifier has empty qualified segment"));
-    }
 }
 
 fn extract_dsn_credentials(dsn: &str) -> Option<uhoh::db_guard::CredentialMaterial> {
@@ -1651,9 +1613,9 @@ fn handle_agent_commands(
             }
         }
         AgentAction::Approve => {
-            let runtime = uhoh::uhoh_dir().join("agents/runtime");
+            let runtime = uhoh_dir.join("agents/runtime");
             std::fs::create_dir_all(&runtime)?;
-            let token = uhoh::agent::ensure_proxy_token(&uhoh::uhoh_dir())?;
+            let token = uhoh::agent::ensure_proxy_token(uhoh_dir)?;
             let mut approved_any = false;
             for entry in std::fs::read_dir(&runtime)? {
                 let entry = entry?;
@@ -1705,7 +1667,7 @@ fn handle_agent_commands(
             }
         }
         AgentAction::Deny => {
-            let runtime = uhoh::uhoh_dir().join("agents/runtime");
+            let runtime = uhoh_dir.join("agents/runtime");
             let mut denied_any = false;
             if let Ok(entries) = std::fs::read_dir(&runtime) {
                 for entry in entries.flatten() {
@@ -1728,7 +1690,7 @@ fn handle_agent_commands(
             }
         }
         AgentAction::Resume => {
-            let runtime = uhoh::uhoh_dir().join("agents/runtime");
+            let runtime = uhoh_dir.join("agents/runtime");
             std::fs::create_dir_all(&runtime)?;
             // Approval logic is pure file I/O — works on all platforms.
             let mut resumed_any = false;
@@ -1762,7 +1724,7 @@ fn handle_agent_commands(
                         continue;
                     };
 
-                    let token = uhoh::agent::ensure_proxy_token(&uhoh::uhoh_dir())?;
+                    let token = uhoh::agent::ensure_proxy_token(uhoh_dir)?;
                     let response =
                         uhoh::agent::build_approval_response(&token, approval_id, challenge);
                     let body = serde_json::json!({
@@ -1783,7 +1745,7 @@ fn handle_agent_commands(
             println!("No pending agent approvals found to resume");
         }
         AgentAction::Setup => {
-            let agents_dir = uhoh::uhoh_dir().join("agents");
+            let agents_dir = uhoh_dir.join("agents");
             std::fs::create_dir_all(&agents_dir)?;
             let template_path = agents_dir.join("default.toml");
             if !template_path.exists() {
@@ -1840,7 +1802,7 @@ tool_call_format = "jsonl"
             }
         }
         AgentAction::Init => {
-            let profile_dir = uhoh::uhoh_dir().join("agents");
+            let profile_dir = uhoh_dir.join("agents");
             std::fs::create_dir_all(&profile_dir)?;
             let default_profile = profile_dir.join("generic.toml");
             if !default_profile.exists() {
@@ -2082,7 +2044,7 @@ async fn run_zero_verb() -> Result<()> {
 
     // Not registered: behave like `uhoh add` for this directory
     // Guard against watching the uhoh data directory itself (inception loop)
-    let uhoh_home = uhoh::uhoh_dir();
+    let uhoh_home = uhoh.clone();
     if uhoh_home.starts_with(&cwd) {
         anyhow::bail!(
             "Refusing to watch parent directory of uhoh data directory. \

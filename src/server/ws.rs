@@ -22,22 +22,11 @@ pub async fn websocket_handler(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, StatusCode> {
-    // Validate Origin header to prevent cross-site WebSocket hijacking
-    if let Some(origin) = headers.get("origin") {
-        if let Ok(origin_str) = origin.to_str() {
-            let allowed = url::Url::parse(origin_str)
-                .ok()
-                .and_then(|u| u.host_str().map(str::to_string))
-                .map(|host| {
-                    host.eq_ignore_ascii_case("127.0.0.1")
-                        || host.eq_ignore_ascii_case("localhost")
-                        || host == "::1"
-                })
-                .unwrap_or(false);
-            if !allowed {
-                return Err(StatusCode::FORBIDDEN);
-            }
-        }
+    // Validate Origin header to prevent cross-site WebSocket hijacking.
+    // Shared middleware also validates Origin; keep this handler check to
+    // preserve behavior when ws route wiring changes.
+    if !super::auth::validate_origin(&headers) {
+        return Err(StatusCode::FORBIDDEN);
     }
 
     // If HTTP auth is enabled, require the same bearer token for /ws via

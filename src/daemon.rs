@@ -260,13 +260,13 @@ impl Subsystem for DaemonMaintenanceSubsystem {
 // Removed duplicate is_uhoh_process_alive; use crate::platform::is_uhoh_process_alive instead
 
 /// Spawn daemon as a detached background process.
-pub fn spawn_detached_daemon() -> Result<()> {
+pub fn spawn_detached_daemon(uhoh_dir: &Path) -> Result<()> {
     let exe = std::env::current_exe()?;
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        let log_path = crate::uhoh_dir().join("daemon.log");
+        let log_path = uhoh_dir.join("daemon.log");
         let log_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -296,7 +296,7 @@ pub fn spawn_detached_daemon() -> Result<()> {
     {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x00000008;
-        let log_path = crate::uhoh_dir().join("daemon.log");
+        let log_path = uhoh_dir.join("daemon.log");
         let log_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

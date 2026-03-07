@@ -8,6 +8,7 @@ use anyhow::Result;
 use axum::{
     extract::Extension,
     extract::State,
+    http::Method,
     middleware,
     routing::{get, post},
     Router,
@@ -77,7 +78,10 @@ pub async fn start_server(
 
     let mut app = Router::new();
     if config.mcp_enabled {
-        app = app.route("/mcp", post(mcp::handle_mcp));
+        app = app
+            .route("/mcp", post(mcp::handle_mcp))
+            .route("/mcp", get(mcp::mcp_get_not_supported))
+            .route("/mcp", axum::routing::delete(mcp::mcp_delete_not_supported));
     }
 
     app = app
@@ -120,6 +124,10 @@ pub async fn start_server(
         config.port,
         host_validation_middleware,
     ));
+
+    // Apply Origin validation to HTTP API and MCP surfaces for browser-originated
+    // requests. Requests without Origin remain allowed for local CLI/agent clients.
+    app = app.route_layer(middleware::from_fn(origin_validation_middleware));
 
     if config.require_auth || config.mcp_require_auth {
         app = app
@@ -211,4 +219,26 @@ fn audit_source_label(source: &crate::subsystem::AuditSource) -> &'static str {
         crate::subsystem::AuditSource::None => "none",
         crate::subsystem::AuditSource::Fanotify => "fanotify",
     }
+}
+
+async fn origin_validation_middleware(
+    headers: axum::http::HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = request.uri().path();
+    let method = request.method();
+    let should_validate = path.starts_with("/api/")
+        || path == "/mcp"
+        || (path == "/ws" && *method == Method::GET);
+
+    if should_validate && !auth::validate_origin(&headers) {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({ "error": "Invalid Origin header" })),
+        )
+            .into_response();
+    }
+
+    next.run(request).await
 }

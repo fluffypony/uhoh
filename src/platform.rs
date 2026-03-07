@@ -4,7 +4,10 @@ use chrono::TimeZone;
 use std::path::PathBuf;
 
 pub fn uhoh_dir() -> PathBuf {
-    // Keep a single definition consistent with main; both resolve to ~/.uhoh
+    if let Some(override_dir) = std::env::var_os("UHOH_DIR") {
+        return PathBuf::from(override_dir);
+    }
+
     let home = dirs::home_dir()
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .or_else(|| std::env::current_dir().ok());
@@ -172,12 +175,24 @@ WantedBy=default.target
     let unit_path = unit_dir.join("uhoh.service");
     std::fs::write(&unit_path, unit)?;
 
-    std::process::Command::new("systemctl")
+    let daemon_reload = std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status()?;
-    std::process::Command::new("systemctl")
+    if !daemon_reload.success() {
+        anyhow::bail!(
+            "systemctl --user daemon-reload failed with status {:?}",
+            daemon_reload.code()
+        );
+    }
+    let enable_now = std::process::Command::new("systemctl")
         .args(["--user", "enable", "--now", "uhoh.service"])
         .status()?;
+    if !enable_now.success() {
+        anyhow::bail!(
+            "systemctl --user enable --now uhoh.service failed with status {:?}",
+            enable_now.code()
+        );
+    }
 
     Ok(())
 }
@@ -369,7 +384,7 @@ mod tests {
 #[cfg(target_os = "windows")]
 fn install_windows_task() -> Result<()> {
     let exe = std::env::current_exe()?;
-    std::process::Command::new("schtasks")
+    let status = std::process::Command::new("schtasks")
         .args([
             "/Create",
             "/TN",
@@ -383,6 +398,12 @@ fn install_windows_task() -> Result<()> {
             "/F",
         ])
         .status()?;
+    if !status.success() {
+        anyhow::bail!(
+            "schtasks /Create failed with status {:?}",
+            status.code()
+        );
+    }
     Ok(())
 }
 

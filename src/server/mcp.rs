@@ -5,6 +5,26 @@ use serde_json::{json, Value};
 use super::AppState;
 use crate::resolve;
 
+pub async fn mcp_get_not_supported() -> impl IntoResponse {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(json!({
+            "error": "MCP HTTP transport supports POST only",
+            "details": "GET SSE streams and session endpoints are not implemented"
+        })),
+    )
+}
+
+pub async fn mcp_delete_not_supported() -> impl IntoResponse {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(json!({
+            "error": "MCP HTTP transport supports POST only",
+            "details": "Session termination via DELETE is not implemented"
+        })),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
@@ -61,6 +81,13 @@ pub async fn handle_mcp(
     headers: axum::http::HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
+    // JSON-RPC notifications (no id) must not receive JSON-RPC responses.
+    // Check this first so invalid host/origin/jsonrpc metadata on notifications
+    // does not produce `id: null` error payloads.
+    if request.id.is_none() {
+        return StatusCode::ACCEPTED.into_response();
+    }
+
     if !super::auth::validate_host(&headers, state.config.server.port) {
         return (
             StatusCode::FORBIDDEN,
@@ -92,11 +119,6 @@ pub async fn handle_mcp(
                 "Invalid jsonrpc version".to_string(),
             )),
         );
-    }
-
-    // JSON-RPC notifications (no id) must not receive responses per spec.
-    if request.id.is_none() {
-        return (StatusCode::ACCEPTED, Json(JsonRpcResponse::success(None, json!({}))));
     }
 
     let response = match request.method.as_str() {
@@ -334,6 +356,29 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
     let restore_locks = state.restore_locks.clone();
     let event_tx = state.event_tx.clone();
 
+    // Normalize the lock key to the resolved project hash so REST and MCP share
+    // identical lock semantics regardless of path/hash inputs.
+    let lock_key = if !dry_run {
+        let db_for_key = db.clone();
+        let path_for_key = path.clone();
+        let hash_for_key = hash.clone();
+        match tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let project =
+                resolve::resolve_project(&db_for_key, path_for_key.as_deref().or(hash_for_key.as_deref()), None)?;
+            Ok(project.hash)
+        })
+        .await
+        {
+            Ok(Ok(key)) => Some(key),
+            Ok(Err(e)) => return JsonRpcResponse::error(id, -32602, e.to_string()),
+            Err(e) => {
+                return JsonRpcResponse::error(id, -32000, format!("Internal error: {e}"));
+            }
+        }
+    } else {
+        None
+    };
+
     struct McpRestoreLockGuard {
         locks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
         key: String,
@@ -347,12 +392,7 @@ async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) 
     }
 
     let mut _lock_guard: Option<McpRestoreLockGuard> = None;
-    if !dry_run {
-        // Use hash preferentially to match REST API lock key behavior
-        let lock_key = hash
-            .clone()
-            .or(path.clone())
-            .unwrap_or_else(|| "default".to_string());
+    if let Some(lock_key) = lock_key {
         let mut locks = match restore_locks.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
