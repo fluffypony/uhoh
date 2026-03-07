@@ -87,16 +87,39 @@ async fn handle_connection_async(
     ledger: crate::event_ledger::EventLedger,
     config: crate::config::Config,
 ) -> Result<()> {
+    // Authenticate client BEFORE connecting upstream to prevent
+    // unauthenticated clients from receiving upstream data.
+    let (client_reader, client_writer) = client_stream.into_split();
+    let mut client_lines = BufReader::new(client_reader).lines();
+    let client_writer = std::sync::Arc::new(tokio::sync::Mutex::new(client_writer));
+
+    let mut authed = !config.agent.mcp_proxy_require_auth;
+    let expected_token = ensure_proxy_token(&uhoh_dir)?;
+
+    if !authed {
+        // Read the first line for auth handshake before connecting upstream
+        let auth_line = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client_lines.next_line(),
+        )
+        .await
+        .context("MCP proxy auth timeout")??;
+        if let Some(line) = auth_line {
+            authed = validate_auth_line(&line, &expected_token)?;
+        }
+        if !authed {
+            return Err(anyhow::anyhow!("MCP proxy authentication failed"));
+        }
+    }
+
+    // Now connect upstream after successful auth
     let upstream = tokio::net::TcpStream::connect(&upstream_addr)
         .await
         .with_context(|| format!("Failed connecting MCP upstream: {upstream_addr}"))?;
 
-    let (client_reader, client_writer) = client_stream.into_split();
     let (upstream_reader, mut upstream_writer) = upstream.into_split();
-    let mut client_lines = BufReader::new(client_reader).lines();
     let mut upstream_lines = BufReader::new(upstream_reader).lines();
 
-    let client_writer = std::sync::Arc::new(tokio::sync::Mutex::new(client_writer));
     let client_writer_relay = client_writer.clone();
     let upstream_to_client = tokio::spawn(async move {
         while let Some(line) = upstream_lines.next_line().await? {
@@ -107,9 +130,6 @@ async fn handle_connection_async(
         }
         Result::<(), anyhow::Error>::Ok(())
     });
-
-    let mut authed = !config.agent.mcp_proxy_require_auth;
-    let expected_token = ensure_proxy_token(&uhoh_dir)?;
     while let Some(line) = tokio::time::timeout(
         std::time::Duration::from_secs(300),
         client_lines.next_line(),

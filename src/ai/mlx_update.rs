@@ -266,9 +266,21 @@ async fn fetch_latest_version() -> Result<String> {
 }
 
 async fn run_inference_smoke_test(python: &std::path::Path) -> bool {
+    // Actually test inference with a minimal generation call, not just import.
+    // This catches corrupted models, incompatible architectures, and broken Metal/GPU drivers.
+    let script = r#"
+from mlx_lm import load, generate
+try:
+    model, tokenizer = load("mlx-community/Qwen3.5-0.5B-Instruct-4bit")
+    result = generate(model, tokenizer, prompt="Hi", max_tokens=1)
+    print("OK" if result else "EMPTY")
+except Exception as e:
+    print(f"FAIL: {e}")
+    exit(1)
+"#;
     let out = tokio::process::Command::new(python)
         .arg("-c")
-        .arg("import mlx_lm; print('2+2=4')")
+        .arg(script)
         .output()
         .await;
     match out {

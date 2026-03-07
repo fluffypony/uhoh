@@ -202,8 +202,32 @@ async fn main() -> Result<()> {
         Commands::Remove { target } => {
             let project = match target {
                 Some(ref t) => {
-                    let canonical = dunce::canonicalize(t)?;
-                    database.find_project_by_path(&canonical)?
+                    // Try as path first, then fall back to hash prefix lookup
+                    let path = std::path::Path::new(t);
+                    if path.exists() || path.is_absolute() {
+                        let canonical = dunce::canonicalize(t)?;
+                        database.find_project_by_path(&canonical)?
+                    } else {
+                        // Try as hash prefix
+                        let projects = database.list_projects()?;
+                        let matches: Vec<_> = projects
+                            .iter()
+                            .filter(|p| p.hash.starts_with(t.as_str()))
+                            .collect();
+                        match matches.len() {
+                            0 => {
+                                // Last resort: try canonicalizing anyway
+                                let canonical = dunce::canonicalize(t)?;
+                                database.find_project_by_path(&canonical)?
+                            }
+                            1 => Some(matches[0].clone()),
+                            _ => anyhow::bail!(
+                                "Ambiguous hash prefix '{}': matches {} projects",
+                                t,
+                                matches.len()
+                            ),
+                        }
+                    }
                 }
                 None => {
                     let cwd = dunce::canonicalize(std::env::current_dir()?)?;
@@ -796,6 +820,22 @@ fn handle_db_commands(
             let engine = uhoh::db_guard::detect_engine(dsn);
             if engine == "unknown" {
                 anyhow::bail!("Unsupported DSN format");
+            }
+            // Validate external tool dependencies early (DBGUARD-10)
+            if engine == "postgres" {
+                if which::which("pg_dump").is_err() {
+                    anyhow::bail!(
+                        "pg_dump not found in PATH. Postgres guard requires pg_dump for baseline snapshots. \
+                         Install postgresql-client or equivalent package."
+                    );
+                }
+            } else if engine == "mysql" {
+                if which::which("mysql").is_err() {
+                    anyhow::bail!(
+                        "mysql CLI not found in PATH. MySQL guard requires the mysql client. \
+                         Install mysql-client or equivalent package."
+                    );
+                }
             }
             let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
 

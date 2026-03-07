@@ -312,6 +312,9 @@ fn spawn_backend(
                 &ctx_size,
                 "--n-gpu-layers",
                 "999",
+                // Constrain to 1 slot to avoid over-allocating memory on dev machines
+                "--slots",
+                "1",
             ]);
             let child = cmd
                 .stdout(Stdio::null())
@@ -337,7 +340,10 @@ fn spawn_backend(
                         "mlx-community/Qwen3.5-35B-A3B-4bit".to_string()
                     }
                     s if s.contains("32b") => "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string(),
-                    s if s.contains("9b") || s.contains("8b") => {
+                    s if s.contains("9b") => {
+                        "mlx-community/Qwen3.5-9B-Instruct-4bit".to_string()
+                    }
+                    s if s.contains("8b") => {
                         "mlx-community/Qwen3.5-8B-Instruct-4bit".to_string()
                     }
                     s if s.contains("7b") => "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string(),

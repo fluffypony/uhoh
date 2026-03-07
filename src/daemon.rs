@@ -1973,10 +1973,16 @@ async fn process_ai_summary_queue(
                     }
                 }
                 Ok(_) => {
+                    // Empty summary — likely model unavailable or download failed.
+                    // Warn so users know why AI summaries are missing.
+                    tracing::warn!(
+                        "AI summary returned empty for snapshot rowid={} (model may be unavailable or still downloading)",
+                        rowid
+                    );
                     let _ = database.increment_ai_attempts(rowid);
                 }
                 Err(e) => {
-                    tracing::debug!("Deferred AI summary failed: {}", e);
+                    tracing::warn!("Deferred AI summary failed for rowid={}: {}", rowid, e);
                     let _ = database.increment_ai_attempts(rowid);
                 }
             }

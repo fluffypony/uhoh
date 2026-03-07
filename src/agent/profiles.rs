@@ -3,8 +3,6 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentProfile {
-    #[serde(default)]
-    pub profile_version: Option<u32>,
     pub name: String,
     #[serde(default)]
     pub session_log_pattern: String,
