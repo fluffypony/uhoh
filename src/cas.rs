@@ -198,8 +198,11 @@ pub fn store_blob_from_file(
             .as_nanos()
     ));
 
-    // Write what we already read (first_n bytes) plus the rest, hashing as we go
+    // Write what we already read (first_n bytes) plus the rest, hashing as we go.
+    // Track total bytes read to abort if the file grows past the size limit
+    // (prevents unbounded disk consumption from actively-appended files).
     let mut tmp_file = create_restricted_file(&tmp_path)?;
+    let mut total_read: u64 = first_n as u64;
     if first_n > 0 {
         tmp_file.write_all(&buf[..first_n])?;
     }
@@ -207,6 +210,29 @@ pub fn store_blob_from_file(
         let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
+        }
+        total_read += n as u64;
+        if total_read > effective_limit {
+            // File grew past limit during read — abort storage, keep hash-only
+            drop(tmp_file);
+            let _ = std::fs::remove_file(&tmp_path);
+            // Finish hashing the rest for a correct hash
+            hasher.update(&buf[..n]);
+            loop {
+                let m = reader.read(&mut buf)?;
+                if m == 0 {
+                    break;
+                }
+                hasher.update(&buf[..m]);
+            }
+            let hash = hasher.finalize().to_hex().to_string();
+            tracing::debug!(
+                "Aborting blob storage for {} — file grew past limit during read ({} bytes > {} limit)",
+                file_path.display(),
+                total_read,
+                effective_limit
+            );
+            return Ok((hash, total_read, StorageMethod::None, 0));
         }
         hasher.update(&buf[..n]);
         tmp_file.write_all(&buf[..n])?;
@@ -598,29 +624,53 @@ pub fn blob_disk_usage(blob_path: &Path) -> u64 {
 }
 
 /// Clean up stale temp files in the blob store (from crashed processes).
-/// Removes files under blobs/tmp older than the specified max_age.
+/// Scans both blobs/tmp/ and hash-prefix directories (blobs/ab/, etc.)
+/// for temp files older than the specified max_age.
 pub fn cleanup_stale_temp_files(blob_root: &Path, max_age: std::time::Duration) {
-    let tmp_dir = blob_root.join("tmp");
-    if !tmp_dir.exists() {
-        return;
-    }
     let now = std::time::SystemTime::now();
-    if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with(".tmp.")
-                    || name.starts_with(".blob.")
-                    || name.starts_with(".cblob.")
-                {
-                    if let Ok(meta) = std::fs::metadata(&path) {
-                        if let Ok(mtime) = meta.modified() {
-                            if let Ok(age) = now.duration_since(mtime) {
-                                if age > max_age {
-                                    let _ = std::fs::remove_file(&path);
+
+    let is_temp_file = |name: &str| -> bool {
+        name.starts_with(".tmp.")
+            || name.starts_with(".blob.")
+            || name.starts_with(".cblob.")
+    };
+
+    let cleanup_dir = |dir: &Path| {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if is_temp_file(name) {
+                        if let Ok(meta) = std::fs::metadata(&path) {
+                            if let Ok(mtime) = meta.modified() {
+                                if let Ok(age) = now.duration_since(mtime) {
+                                    if age > max_age {
+                                        let _ = std::fs::remove_file(&path);
+                                    }
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    };
+
+    // Clean blobs/tmp/
+    let tmp_dir = blob_root.join("tmp");
+    if tmp_dir.exists() {
+        cleanup_dir(&tmp_dir);
+    }
+
+    // Also clean hash-prefix directories (blobs/ab/, blobs/cd/, etc.)
+    if let Ok(entries) = std::fs::read_dir(blob_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    // Hash-prefix dirs are 2 hex chars
+                    if name.len() == 2 && name.chars().all(|c| c.is_ascii_hexdigit()) {
+                        cleanup_dir(&path);
                     }
                 }
             }

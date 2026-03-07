@@ -1257,16 +1257,13 @@ impl Database {
         let mut conn = self.conn()?;
         let ts = chrono::Utc::now().to_rfc3339();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let next_id: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(id), 0) + 1 FROM event_ledger",
-            [],
-            |row| row.get(0),
-        )?;
         let prev_hash = match event.prev_hash.clone() {
             Some(v) => v,
             None => self.latest_ledger_hash_with_conn(&tx)?.unwrap_or_default(),
         };
-        let chain_hash = ledger::compute_event_chain_hash_with_id(&prev_hash, next_id, event, &ts);
+        // Insert first without chain_hash, get the canonical ID from last_insert_rowid(),
+        // then compute the hash with the real ID and update in place.
+        // This avoids divergence between MAX(id)+1 and AUTOINCREMENT.
         tx.execute(
             "INSERT INTO event_ledger (
                 ts, source, event_type, severity, project_hash, agent_name, guard_name,
@@ -1284,12 +1281,19 @@ impl Database {
                 event.detail,
                 event.pre_state_ref,
                 event.post_state_ref,
-                chain_hash,
+                "", // placeholder for chain hash
                 event.causal_parent,
             ],
         )?;
+        let actual_id = tx.last_insert_rowid();
+        let chain_hash =
+            ledger::compute_event_chain_hash_with_id(&prev_hash, actual_id, event, &ts);
+        tx.execute(
+            "UPDATE event_ledger SET prev_hash = ?1 WHERE id = ?2",
+            params![chain_hash, actual_id],
+        )?;
         tx.commit()?;
-        Ok(next_id)
+        Ok(actual_id)
     }
 
     pub fn insert_event_ledger_batch(&self, events: &[NewEventLedgerEntry]) -> Result<usize> {

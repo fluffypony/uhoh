@@ -61,25 +61,18 @@ pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) ->
         .get_latest_completed_operation(&project.hash)?
         .context("No completed operations to undo")?;
 
-    // Find the snapshot just before this operation started
-    let restore_snap = if first_snap > 0 {
-        database.snapshot_before(&project.hash, first_snap)?
+    // Restore to first_snap itself — this is the clean pre-operation state
+    // recorded when `uhoh mark` was called. Previous code incorrectly went one
+    // snapshot further back via snapshot_before(), destroying a valid snapshot.
+    if first_snap > 0 {
+        let id_str = cas::id_to_base58(first_snap);
+        println!("Undoing operation \"{label}\": restoring to snapshot {id_str}");
+        crate::restore::cmd_restore(
+            uhoh_dir, database, project, &id_str, None, false,
+            true, // force (since this is an undo, we're intentional)
+        )?;
     } else {
-        None
-    };
-
-    match restore_snap {
-        Some(snap) => {
-            let id_str = cas::id_to_base58(snap.snapshot_id);
-            println!("Undoing operation \"{label}\": restoring to snapshot {id_str}");
-            crate::restore::cmd_restore(
-                uhoh_dir, database, project, &id_str, None, false,
-                true, // force (since this is an undo, we're intentional)
-            )?;
-        }
-        None => {
-            println!("No snapshot found before operation \"{label}\". Cannot undo.");
-        }
+        println!("No snapshot found for operation \"{label}\". Cannot undo.");
     }
 
     Ok(())

@@ -315,11 +315,14 @@ pub fn spawn_detached_daemon() -> Result<()> {
     Ok(())
 }
 
+/// Send a watch event to the daemon. Uses blocking_send since the watcher
+/// bridge runs on a dedicated OS thread, applying natural backpressure
+/// without stalling the async runtime.
 pub(crate) fn send_watch_event(
     tx: &tokio::sync::mpsc::Sender<WatchEvent>,
     event: WatchEvent,
-) -> std::result::Result<(), tokio::sync::mpsc::error::TrySendError<WatchEvent>> {
-    tx.try_send(event)
+) -> std::result::Result<(), tokio::sync::mpsc::error::SendError<WatchEvent>> {
+    tx.blocking_send(event)
 }
 
 /// Stop the daemon by reading PID file and sending signal.
@@ -610,6 +613,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 first_change_at: None,
                 last_change_at: None,
                 deleted_paths: std::collections::HashSet::new(),
+                cumulative_deletes: 0,
+                cumulative_window_start: None,
                 last_emergency_at: None,
                 cached_prev_file_count: cached_count,
                 cached_prev_manifest: cached_manifest,
@@ -674,23 +679,27 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 was_restoring = currently_restoring;
 
                 if currently_restoring {
-                    // Only drop events for the project being restored, not all projects
-                    let restoring_hash = read_restoring_project_hash(&uhoh_dir);
-                    let event_path = match &event {
-                        WatchEvent::FileChanged(p) | WatchEvent::FileDeleted(p) | WatchEvent::Rescan(p) => Some(p.clone()),
-                        _ => None,
-                    };
-                    let should_skip = if let (Some(ref rh), Some(ref ep)) = (&restoring_hash, &event_path) {
-                        project_states.iter().any(|(proj_path, state)| {
-                            state.hash == *rh && ep.starts_with(proj_path)
-                        })
-                    } else {
-                        // If we can't determine the project, skip all events (safe fallback)
-                        true
-                    };
-                    if should_skip {
-                        tracing::debug!("Skipping watcher event during restore operation");
-                        continue;
+                    // Control signals (WatcherDied, Overflow) must always be processed,
+                    // even during restore. Only suppress file-level events for the
+                    // project being restored.
+                    let is_control = matches!(event, WatchEvent::WatcherDied | WatchEvent::Overflow);
+                    if !is_control {
+                        let restoring_hash = read_restoring_project_hash(&uhoh_dir);
+                        let event_path = match &event {
+                            WatchEvent::FileChanged(p) | WatchEvent::FileDeleted(p) | WatchEvent::Rescan(p) => Some(p.clone()),
+                            _ => None,
+                        };
+                        let should_skip = if let (Some(ref rh), Some(ref ep)) = (&restoring_hash, &event_path) {
+                            project_states.iter().any(|(proj_path, state)| {
+                                state.hash == *rh && ep.starts_with(proj_path)
+                            })
+                        } else {
+                            true
+                        };
+                        if should_skip {
+                            tracing::debug!("Skipping watcher event during restore operation");
+                            continue;
+                        }
                     }
                 }
                 match event {
@@ -892,6 +901,12 @@ struct ProjectDaemonState {
     // --- Emergency delete detection ---
     /// Deletion candidates observed during the current debounce window.
     deleted_paths: std::collections::HashSet<PathBuf>,
+    /// Cumulative delete count over a sliding window, not reset per snapshot.
+    /// Prevents drip-feed attacks that stay below threshold per-snapshot.
+    cumulative_deletes: usize,
+    /// When the cumulative delete window started; resets after cooldown elapses
+    /// with no new deletions.
+    cumulative_window_start: Option<Instant>,
     /// Timestamp of last emergency snapshot for cooldown gating.
     last_emergency_at: Option<Instant>,
     /// Cached file count from the most recent snapshot (denominator for ratio).
@@ -1061,13 +1076,18 @@ fn handle_watch_event(
     }
     state.last_change_at = Some(now);
 
-    // Track deletions separately for emergency detection
+    // Track deletions separately for emergency detection.
+    // Maintain both per-snapshot deleted_paths and a cumulative counter
+    // across snapshots to prevent drip-feed bypass.
     if is_delete && state.deleted_paths.len() < MAX_DELETED_PATHS {
+        let mut new_deletes = 0usize;
         if let Some(ref manifest) = state.cached_prev_manifest {
             if let Ok(rel) = path.strip_prefix(project_path) {
                 let rel_path = crate::cas::encode_relpath(rel);
                 if manifest.contains(&rel_path) {
-                    state.deleted_paths.insert(path.clone());
+                    if state.deleted_paths.insert(path.clone()) {
+                        new_deletes += 1;
+                    }
                 } else {
                     let expanded = crate::emergency::expand_directory_deletion(&rel_path, manifest);
                     for exp_rel in expanded {
@@ -1075,12 +1095,22 @@ fn handle_watch_event(
                             break;
                         }
                         let exp_abs = PathBuf::from(project_path).join(&exp_rel);
-                        state.deleted_paths.insert(exp_abs);
+                        if state.deleted_paths.insert(exp_abs) {
+                            new_deletes += 1;
+                        }
                     }
                 }
             }
         } else {
-            state.deleted_paths.insert(path.clone());
+            if state.deleted_paths.insert(path.clone()) {
+                new_deletes += 1;
+            }
+        }
+        if new_deletes > 0 {
+            state.cumulative_deletes += new_deletes;
+            if state.cumulative_window_start.is_none() {
+                state.cumulative_window_start = Some(now);
+            }
         }
     }
 }
@@ -1273,14 +1303,28 @@ async fn process_pending_snapshots(
 
         if is_restoring {
             state.deleted_paths.clear();
+            state.cumulative_deletes = 0;
+            state.cumulative_window_start = None;
             // Mark restore-in-progress so we can detect the transition
             state.restore_completed_at = None;
         } else if in_grace_period {
             // Restore just finished; discard stale deletion events only.
             // Keep pending_changes so legitimate post-restore edits still snapshot normally.
             state.deleted_paths.clear();
+            state.cumulative_deletes = 0;
+            state.cumulative_window_start = None;
         } else if !state.deleted_paths.is_empty() {
-            let hint_count = state.deleted_paths.len();
+            // Reset cumulative window if cooldown has fully elapsed with no new deletions
+            if let Some(window_start) = state.cumulative_window_start {
+                if window_start.elapsed()
+                    > Duration::from_secs(config.watch.emergency_cooldown_secs)
+                {
+                    state.cumulative_deletes = state.deleted_paths.len();
+                    state.cumulative_window_start = Some(now);
+                }
+            }
+            // Use the larger of per-snapshot and cumulative counts to detect drip-feed
+            let hint_count = state.cumulative_deletes.max(state.deleted_paths.len());
 
             let eval = crate::emergency::evaluate_emergency(
                 hint_count,
@@ -1364,6 +1408,8 @@ async fn process_pending_snapshots(
                     // Drain pending changes for requeue on failure
                     let drained: Vec<PathBuf> = state.pending_changes.drain().collect();
                     state.deleted_paths.clear();
+                    state.cumulative_deletes = 0;
+                    state.cumulative_window_start = None;
                     state.first_change_at = None;
                     state.last_change_at = None;
                     // Cooldown is set after snapshot succeeds (in join results below)
@@ -2111,6 +2157,8 @@ fn check_for_new_projects(
                         first_change_at: None,
                         last_change_at: None,
                         deleted_paths: std::collections::HashSet::new(),
+                        cumulative_deletes: 0,
+                        cumulative_window_start: None,
                         last_emergency_at: None,
                         cached_prev_file_count: None,
                         cached_prev_manifest: None,

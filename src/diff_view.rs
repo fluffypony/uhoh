@@ -247,20 +247,44 @@ pub fn cmd_diff(
             continue;
         }
 
-        let old_content = old_hash
-            .and_then(|h| cas::read_blob(&blob_root, h).ok().flatten())
-            .and_then(|b| String::from_utf8(b).ok())
-            .unwrap_or_default();
-        let new_content = if is_current_tree {
-            // Read directly from filesystem for working tree comparison
+        let old_bytes = old_hash
+            .and_then(|h| cas::read_blob(&blob_root, h).ok().flatten());
+        let new_bytes = if is_current_tree {
             let file_on_disk = project_path.join(cas::decode_relpath_to_os(path));
-            std::fs::read_to_string(&file_on_disk).unwrap_or_default()
+            std::fs::read(&file_on_disk).ok()
         } else {
             new_hash
                 .and_then(|h| cas::read_blob(&blob_root, h).ok().flatten())
-                .and_then(|b| String::from_utf8(b).ok())
-                .unwrap_or_default()
         };
+
+        // Detect binary content before converting to string
+        let old_is_binary = old_bytes
+            .as_ref()
+            .map(|b| content_inspector::inspect(&b[..b.len().min(8192)]).is_binary())
+            .unwrap_or(false);
+        let new_is_binary = new_bytes
+            .as_ref()
+            .map(|b| content_inspector::inspect(&b[..b.len().min(8192)]).is_binary())
+            .unwrap_or(false);
+
+        if old_is_binary || new_is_binary {
+            let display_path = if path.strip_prefix("b64:").is_some() {
+                crate::cas::decode_relpath_to_os(path).to_string_lossy().into_owned()
+            } else {
+                path.to_string()
+            };
+            writeln!(stdout, "\n--- {label1}/{display_path}")?;
+            writeln!(stdout, "+++ {label2}/{display_path}")?;
+            writeln!(stdout, "[Binary files differ]")?;
+            continue;
+        }
+
+        let old_content = old_bytes
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default();
+        let new_content = new_bytes
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default();
 
         if old_content.len() > MAX_DIFF_BYTES || new_content.len() > MAX_DIFF_BYTES {
             writeln!(stdout, "\n--- {label1}/{path}")?;
