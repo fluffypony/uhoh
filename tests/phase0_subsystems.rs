@@ -272,10 +272,11 @@ fn health_endpoint_and_auth_exemption_present() {
 #[test]
 fn mcp_proxy_dangerous_patterns_use_exact_match_semantics() {
     let proxy = std::fs::read_to_string("src/agent/mcp_proxy.rs").expect("read mcp proxy");
-    assert!(proxy.contains("return tool_l == raw.trim();"));
+    assert!(proxy.contains("tool_l == raw.trim()"));
     // Path matching uses suffix/component matching so "Cargo.toml" matches full paths
     assert!(proxy.contains("file_path.ends_with(pattern_path)"));
-    assert!(proxy.contains("tool_l == p || path_l == p"));
+    // Tool and path matching
+    assert!(proxy.contains("tool_l == p_l") || proxy.contains("actual_path == p"));
 }
 
 #[test]

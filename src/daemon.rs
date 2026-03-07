@@ -673,6 +673,17 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     for state in project_states.values_mut() {
                         state.restore_completed_at = Some(now);
                         state.deleted_paths.clear();
+                        // Refresh cached manifest from latest snapshot so emergency
+                        // detection uses post-restore state, not stale pre-restore data.
+                        if let Ok(Some(rowid)) = database.latest_snapshot_rowid(&state.hash) {
+                            if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
+                                state.cached_prev_file_count = Some(row.file_count);
+                                if let Ok(files) = database.get_snapshot_files(rowid) {
+                                    state.cached_prev_manifest =
+                                        Some(files.iter().map(|f| f.path.clone()).collect());
+                                }
+                            }
+                        }
                     }
                     tracing::debug!("Restore completed, grace period started for all projects");
                 }

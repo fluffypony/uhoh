@@ -449,7 +449,10 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
             Err(_) => continue,
         };
         let (hash, size, is_symlink, executable) = if ft.is_symlink() {
-            let target = std::fs::read_link(path)?;
+            let target = match std::fs::read_link(path) {
+                Ok(t) => t,
+                Err(_) => continue, // Skip unreadable symlinks
+            };
             #[cfg(unix)]
             let target_bytes = {
                 use std::os::unix::ffi::OsStrExt;
@@ -465,7 +468,7 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
                 false,
             )
         } else {
-            let (hash, size) = {
+            let hash_result: std::io::Result<(String, u64)> = (|| {
                 let mut hasher = blake3::Hasher::new();
                 let mut f = std::fs::File::open(path)?;
                 let mut buf = [0u8; 64 * 1024];
@@ -478,7 +481,11 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
                     hasher.update(&buf[..n]);
                     total += n as u64;
                 }
-                (hasher.finalize().to_hex().to_string(), total)
+                Ok((hasher.finalize().to_hex().to_string(), total))
+            })();
+            let (hash, size) = match hash_result {
+                Ok(v) => v,
+                Err(_) => continue, // Skip unreadable files
             };
             (hash, size, false, cas::is_executable(path))
         };

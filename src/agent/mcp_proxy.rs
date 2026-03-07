@@ -352,26 +352,38 @@ async fn intercept_tool_call(
 
 fn is_dangerous_tool_call(tool: &str, path: Option<&str>, patterns: &[String]) -> bool {
     let tool_l = tool.to_ascii_lowercase();
-    let path_l = path.unwrap_or_default().to_ascii_lowercase();
+    let actual_path = path.unwrap_or_default();
     patterns.iter().any(|pattern| {
-        let p = pattern.trim().to_ascii_lowercase();
+        let p = pattern.trim();
         if p.is_empty() {
             return false;
         }
-        if let Some(raw) = p.strip_prefix("tool:") {
+        let p_l = p.to_ascii_lowercase();
+        if let Some(raw) = p_l.strip_prefix("tool:") {
             return tool_l == raw.trim();
         }
-        if let Some(raw) = p.strip_prefix("path:") {
+        if let Some(raw) = p.strip_prefix("path:").or_else(|| p.strip_prefix("PATH:")) {
             let raw = raw.trim();
             if raw.is_empty() {
                 return false;
             }
-            // Use path suffix matching so "Cargo.toml" matches "/home/user/project/Cargo.toml"
-            let file_path = std::path::Path::new(&*path_l);
+            // Use platform-appropriate case comparison for path matching.
+            // On Unix, filesystems are case-sensitive; on Windows, case-insensitive.
+            let file_path = std::path::Path::new(actual_path);
             let pattern_path = std::path::Path::new(raw);
-            return file_path.ends_with(pattern_path);
+            #[cfg(unix)]
+            {
+                return file_path.ends_with(pattern_path);
+            }
+            #[cfg(not(unix))]
+            {
+                let file_lower = actual_path.to_ascii_lowercase();
+                let raw_lower = raw.to_ascii_lowercase();
+                return std::path::Path::new(&file_lower)
+                    .ends_with(std::path::Path::new(&raw_lower));
+            }
         }
-        tool_l == p || path_l == p
+        tool_l == p_l || actual_path == p
     })
 }
 

@@ -53,7 +53,13 @@ pub fn resolve_session_log_path(pattern: &str) -> Result<Option<std::path::PathB
             matches.push(path);
         }
     }
-    matches.sort();
+    // Sort by modification time (newest last) to pick the most recent session log,
+    // not just the lexicographically last one.
+    matches.sort_by_key(|p| {
+        p.metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
     Ok(matches.pop())
 }
 
