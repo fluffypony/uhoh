@@ -312,8 +312,8 @@ fn spawn_backend(
                 &ctx_size,
                 "--n-gpu-layers",
                 "999",
-                // Constrain to 1 slot to avoid over-allocating memory on dev machines
-                "--slots",
+                // Constrain to 1 parallel decoding slot to avoid over-allocating memory
+                "-np",
                 "1",
             ]);
             let child = cmd

@@ -151,11 +151,9 @@ impl DaemonMaintenanceSubsystem {
 
         let _ = ctx.database.prune_ai_queue_ttl(7);
 
-        // Prune old event ledger entries to prevent unbounded growth (BUG-M2).
-        // Keep 90 days of entries.
-        if let Err(e) = ctx.database.prune_event_ledger_ttl(90) {
-            tracing::debug!("Event ledger pruning failed: {}", e);
-        }
+        // Note: event ledger is NOT pruned by TTL because doing so would break
+        // the tamper-evident hash chain. Unbounded growth is addressed by
+        // compaction at the snapshot level; the ledger is append-only by design.
 
         let mut tick_sys = sysinfo::System::new();
         tick_sys.refresh_memory();
@@ -1985,8 +1983,9 @@ async fn process_ai_summary_queue(
                         rowid
                     );
                     if let Ok(attempts) = database.increment_ai_attempts(rowid) {
-                        if attempts >= 2 {
-                            // Delete after 2 consecutive empty results to avoid queue buildup
+                        // Delete after 3 total failures (empty or error) to avoid queue buildup.
+                        // The attempts counter is shared between empty and error paths.
+                        if attempts >= 3 {
                             let _ = database.delete_pending_ai(rowid);
                         }
                     }
