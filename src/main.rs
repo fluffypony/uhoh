@@ -1548,7 +1548,7 @@ fn handle_agent_commands(
                 anyhow::bail!("Agent profile not found: {resolved_profile}");
             }
             let _ = uhoh::agent::load_agent_profile(std::path::Path::new(&resolved_profile))?;
-            database.add_agent(name, &profile_path, 1, None)?;
+            database.add_agent(name, &profile_path, None)?;
             println!("Added agent '{name}'");
         }
         AgentAction::Remove { name } => {
@@ -1777,8 +1777,7 @@ fn handle_agent_commands(
             if !template_path.exists() {
                 std::fs::write(
                     &template_path,
-                    r#"profile_version = 1
-name = "default"
+                    r#"name = "default"
 session_log_pattern = ""
 tool_call_format = "jsonl"
 "#,
@@ -1837,8 +1836,7 @@ tool_call_format = "jsonl"
             if !default_profile.exists() {
                 std::fs::write(
                     &default_profile,
-                    r#"profile_version = 1
-name = "generic"
+                    r#"name = "generic"
 process_names = ["node", "python", "uhoh"]
 session_log_pattern = "~/.uhoh/agent-intent.jsonl"
 tool_names_write = ["write", "apply_patch"]

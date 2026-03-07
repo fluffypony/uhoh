@@ -141,7 +141,6 @@ pub struct AgentEntry {
     pub id: i64,
     pub name: String,
     pub profile_path: String,
-    pub profile_version: i64,
     pub data_dir: Option<String>,
     pub registered_at: String,
     pub active: bool,
@@ -1523,11 +1522,49 @@ impl Database {
     }
 
     /// Return the event ID and any descendants linked via causal_parent.
-    /// Currently causal_parent is never populated, so this returns just the root ID.
-    /// The recursive CTE has been removed since it was dead code; if causal_parent
-    /// is populated in the future, re-add the recursive walk.
+    /// Uses a recursive CTE with a hard depth/row guard to avoid runaway recursion
+    /// on malformed graphs.
     pub fn event_ledger_descendant_ids(&self, root_id: i64) -> Result<Vec<i64>> {
-        Ok(vec![root_id])
+        let limit = 10_000i64;
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "WITH RECURSIVE descendants(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION ALL
+                 SELECT e.id, d.depth + 1
+                 FROM event_ledger e
+                 JOIN descendants d ON e.causal_parent = d.id
+                 WHERE d.depth < ?2
+             )
+             SELECT COUNT(*) FROM descendants",
+            params![root_id, limit],
+            |row| row.get(0),
+        )?;
+        if count >= limit {
+            anyhow::bail!(
+                "Descendant expansion reached limit of {} entries for root event #{}",
+                limit,
+                root_id
+            );
+        }
+
+        let mut stmt = conn.prepare(
+            "WITH RECURSIVE descendants(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION ALL
+                 SELECT e.id, d.depth + 1
+                 FROM event_ledger e
+                 JOIN descendants d ON e.causal_parent = d.id
+                 WHERE d.depth < ?2
+             )
+             SELECT id FROM descendants",
+        )?;
+        let rows = stmt.query_map(params![root_id, limit], |row| row.get::<_, i64>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     pub fn event_ledger_mark_resolved_cascade(&self, root_id: i64) -> Result<usize> {
@@ -1704,15 +1741,14 @@ impl Database {
         &self,
         name: &str,
         profile_path: &str,
-        profile_version: i64,
         data_dir: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO agents (name, profile_path, profile_version, data_dir, registered_at, active)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1)",
-            params![name, profile_path, profile_version, data_dir, now],
+            "INSERT INTO agents (name, profile_path, data_dir, registered_at, active)
+             VALUES (?1, ?2, ?3, ?4, 1)",
+            params![name, profile_path, data_dir, now],
         )?;
         Ok(())
     }
@@ -1720,7 +1756,7 @@ impl Database {
     pub fn list_agents(&self) -> Result<Vec<AgentEntry>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, profile_path, profile_version, data_dir, registered_at, active
+            "SELECT id, name, profile_path, data_dir, registered_at, active
              FROM agents ORDER BY id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1728,10 +1764,9 @@ impl Database {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 profile_path: row.get(2)?,
-                profile_version: row.get(3)?,
-                data_dir: row.get(4)?,
-                registered_at: row.get(5)?,
-                active: row.get::<_, i32>(6)? != 0,
+                data_dir: row.get(3)?,
+                registered_at: row.get(4)?,
+                active: row.get::<_, i32>(5)? != 0,
             })
         })?;
         let mut out = Vec::new();

@@ -137,6 +137,25 @@ fn event_ledger_trace_and_resolve_roundtrip() {
     assert!(updated.resolved);
 }
 
+#[test]
+fn event_ledger_descendant_ids_returns_causal_descendants() {
+    let (_tmp, db) = temp_db();
+
+    let root = db
+        .insert_event_ledger(&event("agent", "root", Some("src/lib.rs"), None))
+        .unwrap();
+    let child = db
+        .insert_event_ledger(&event("agent", "child", Some("src/lib.rs"), Some(root)))
+        .unwrap();
+    let grandchild = db
+        .insert_event_ledger(&event("agent", "grandchild", Some("src/lib.rs"), Some(child)))
+        .unwrap();
+
+    let mut ids = db.event_ledger_descendant_ids(root).unwrap();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![root, child, grandchild]);
+}
+
 fn make_cli_home_with_events() -> (TempDir, i64, i64) {
     let home = tempfile::tempdir().unwrap();
     let uhoh_dir = home.path().join(".uhoh");

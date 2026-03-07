@@ -113,7 +113,6 @@ CREATE TABLE IF NOT EXISTS agents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     profile_path TEXT NOT NULL,
-    profile_version INTEGER NOT NULL DEFAULT 1,
     data_dir TEXT,
     registered_at TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1
