@@ -307,11 +307,20 @@ pub fn store_blob_from_file(
                     return Err(e);
                 }
             };
-            let file_handle = writer
-                .into_inner()
-                .map_err(|e| anyhow::anyhow!("Failed to get temp file handle: {e}"))?;
-            file_handle.sync_all()?;
-            let compressed_size = file_handle.metadata()?.len();
+            let finalize_result: anyhow::Result<u64> = (|| {
+                let file_handle = writer
+                    .into_inner()
+                    .map_err(|e| anyhow::anyhow!("Failed to get temp file handle: {e}"))?;
+                file_handle.sync_all()?;
+                Ok(file_handle.metadata()?.len())
+            })();
+            let compressed_size = match finalize_result {
+                Ok(sz) => sz,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&compressed_tmp);
+                    return Err(e);
+                }
+            };
 
             if compressed_size < actual_size + COMPRESSION_MAGIC.len() as u64 {
                 // Compressed is smaller: use it

@@ -12,25 +12,40 @@ fn revert_event(uhoh_dir: &Path, database: &Database, event: &EventLedgerEntry) 
 
     let target = Path::new(path);
 
-    // Validate target is within a known project root to prevent writes outside projects
-    if let Some(ref project_hash) = event.project_hash {
-        if let Ok(projects) = database.list_projects() {
-            let project = projects.iter().find(|p| &p.hash == project_hash);
-            if let Some(proj) = project {
-                let project_root = Path::new(&proj.current_path);
-                if let (Ok(canon_target), Ok(canon_root)) =
-                    (dunce::canonicalize(target.parent().unwrap_or(target)), dunce::canonicalize(project_root))
-                {
-                    if !canon_target.starts_with(&canon_root) {
-                        anyhow::bail!(
-                            "Refusing to revert event #{}: path {} is outside project root {}",
-                            event.id,
-                            target.display(),
-                            project_root.display()
-                        );
-                    }
-                }
+    // Validate target is within a known project root to prevent writes outside projects.
+    // Fail-closed: if we can't verify the path is within a project, reject the revert.
+    {
+        let projects = database.list_projects().unwrap_or_default();
+        let project_roots: Vec<&str> = if let Some(ref ph) = event.project_hash {
+            // If event has a project_hash, validate against that specific project
+            projects
+                .iter()
+                .filter(|p| &p.hash == ph)
+                .map(|p| p.current_path.as_str())
+                .collect()
+        } else {
+            // No project_hash on event — check against ALL project roots
+            projects.iter().map(|p| p.current_path.as_str()).collect()
+        };
+        let within_project = project_roots.iter().any(|root| {
+            let project_root = Path::new(root);
+            // Check the target parent (or target itself) is within the project root
+            let check_path = target.parent().unwrap_or(target);
+            if let (Ok(canon_check), Ok(canon_root)) =
+                (dunce::canonicalize(check_path), dunce::canonicalize(project_root))
+            {
+                canon_check.starts_with(&canon_root)
+            } else {
+                // If target doesn't exist yet, check the string prefix
+                target.starts_with(project_root)
             }
+        });
+        if !within_project {
+            anyhow::bail!(
+                "Refusing to revert event #{}: path {} is not within any tracked project",
+                event.id,
+                target.display()
+            );
         }
     }
 

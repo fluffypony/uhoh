@@ -138,17 +138,17 @@ pub fn validate_host(headers: &HeaderMap, expected_port: u16) -> bool {
 pub fn validate_origin(headers: &HeaderMap) -> bool {
     if let Some(origin) = headers.get("origin") {
         if let Ok(origin_s) = origin.to_str() {
-            let allowed_prefixes = [
-                "http://127.0.0.1",
-                "http://localhost",
-                "https://127.0.0.1",
-                "https://localhost",
-                "http://[::1]",
-                "https://[::1]",
-            ];
-            return allowed_prefixes
-                .iter()
-                .any(|prefix| origin_s.starts_with(prefix));
+            // Parse the URL and check the host component exactly,
+            // not with starts_with (which would accept localhost.evil.com).
+            if let Ok(parsed) = url::Url::parse(origin_s) {
+                if let Some(host) = parsed.host_str() {
+                    return host == "127.0.0.1"
+                        || host == "localhost"
+                        || host == "::1"
+                        || host == "[::1]";
+                }
+            }
+            return false;
         }
         return false;
     }
