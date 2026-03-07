@@ -16,7 +16,7 @@ uhoh watches your project folders, takes content-addressable snapshots as files 
 - Optional zstd compression for blobs (behind `compression` feature flag)
 - `.uhohignore` files for project-specific exclusions beyond `.gitignore`
 - Optional AI summaries via a local sidecar (Qwen 3.5 tiers, MLX on Apple Silicon); skips on battery/low-RAM
-- Built-in localhost server on `127.0.0.1:22822` with REST API, Time Machine UI, WebSocket events, full-text search, and MCP HTTP endpoint
+- Built-in localhost server on `127.0.0.1:22822` with REST API, Time Machine UI, WebSocket events, full-text search, and MCP JSON-RPC endpoint (POST /mcp)
 - MCP over STDIO with `uhoh mcp` for zero-config agent integration; both transports expose `create_snapshot`, `list_snapshots`, `restore_snapshot`, and `uhoh_pre_notify` tools
 - Unified event ledger across filesystem, database guard, and agent monitor events with BLAKE3 hash chain for tamper detection
 - Event forensics commands: `uhoh trace <event-id>`, `uhoh blame <path>`, `uhoh timeline [--source ...] [--since ...]`, and `uhoh ledger verify`
@@ -171,12 +171,12 @@ When enabled, the daemon starts a unified localhost server (default `127.0.0.1:2
 | `/api/v1/projects/{hash}/timeline` | GET | Snapshot timeline with track grouping |
 | `/api/v1/search` | GET | Full-text search across snapshots (`?q=...&project=...`) |
 | `/ws` | GET | WebSocket live events |
-| `/mcp` | POST | MCP Streamable HTTP JSON-RPC endpoint |
+| `/mcp` | POST | MCP JSON-RPC endpoint (POST-only; not a full Streamable HTTP implementation) |
 | `/health` | GET | Health check with subsystem status |
 
 WebSocket events: `snapshot_created`, `snapshot_restored`, `ai_summary_completed`, `sidecar_updated`, `mlx_update_status`, `mlx_update_failed`, `db_guard_alert`, `agent_alert`, `project_added`, `project_removed`.
 
-Mutating requests require a bearer token by default. The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery. The server also validates the `Host` header against expected loopback values to prevent DNS rebinding.
+All `/api/*` and `/mcp` requests require a bearer token by default. The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery. The server validates both `Host` and `Origin` headers against expected loopback values to prevent DNS rebinding.
 
 ## MCP tools
 
@@ -437,9 +437,9 @@ Each event stores a `prev_hash` field computed as `BLAKE3(prev_hash || NUL || id
 
 Run `uhoh ledger verify` to walk the full chain and report any broken links.
 
-### Batch insertion
+### Event insertion
 
-The daemon uses a lock-free ring buffer (crossbeam `ArrayQueue`) to batch events from multiple subsystems. A background flusher drains up to 256 events per tick and inserts them in a single transaction, keeping write contention low.
+Events are inserted synchronously into the append-only ledger. Each event's hash chains to its predecessor for tamper detection. The ledger is never pruned to preserve hash-chain integrity; use `uhoh ledger verify` to validate.
 
 ## Deep dive: search
 

@@ -78,20 +78,23 @@ pub fn restore_symlink_target(content: &[u8], full_path: &Path) -> Result<()> {
         match std::os::windows::fs::symlink_file(target_path, full_path) {
             Ok(_) => {}
             Err(e) if e.raw_os_error() == Some(1314) => {
-                tracing::warn!(
-                    "Cannot create symlink at {}: Windows requires Developer Mode or elevated privileges. Writing target as regular file instead.",
+                eprintln!(
+                    "WARNING: Cannot create symlink at {}: Windows requires Developer Mode or elevated privileges. \
+                     Writing target path as regular file instead (symlink nature will be lost on re-snapshot).",
                     full_path.display()
                 );
+                tracing::warn!("Symlink degraded to regular file: {}", full_path.display());
                 std::fs::write(full_path, content)?;
             }
             Err(e) => match std::os::windows::fs::symlink_dir(target_path, full_path) {
                 Ok(_) => {}
                 Err(_) => {
-                    tracing::warn!(
-                        "Cannot create symlink at {}: {}. Writing target as regular file.",
-                        full_path.display(),
-                        e
+                    eprintln!(
+                        "WARNING: Cannot create symlink at {}: {}. \
+                         Writing target path as regular file instead (symlink nature will be lost on re-snapshot).",
+                        full_path.display(), e
                     );
+                    tracing::warn!("Symlink degraded to regular file: {}", full_path.display());
                     std::fs::write(full_path, content)?;
                 }
             },
@@ -171,6 +174,21 @@ fn safe_remove_dir_tree_within(project_base: &Path, target: &Path) -> Result<()>
     remove_tree_safe(&target_canonical, &project_canonical)?;
     let _ = std::fs::remove_dir(&target_canonical);
     Ok(())
+}
+
+/// Quick BLAKE3 hash of a file for comparison. Returns hex string.
+fn quick_hash_file(path: &Path) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut f, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn validate_restore_path(project_path: &Path, relative_path: &str) -> Result<()> {
@@ -291,14 +309,24 @@ pub fn cmd_restore(
             }
         }
 
-        // Files to restore/create
+        // Files to restore/create — skip files whose current content already matches target
         for file in &target_files {
             if !file.stored {
                 continue;
             }
             validate_restore_path(project_path, &file.path)?;
+            let rel = crate::cas::decode_relpath_to_os(&file.path);
+            let abs_path = project_path.join(&rel);
+            // Skip if current file already has the same hash (avoids unnecessary I/O)
+            if abs_path.exists() && !file.is_symlink {
+                if let Ok(current_hash) = quick_hash_file(&abs_path) {
+                    if current_hash == file.hash {
+                        continue;
+                    }
+                }
+            }
             to_restore.push((
-                std::path::PathBuf::from(crate::cas::decode_relpath_to_os(&file.path)),
+                std::path::PathBuf::from(rel),
                 file.hash.clone(),
                 file.executable,
                 file.is_symlink,

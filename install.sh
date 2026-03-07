@@ -111,6 +111,21 @@ main() {
   fi
   chmod +x "${TMP_BIN}"
 
+  # Pre-install verification: verify the binary BEFORE installing it
+  echo ""
+  echo "Running pre-install verification..."
+  if "${TMP_BIN}" doctor --verify-install 2>/dev/null; then
+    echo -e "${GREEN}✓${NC} Binary integrity verified before install."
+  else
+    code=$?
+    if [ $code -eq 2 ]; then
+      echo -e "${YELLOW}WARNING:${NC} DNS hash verification could not be completed."
+    else
+      echo -e "${YELLOW}Pre-install verification returned code ${code}.${NC}"
+    fi
+    # Continue with install despite verification issues
+  fi
+
   # Install
   echo ""
   if [ ! -w "${INSTALL_DIR}" ]; then

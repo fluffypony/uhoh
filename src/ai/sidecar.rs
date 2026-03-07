@@ -258,6 +258,33 @@ fn wait_for_ready_blocking(port: u16, max_wait: Duration, child: &mut Child) -> 
     }
 }
 
+/// Check if MLX backend is available on this platform without full detection.
+pub fn is_mlx_available(uhoh_dir: &Path) -> bool {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let candidates = [
+            uhoh_dir.join("venv/mlx/bin/python3"),
+            uhoh_dir.join("venv/mlx/bin/python"),
+            PathBuf::from("python3"),
+            PathBuf::from("python"),
+        ];
+        for python in candidates {
+            if Command::new(&python)
+                .args(["-c", "import mlx_lm"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+    }
+    let _ = uhoh_dir; // suppress unused warning on non-macOS
+    false
+}
+
 fn detect_backend(uhoh_dir: &Path) -> Result<Backend> {
     // Prefer MLX on Apple Silicon macOS when available
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
