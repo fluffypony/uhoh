@@ -81,17 +81,15 @@ pub fn compact_project(
 
         // Emergency snapshots are immune to bucket-deduplication pruning within
         // the configured retention window.
-        if snapshot.trigger == "emergency" {
-            if age < emergency_retention {
-                register_in_buckets(
-                    snapshot,
-                    &mut buckets_5min,
-                    &mut buckets_hourly,
-                    &mut buckets_daily,
-                    &mut buckets_weekly,
-                );
-                continue;
-            }
+        if snapshot.trigger == "emergency" && age < emergency_retention {
+            register_in_buckets(
+                snapshot,
+                &mut buckets_5min,
+                &mut buckets_hourly,
+                &mut buckets_daily,
+                &mut buckets_weekly,
+            );
+            continue;
             // After retention window expires, fall through to normal bucket logic
         }
 

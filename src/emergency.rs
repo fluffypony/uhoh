@@ -30,6 +30,19 @@ pub enum EmergencyEvaluation {
     Skipped { reason: &'static str },
 }
 
+pub struct EmergencyEvalInput<'a> {
+    pub deleted_paths_hint_count: usize,
+    pub cached_baseline_count: Option<u64>,
+    pub last_emergency_at: Option<Instant>,
+    pub cooldown_secs: u64,
+    pub threshold: f64,
+    pub min_files: usize,
+    pub restore_in_progress: bool,
+    pub overflow_occurred: bool,
+    pub project_root: &'a Path,
+    pub cached_manifest: Option<&'a BTreeSet<String>>,
+}
+
 /// Pure threshold math. Returns true if both conditions are met:
 /// 1. `deleted_count >= min_files`
 /// 2. `deleted_count / baseline_count >= threshold`
@@ -111,18 +124,20 @@ pub fn verify_deletions_against_manifest(
 /// Full emergency evaluation combining all checks.
 ///
 /// This is the main entry point called from the daemon's debounce processor.
-pub fn evaluate_emergency(
-    deleted_paths_hint_count: usize,
-    cached_baseline_count: Option<u64>,
-    last_emergency_at: Option<Instant>,
-    cooldown_secs: u64,
-    threshold: f64,
-    min_files: usize,
-    restore_in_progress: bool,
-    overflow_occurred: bool,
-    project_root: &Path,
-    cached_manifest: Option<&BTreeSet<String>>,
-) -> EmergencyEvaluation {
+pub fn evaluate_emergency(input: EmergencyEvalInput<'_>) -> EmergencyEvaluation {
+    let EmergencyEvalInput {
+        deleted_paths_hint_count,
+        cached_baseline_count,
+        last_emergency_at,
+        cooldown_secs,
+        threshold,
+        min_files,
+        restore_in_progress,
+        overflow_occurred,
+        project_root,
+        cached_manifest,
+    } = input;
+
     if restore_in_progress {
         return EmergencyEvaluation::Skipped {
             reason: "restore_in_progress",
@@ -320,32 +335,32 @@ mod tests {
             // Don't create the files -> they appear "deleted"
         }
 
-        let result = evaluate_emergency(
-            10,
-            Some(10),
-            None,
-            120,
-            0.30,
-            5,
-            false,
-            false,
-            tmp.path(),
-            Some(&manifest),
-        );
+        let result = evaluate_emergency(EmergencyEvalInput {
+            deleted_paths_hint_count: 10,
+            cached_baseline_count: Some(10),
+            last_emergency_at: None,
+            cooldown_secs: 120,
+            threshold: 0.30,
+            min_files: 5,
+            restore_in_progress: false,
+            overflow_occurred: false,
+            project_root: tmp.path(),
+            cached_manifest: Some(&manifest),
+        });
         assert!(matches!(result, EmergencyEvaluation::Triggered { .. }));
 
-        let result = evaluate_emergency(
-            10,
-            Some(10),
-            Some(Instant::now()),
-            120,
-            0.30,
-            5,
-            false,
-            false,
-            tmp.path(),
-            Some(&manifest),
-        );
+        let result = evaluate_emergency(EmergencyEvalInput {
+            deleted_paths_hint_count: 10,
+            cached_baseline_count: Some(10),
+            last_emergency_at: Some(Instant::now()),
+            cooldown_secs: 120,
+            threshold: 0.30,
+            min_files: 5,
+            restore_in_progress: false,
+            overflow_occurred: false,
+            project_root: tmp.path(),
+            cached_manifest: Some(&manifest),
+        });
         assert!(matches!(
             result,
             EmergencyEvaluation::CooldownSuppressed { .. }
@@ -361,18 +376,18 @@ mod tests {
         }
 
         let long_ago = Instant::now() - Duration::from_secs(300);
-        let result = evaluate_emergency(
-            10,
-            Some(10),
-            Some(long_ago),
-            120,
-            0.30,
-            5,
-            false,
-            false,
-            tmp.path(),
-            Some(&manifest),
-        );
+        let result = evaluate_emergency(EmergencyEvalInput {
+            deleted_paths_hint_count: 10,
+            cached_baseline_count: Some(10),
+            last_emergency_at: Some(long_ago),
+            cooldown_secs: 120,
+            threshold: 0.30,
+            min_files: 5,
+            restore_in_progress: false,
+            overflow_occurred: false,
+            project_root: tmp.path(),
+            cached_manifest: Some(&manifest),
+        });
         assert!(matches!(result, EmergencyEvaluation::Triggered { .. }));
     }
 
@@ -383,18 +398,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let manifest = BTreeSet::new();
 
-        let result = evaluate_emergency(
-            100,
-            Some(100),
-            None,
-            120,
-            0.30,
-            5,
-            true,
-            false,
-            tmp.path(),
-            Some(&manifest),
-        );
+        let result = evaluate_emergency(EmergencyEvalInput {
+            deleted_paths_hint_count: 100,
+            cached_baseline_count: Some(100),
+            last_emergency_at: None,
+            cooldown_secs: 120,
+            threshold: 0.30,
+            min_files: 5,
+            restore_in_progress: true,
+            overflow_occurred: false,
+            project_root: tmp.path(),
+            cached_manifest: Some(&manifest),
+        });
         assert!(matches!(
             result,
             EmergencyEvaluation::Skipped {
@@ -410,18 +425,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let manifest = BTreeSet::new();
 
-        let result = evaluate_emergency(
-            100,
-            Some(100),
-            None,
-            120,
-            0.30,
-            5,
-            false,
-            true,
-            tmp.path(),
-            Some(&manifest),
-        );
+        let result = evaluate_emergency(EmergencyEvalInput {
+            deleted_paths_hint_count: 100,
+            cached_baseline_count: Some(100),
+            last_emergency_at: None,
+            cooldown_secs: 120,
+            threshold: 0.30,
+            min_files: 5,
+            restore_in_progress: false,
+            overflow_occurred: true,
+            project_root: tmp.path(),
+            cached_manifest: Some(&manifest),
+        });
         assert!(matches!(
             result,
             EmergencyEvaluation::Skipped {
@@ -470,18 +485,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let manifest = BTreeSet::new();
 
-        let result = evaluate_emergency(
-            100,
-            None,
-            None,
-            120,
-            0.30,
-            5,
-            false,
-            false,
-            tmp.path(),
-            Some(&manifest),
-        );
+        let result = evaluate_emergency(EmergencyEvalInput {
+            deleted_paths_hint_count: 100,
+            cached_baseline_count: None,
+            last_emergency_at: None,
+            cooldown_secs: 120,
+            threshold: 0.30,
+            min_files: 5,
+            restore_in_progress: false,
+            overflow_occurred: false,
+            project_root: tmp.path(),
+            cached_manifest: Some(&manifest),
+        });
         assert!(matches!(
             result,
             EmergencyEvaluation::Skipped {
@@ -498,18 +513,18 @@ mod tests {
             manifest.insert(format!("file{}.rs", i));
         }
 
-        let result = evaluate_emergency(
-            3,
-            Some(10),
-            None,
-            120,
-            0.30,
-            5,
-            false,
-            false,
-            tmp.path(),
-            Some(&manifest),
-        );
+        let result = evaluate_emergency(EmergencyEvalInput {
+            deleted_paths_hint_count: 3,
+            cached_baseline_count: Some(10),
+            last_emergency_at: None,
+            cooldown_secs: 120,
+            threshold: 0.30,
+            min_files: 5,
+            restore_in_progress: false,
+            overflow_occurred: false,
+            project_root: tmp.path(),
+            cached_manifest: Some(&manifest),
+        });
         assert!(matches!(result, EmergencyEvaluation::NoEmergency));
     }
 }

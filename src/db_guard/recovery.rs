@@ -102,6 +102,7 @@ pub fn write_sqlite_schema_recovery(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn write_postgres_schema_recovery(
     uhoh_dir: &std::path::Path,
     guard_name: &str,
@@ -377,7 +378,7 @@ fn decrypt_v2(payload: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {
                     "Encrypted artifact requires UHOH_MASTER_KEY for Argon2id decryption"
                 )
             })?;
-            let derived = match derive_argon2_key(&master, &salt) {
+            match derive_argon2_key(&master, &salt) {
                 Ok(v) => {
                     master.zeroize();
                     v
@@ -386,8 +387,7 @@ fn decrypt_v2(payload: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>> {
                     master.zeroize();
                     return Err(e);
                 }
-            };
-            derived
+            }
         }
         ENC_KDF_BLAKE3 => {
             if let Some(mut master) = read_master_key_from_env() {

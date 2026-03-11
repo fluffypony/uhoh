@@ -85,6 +85,7 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&tmp)?;
     // Seek to end for resume
     {

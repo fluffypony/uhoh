@@ -850,17 +850,6 @@ pub fn millis_to_mtime(millis: i64) -> SystemTime {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn ai_diff_truncation_marker_present() {
-        let source = std::fs::read_to_string("src/snapshot.rs").expect("read snapshot source");
-        assert!(source.contains("[Diff truncated]"));
-        assert!(source.contains("is_char_boundary"));
-        assert!(source.contains("max_context_tokens.saturating_mul(4)"));
-    }
-}
-
 fn enforce_storage_limit(
     database: &Database,
     project_size: u64,
@@ -937,6 +926,17 @@ fn load_previous_snapshot_files(
         }
     }
     Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ai_diff_truncation_marker_present() {
+        let source = std::fs::read_to_string("src/snapshot.rs").expect("read snapshot source");
+        assert!(source.contains("[Diff truncated]"));
+        assert!(source.contains("is_char_boundary"));
+        assert!(source.contains("max_context_tokens.saturating_mul(4)"));
+    }
 }
 
 // Tree hash computation removed to reduce overhead; table preserved for potential future use.

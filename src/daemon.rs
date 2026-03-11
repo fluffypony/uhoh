@@ -820,30 +820,30 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 }
             }
             _ = debounce_interval.tick() => {
-                process_pending_snapshots(
-                    &uhoh_dir,
-                    database.clone(),
-                    &mut project_states,
-                    &config,
-                    &server_event_tx,
-                    &event_ledger,
-                    &restore_in_progress,
-                    &mut was_restoring,
-                ).await;
+                process_pending_snapshots(SnapshotProcessCtx {
+                    uhoh_dir: &uhoh_dir,
+                    database: database.clone(),
+                    states: &mut project_states,
+                    config: &config,
+                    event_tx: &server_event_tx,
+                    event_ledger: &event_ledger,
+                    restore_in_progress: &restore_in_progress,
+                    was_restoring_snapshot: &mut was_restoring,
+                }).await;
             }
             _ = maintenance_interval.tick() => {
-                let tick = run_tick_maintenance(
-                    &config,
-                    &config_path,
-                    &update_trigger,
-                    &database,
-                    &event_ledger,
-                    &subsystem_manager,
-                    &uhoh_dir,
-                    &server_event_tx,
-                    &mut watcher_handle,
-                    &mut project_states,
-                ).await;
+                let tick = run_tick_maintenance(TickMaintenanceCtx {
+                    config: &config,
+                    config_path: &config_path,
+                    update_trigger: &update_trigger,
+                    database: &database,
+                    event_ledger: &event_ledger,
+                    subsystem_manager: &subsystem_manager,
+                    uhoh_dir: &uhoh_dir,
+                    server_event_tx: &server_event_tx,
+                    watcher_handle: &mut watcher_handle,
+                    project_states: &mut project_states,
+                }).await;
 
                 if let Some(new_debounce) = tick.updated_debounce {
                     debounce_interval = new_debounce;
@@ -965,6 +965,37 @@ struct TickOutcome {
     updated_update_interval: Option<tokio::time::Interval>,
     should_restart_for_update: bool,
 }
+
+struct TickMaintenanceCtx<'a> {
+    config: &'a Config,
+    config_path: &'a Path,
+    update_trigger: &'a Path,
+    database: &'a Arc<Database>,
+    event_ledger: &'a EventLedger,
+    subsystem_manager: &'a Arc<Mutex<SubsystemManager>>,
+    uhoh_dir: &'a Path,
+    server_event_tx: &'a broadcast::Sender<crate::server::events::ServerEvent>,
+    watcher_handle: &'a mut notify::RecommendedWatcher,
+    project_states: &'a mut HashMap<String, ProjectDaemonState>,
+}
+
+struct SnapshotProcessCtx<'a> {
+    uhoh_dir: &'a Path,
+    database: Arc<Database>,
+    states: &'a mut HashMap<String, ProjectDaemonState>,
+    config: &'a Config,
+    event_tx: &'a broadcast::Sender<crate::server::events::ServerEvent>,
+    event_ledger: &'a EventLedger,
+    restore_in_progress: &'a AtomicBool,
+    was_restoring_snapshot: &'a mut bool,
+}
+
+type SnapshotTaskResult = (
+    String, // project_path key
+    Vec<PathBuf>,
+    anyhow::Result<Option<SnapshotResult>>,
+    bool, // was_emergency_spawn
+);
 
 const MAX_DELETED_PATHS: usize = 100_000;
 
@@ -1152,18 +1183,20 @@ fn handle_watch_event(
     }
 }
 
-async fn run_tick_maintenance(
-    config: &Config,
-    config_path: &Path,
-    update_trigger: &Path,
-    database: &Arc<Database>,
-    event_ledger: &EventLedger,
-    subsystem_manager: &Arc<Mutex<SubsystemManager>>,
-    uhoh_dir: &Path,
-    server_event_tx: &broadcast::Sender<crate::server::events::ServerEvent>,
-    watcher_handle: &mut notify::RecommendedWatcher,
-    project_states: &mut HashMap<String, ProjectDaemonState>,
-) -> TickOutcome {
+async fn run_tick_maintenance(ctx: TickMaintenanceCtx<'_>) -> TickOutcome {
+    let TickMaintenanceCtx {
+        config,
+        config_path,
+        update_trigger,
+        database,
+        event_ledger,
+        subsystem_manager,
+        uhoh_dir,
+        server_event_tx,
+        watcher_handle,
+        project_states,
+    } = ctx;
+
     let mut next_config = config.clone();
     let mut next_debounce = None;
     let mut next_update = None;
@@ -1196,7 +1229,7 @@ async fn run_tick_maintenance(
         }
     }
 
-    let db_for_poll = database.clone();
+    let db_for_poll = Arc::clone(database);
     let db_projects = match tokio::task::spawn_blocking(move || db_for_poll.list_projects()).await {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
@@ -1273,14 +1306,18 @@ async fn run_tick_maintenance(
         tracing::info!("Stopped watching removed project: {}", key);
     }
 
-    let ctx = SubsystemContext {
-        database: database.clone(),
+    let subsystem_ctx = SubsystemContext {
+        database: Arc::clone(database),
         event_ledger: event_ledger.clone(),
         config: next_config.clone(),
         uhoh_dir: uhoh_dir.to_path_buf(),
         server_event_tx: server_event_tx.clone(),
     };
-    subsystem_manager.lock().await.tick_restart(ctx).await;
+    subsystem_manager
+        .lock()
+        .await
+        .tick_restart(subsystem_ctx)
+        .await;
 
     TickOutcome {
         updated_config: next_config,
@@ -1296,16 +1333,18 @@ enum SnapshotResult {
     NoChanges,
 }
 
-async fn process_pending_snapshots(
-    uhoh_dir: &Path,
-    database: Arc<Database>,
-    states: &mut HashMap<String, ProjectDaemonState>,
-    config: &Config,
-    event_tx: &broadcast::Sender<crate::server::events::ServerEvent>,
-    event_ledger: &EventLedger,
-    restore_in_progress: &AtomicBool,
-    was_restoring_snapshot: &mut bool,
-) {
+async fn process_pending_snapshots(ctx: SnapshotProcessCtx<'_>) {
+    let SnapshotProcessCtx {
+        uhoh_dir,
+        database,
+        states,
+        config,
+        event_tx,
+        event_ledger,
+        restore_in_progress,
+        was_restoring_snapshot,
+    } = ctx;
+
     let now = Instant::now();
 
     // Detect restore completion here too (not just in watcher handler), so that
@@ -1325,12 +1364,7 @@ async fn process_pending_snapshots(
     let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
     let concurrency = std::cmp::max(1, (logical / 2).max(1));
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
-    let mut join: tokio::task::JoinSet<(
-        String,       // project_path key
-        Vec<PathBuf>, // drained changes for requeue
-        anyhow::Result<Option<SnapshotResult>>,
-        bool, // was_emergency_spawn: true if dispatched as emergency
-    )> = tokio::task::JoinSet::new();
+    let mut join: tokio::task::JoinSet<SnapshotTaskResult> = tokio::task::JoinSet::new();
 
     // Collect emergency snapshots to spawn (we can't borrow states mutably while iterating)
     let mut emergency_spawns: Vec<(String, String, PathBuf, String, Vec<PathBuf>)> = Vec::new();
@@ -1378,18 +1412,18 @@ async fn process_pending_snapshots(
             // Use the larger of per-snapshot and cumulative counts to detect drip-feed
             let hint_count = state.cumulative_deletes.max(state.deleted_paths.len());
 
-            let eval = crate::emergency::evaluate_emergency(
-                hint_count,
-                state.cached_prev_file_count,
-                state.last_emergency_at,
-                config.watch.emergency_cooldown_secs,
-                config.watch.emergency_delete_threshold,
-                config.watch.emergency_delete_min_files,
-                is_restoring,
-                state.overflow_occurred,
-                Path::new(project_path),
-                state.cached_prev_manifest.as_ref(),
-            );
+            let eval = crate::emergency::evaluate_emergency(crate::emergency::EmergencyEvalInput {
+                deleted_paths_hint_count: hint_count,
+                cached_baseline_count: state.cached_prev_file_count,
+                last_emergency_at: state.last_emergency_at,
+                cooldown_secs: config.watch.emergency_cooldown_secs,
+                threshold: config.watch.emergency_delete_threshold,
+                min_files: config.watch.emergency_delete_min_files,
+                restore_in_progress: is_restoring,
+                overflow_occurred: state.overflow_occurred,
+                project_root: Path::new(project_path),
+                cached_manifest: state.cached_prev_manifest.as_ref(),
+            });
 
             match eval {
                 crate::emergency::EmergencyEvaluation::Triggered {

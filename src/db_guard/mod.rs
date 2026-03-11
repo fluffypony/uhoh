@@ -147,6 +147,12 @@ impl DbGuardSubsystem {
     }
 }
 
+impl Default for DbGuardSubsystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Subsystem for DbGuardSubsystem {
     fn name(&self) -> &str {
@@ -403,8 +409,7 @@ pub fn derive_guard_name_from_dsn(dsn: &str) -> String {
         .replace("postgres://", "")
         .replace("mysql://", "")
         .replace("sqlite://", "")
-        .replace('/', "-")
-        .replace(':', "-");
+        .replace(['/', ':'], "-");
     stripped.chars().take(64).collect()
 }
 

@@ -25,10 +25,10 @@ pub async fn websocket_handler(
 
     // If HTTP auth is enabled, require the same bearer token for /ws via
     // Authorization or Sec-WebSocket-Protocol, since /ws is auth-middleware exempt.
-    if state.config.server.require_auth {
-        if !websocket_auth_ok(&headers, state.cached_token.as_deref()) {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
+    if state.config.server.require_auth
+        && !websocket_auth_ok(&headers, state.cached_token.as_deref())
+    {
+        return Err(StatusCode::UNAUTHORIZED);
     }
 
     // Echo matched Sec-WebSocket-Protocol so strict clients accept the connection
@@ -79,10 +79,8 @@ fn extract_matched_protocol(headers: &HeaderMap) -> Option<String> {
     // Check "bearer, <token>" format
     let mut iter = protocols.split(',').map(|s| s.trim());
     while let Some(name) = iter.next() {
-        if name.eq_ignore_ascii_case("bearer") {
-            if iter.next().is_some() {
-                return Some("bearer".to_string());
-            }
+        if name.eq_ignore_ascii_case("bearer") && iter.next().is_some() {
+            return Some("bearer".to_string());
         }
     }
     // Check "bearer.<token>" format

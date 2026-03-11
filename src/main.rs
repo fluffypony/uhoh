@@ -828,13 +828,11 @@ fn handle_db_commands(
                          Install postgresql-client or equivalent package."
                     );
                 }
-            } else if engine == "mysql" {
-                if which::which("mysql").is_err() {
-                    anyhow::bail!(
-                        "mysql CLI not found in PATH. MySQL guard requires the mysql client. \
-                         Install mysql-client or equivalent package."
-                    );
-                }
+            } else if engine == "mysql" && which::which("mysql").is_err() {
+                anyhow::bail!(
+                    "mysql CLI not found in PATH. MySQL guard requires the mysql client. \
+                     Install mysql-client or equivalent package."
+                );
             }
             let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
 
@@ -860,7 +858,7 @@ fn handle_db_commands(
                 "mysql" => db::DbGuardEngine::Mysql,
                 _ => anyhow::bail!("Unsupported DSN format"),
             };
-            let mode_kind = db::DbGuardMode::from_str(mode)
+            let mode_kind = db::DbGuardMode::parse(mode)
                 .context("Invalid db guard mode after normalization")?;
 
             let connection_ref = uhoh::db_guard::scrub_dsn(dsn);
@@ -872,7 +870,7 @@ fn handle_db_commands(
                 previous_stored_cred = Some(
                     uhoh::db_guard::resolve_stored_credentials(&connection_ref).unwrap_or(None),
                 );
-                uhoh::db_guard::store_encrypted_credential(&connection_ref, &creds)
+                uhoh::db_guard::store_encrypted_credential(&connection_ref, creds)
                     .with_context(|| {
                         format!(
                             "Failed to persist credentials for guard '{}'. Ensure UHOH_MASTER_KEY is set and valid before adding a DSN with embedded credentials",
@@ -881,7 +879,7 @@ fn handle_db_commands(
                     })?;
                 if engine == "postgres" {
                     if let Err(err) =
-                        uhoh::db_guard::store_postgres_credentials_cli(&connection_ref, &creds)
+                        uhoh::db_guard::store_postgres_credentials_cli(&connection_ref, creds)
                     {
                         tracing::warn!(
                             "Postgres keyring mirror failed for '{}': {}",
@@ -1186,7 +1184,7 @@ fn install_postgres_monitoring_infrastructure(
             let table_names: Vec<String> =
                 rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
             for table in &table_names {
-                install_delete_counter_trigger(&client, &table).await?;
+                install_delete_counter_trigger(&client, table).await?;
             }
             let mut sorted = table_names;
             sorted.sort();
@@ -1939,6 +1937,7 @@ fn table_name_matches(candidate: &str, table: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{json_contains_table_name, table_name_matches};
 
