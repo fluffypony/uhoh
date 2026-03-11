@@ -63,6 +63,7 @@ const GUARD_TICK_INTERVAL_SECS: i64 = 30;
 
 pub struct DbGuardSubsystem {
     healthy: bool,
+    last_failure: Option<String>,
     sqlite_versions: HashMap<String, i64>,
     mysql_states: HashMap<String, mysql::MysqlGuardState>,
     shutdown: Option<CancellationToken>,
@@ -138,6 +139,7 @@ impl DbGuardSubsystem {
     pub fn new() -> Self {
         Self {
             healthy: true,
+            last_failure: None,
             sqlite_versions: HashMap::new(),
             mysql_states: HashMap::new(),
             shutdown: None,
@@ -195,24 +197,41 @@ impl Subsystem for DbGuardSubsystem {
                     let tick_result = tokio::task::spawn_blocking(move || {
                         let mut worker = DbGuardSubsystem {
                             healthy: true,
+                            last_failure: None,
                             sqlite_versions,
                             mysql_states,
                             shutdown,
                         };
                         let result = worker.tick_guards(&ctx_cl, &guards_cl);
-                        (result, worker.sqlite_versions, worker.mysql_states)
+                        (
+                            result,
+                            worker.healthy,
+                            worker.last_failure,
+                            worker.sqlite_versions,
+                            worker.mysql_states,
+                        )
                     })
                     .await;
 
                     match tick_result {
-                        Ok((result, sqlite_versions, mysql_states)) => {
+                        Ok((result, healthy, last_failure, sqlite_versions, mysql_states)) => {
+                            self.healthy = healthy;
+                            self.last_failure = last_failure;
                             self.sqlite_versions = sqlite_versions;
                             self.mysql_states = mysql_states;
-                            result?;
+                            match result {
+                                Ok(()) => {}
+                                Err(err) => {
+                                    self.healthy = false;
+                                    self.last_failure = Some(format!("db guard tick failed: {err}"));
+                                    return Err(err);
+                                }
+                            }
                         }
                         Err(err) => {
                             tracing::error!("db_guard tick worker panicked: {err}");
                             self.healthy = false;
+                            self.last_failure = Some(format!("db guard tick worker panicked: {err}"));
                         }
                     }
                 }
@@ -231,13 +250,19 @@ impl Subsystem for DbGuardSubsystem {
         if self.healthy {
             SubsystemHealth::Healthy
         } else {
-            SubsystemHealth::Degraded("db guard reported failures".to_string())
+            SubsystemHealth::Degraded(
+                self.last_failure
+                    .clone()
+                    .unwrap_or_else(|| "db guard reported failures".to_string()),
+            )
         }
     }
 }
 
 impl DbGuardSubsystem {
     fn tick_guards(&mut self, ctx: &SubsystemContext, guards: &[DbGuardEntry]) -> Result<()> {
+        self.healthy = true;
+        self.last_failure = None;
         if let Some(token) = self.shutdown.as_ref() {
             postgres::reconcile_listen_workers(guards, token)?;
         }
@@ -250,21 +275,81 @@ impl DbGuardSubsystem {
                         versions: &mut self.sqlite_versions,
                     };
                     tracing::trace!("db_guard tick via {} engine", engine.engine_name());
-                    engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS)?;
+                    if let Err(err) = engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS) {
+                        tracing::warn!("db_guard tick failed for {}: {}", guard.name, err);
+                        self.healthy = false;
+                        if self.last_failure.is_none() {
+                            self.last_failure =
+                                Some(format!("db guard tick failed for {}: {}", guard.name, err));
+                        }
+                        let mut event = new_event("db_guard", "guard_tick_failed", "warn");
+                        event.guard_name = Some(guard.name.clone());
+                        event.detail = Some(err.to_string());
+                        if let Err(append_err) = ctx.event_ledger.append(event) {
+                            tracing::error!("failed to append guard_tick_failed event: {append_err}");
+                        }
+                        continue;
+                    }
                 }
                 "postgres" => {
                     let mut engine = PostgresEngine;
                     tracing::trace!("db_guard tick via {} engine", engine.engine_name());
-                    engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS)?;
+                    if let Err(err) = engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS) {
+                        tracing::warn!("db_guard tick failed for {}: {}", guard.name, err);
+                        self.healthy = false;
+                        if self.last_failure.is_none() {
+                            self.last_failure =
+                                Some(format!("db guard tick failed for {}: {}", guard.name, err));
+                        }
+                        let mut event = new_event("db_guard", "guard_tick_failed", "warn");
+                        event.guard_name = Some(guard.name.clone());
+                        event.detail = Some(err.to_string());
+                        if let Err(append_err) = ctx.event_ledger.append(event) {
+                            tracing::error!("failed to append guard_tick_failed event: {append_err}");
+                        }
+                        continue;
+                    }
                 }
                 "mysql" => {
                     let mut engine = MysqlEngine {
                         states: &mut self.mysql_states,
                     };
                     tracing::trace!("db_guard tick via {} engine", engine.engine_name());
-                    engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS)?;
+                    if let Err(err) = engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS) {
+                        tracing::warn!("db_guard tick failed for {}: {}", guard.name, err);
+                        self.healthy = false;
+                        if self.last_failure.is_none() {
+                            self.last_failure =
+                                Some(format!("db guard tick failed for {}: {}", guard.name, err));
+                        }
+                        let mut event = new_event("db_guard", "guard_tick_failed", "warn");
+                        event.guard_name = Some(guard.name.clone());
+                        event.detail = Some(err.to_string());
+                        if let Err(append_err) = ctx.event_ledger.append(event) {
+                            tracing::error!("failed to append guard_tick_failed event: {append_err}");
+                        }
+                        continue;
+                    }
                 }
-                _ => {}
+                _ => {
+                    tracing::warn!(
+                        "Skipping db_guard '{}' with unsupported engine '{}'; expected one of sqlite/postgres/mysql",
+                        guard.name,
+                        guard.engine
+                    );
+                    self.healthy = false;
+                    self.last_failure = Some(format!(
+                        "unsupported db guard engine '{}' for guard {}",
+                        guard.engine, guard.name
+                    ));
+                    let mut event = new_event("db_guard", "guard_engine_unknown", "warn");
+                    event.guard_name = Some(guard.name.clone());
+                    event.detail = Some(format!("engine={}", guard.engine));
+                    if let Err(err) = ctx.event_ledger.append(event) {
+                        tracing::error!("failed to append guard_engine_unknown event: {err}");
+                    }
+                    continue;
+                }
             }
 
             // Global retention cleanup pass per guard.
@@ -272,16 +357,27 @@ impl DbGuardSubsystem {
             let baseline = guard_base.join("baselines");
             let recovery_dir = guard_base.join("recovery");
             if baseline.exists() {
-                let _ = recovery::cleanup_retention(
-                    &baseline,
-                    ctx.config.db_guard.recovery_retention_days,
-                );
+                if let Err(err) =
+                    recovery::cleanup_retention(&baseline, ctx.config.db_guard.recovery_retention_days)
+                {
+                    tracing::warn!(
+                        "db_guard baseline retention cleanup failed for {}: {}",
+                        guard.name,
+                        err
+                    );
+                }
             }
             if recovery_dir.exists() {
-                let _ = recovery::cleanup_retention(
+                if let Err(err) = recovery::cleanup_retention(
                     &recovery_dir,
                     ctx.config.db_guard.recovery_retention_days,
-                );
+                ) {
+                    tracing::warn!(
+                        "db_guard recovery retention cleanup failed for {}: {}",
+                        guard.name,
+                        err
+                    );
+                }
             }
 
             let configured_mode = guard.mode.trim().to_ascii_lowercase();
@@ -292,7 +388,9 @@ impl DbGuardSubsystem {
                     "engine={}, configured_mode={}, effective_mode={}",
                     guard.engine, configured_mode, effective_mode
                 ));
-                let _ = ctx.event_ledger.append(event);
+                if let Err(err) = ctx.event_ledger.append(event) {
+                    tracing::error!("failed to append guard_mode_normalized event: {err}");
+                }
             }
         }
         Ok(())

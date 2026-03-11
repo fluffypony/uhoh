@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 
 use crate::config::CompactionConfig;
 use crate::db::{Database, SnapshotRow};
@@ -34,7 +34,8 @@ pub fn compact_project(
     // First pass: identify protected predecessors.
     for snapshot in &snapshots {
         if snapshot.trigger == "emergency" {
-            let ts = parse_timestamp(&snapshot.timestamp);
+            let ts = parse_timestamp(&snapshot.timestamp)
+                .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
             let age = now.signed_duration_since(ts);
             if age < emergency_retention {
                 // Emergency still within retention: protect its predecessor
@@ -74,7 +75,8 @@ pub fn compact_project(
             continue;
         }
 
-        let ts = parse_timestamp(&snapshot.timestamp);
+        let ts = parse_timestamp(&snapshot.timestamp)
+            .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
         let age = now.signed_duration_since(ts);
 
         // Emergency snapshots are immune to bucket-deduplication pruning within
@@ -152,19 +154,24 @@ fn register_in_buckets(
     bd: &mut std::collections::HashSet<i64>,
     bw: &mut std::collections::HashSet<i64>,
 ) {
-    let ts = parse_timestamp(&snapshot.timestamp);
+    let ts = parse_timestamp(&snapshot.timestamp)
+        .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
     b5.insert(ts.timestamp().div_euclid(300));
     bh.insert(ts.timestamp().div_euclid(3600));
     bd.insert(ts.timestamp().div_euclid(86400));
     bw.insert(ts.timestamp().div_euclid(604800));
 }
 
-fn parse_timestamp(s: &str) -> DateTime<Utc> {
+fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
     match DateTime::parse_from_rfc3339(s) {
-        Ok(dt) => dt.with_timezone(&Utc),
+        Ok(dt) => Some(dt.with_timezone(&Utc)),
         Err(e) => {
-            tracing::warn!("Failed to parse timestamp '{}': {} — treating as recent to avoid accidental pruning", s, e);
-            Utc::now()
+            tracing::warn!(
+                "Failed to parse timestamp '{}': {} — treating as fallback epoch for pruning safety",
+                s,
+                e
+            );
+            None
         }
     }
 }

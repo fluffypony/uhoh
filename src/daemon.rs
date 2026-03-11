@@ -24,6 +24,7 @@ struct DaemonMaintenanceSubsystem {
     sidecar_check_interval: std::time::Duration,
     last_sidecar_check: Option<std::time::Instant>,
     vacuum_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    last_failure: Option<String>,
 }
 
 impl DaemonMaintenanceSubsystem {
@@ -39,20 +40,28 @@ impl DaemonMaintenanceSubsystem {
             ),
             last_sidecar_check: None,
             vacuum_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_failure: None,
         }
     }
 
     async fn run_tick(&mut self, ctx: &SubsystemContext) {
+        let mut tick_failure: Option<String> = None;
         let db_projects = {
             let db = ctx.database.clone();
             match tokio::task::spawn_blocking(move || db.list_projects()).await {
                 Ok(Ok(v)) => v,
                 Ok(Err(e)) => {
                     tracing::warn!("Failed to poll projects on maintenance tick: {}", e);
+                    if tick_failure.is_none() {
+                        tick_failure = Some(format!("project poll failed: {e}"));
+                    }
                     Vec::new()
                 }
                 Err(e) => {
                     tracing::warn!("Failed joining maintenance project poll task: {:?}", e);
+                    if tick_failure.is_none() {
+                        tick_failure = Some(format!("project poll join failed: {e:?}"));
+                    }
                     Vec::new()
                 }
             }
@@ -134,6 +143,9 @@ impl DaemonMaintenanceSubsystem {
             .await;
             if let Err(e) = backup_res.unwrap_or_else(|e| Err(anyhow::anyhow!("{e:?}"))) {
                 tracing::warn!("Database backup failed: {}", e);
+                if tick_failure.is_none() {
+                    tick_failure = Some(format!("database backup failed: {e}"));
+                }
             } else {
                 if let Ok(entries) = std::fs::read_dir(&backups_dir) {
                     let mut files: Vec<_> = entries.flatten().collect();
@@ -221,7 +233,12 @@ impl DaemonMaintenanceSubsystem {
                     status: "failed".to_string(),
                     detail: e.to_string(),
                 });
+            if tick_failure.is_none() {
+                tick_failure = Some(format!("mlx auto-update failed: {e}"));
+            }
         }
+
+        self.last_failure = tick_failure;
     }
 }
 
@@ -253,7 +270,10 @@ impl Subsystem for DaemonMaintenanceSubsystem {
     }
 
     fn health_check(&self) -> SubsystemHealth {
-        SubsystemHealth::Healthy
+        match &self.last_failure {
+            Some(reason) => SubsystemHealth::Degraded(reason.clone()),
+            None => SubsystemHealth::Healthy,
+        }
     }
 }
 
@@ -1148,18 +1168,32 @@ async fn run_tick_maintenance(
     let mut next_debounce = None;
     let mut next_update = None;
 
-    if let Ok(new_cfg) = Config::load(config_path) {
-        if new_cfg.watch.debounce_quiet_secs != config.watch.debounce_quiet_secs {
-            next_debounce = Some(tokio::time::interval(Duration::from_secs(
-                new_cfg.watch.debounce_quiet_secs,
-            )));
+    match Config::load(config_path) {
+        Ok(new_cfg) => {
+            if new_cfg.watch.debounce_quiet_secs != config.watch.debounce_quiet_secs {
+                next_debounce = Some(tokio::time::interval(Duration::from_secs(
+                    new_cfg.watch.debounce_quiet_secs,
+                )));
+            }
+            if new_cfg.update.check_interval_hours != config.update.check_interval_hours {
+                next_update = Some(tokio::time::interval(Duration::from_secs(
+                    new_cfg.update.check_interval_hours * 3600,
+                )));
+            }
+            next_config = new_cfg;
         }
-        if new_cfg.update.check_interval_hours != config.update.check_interval_hours {
-            next_update = Some(tokio::time::interval(Duration::from_secs(
-                new_cfg.update.check_interval_hours * 3600,
-            )));
+        Err(err) => {
+            tracing::warn!(
+                "Failed to reload config from {} on daemon tick: {}",
+                config_path.display(),
+                err
+            );
+            let mut event = crate::event_ledger::new_event("daemon", "config_reload_failed", "warn");
+            event.detail = Some(format!("path={}, error={}", config_path.display(), err));
+            if let Err(append_err) = event_ledger.append(event) {
+                tracing::error!("failed to append config_reload_failed event: {append_err}");
+            }
         }
-        next_config = new_cfg;
     }
 
     let db_for_poll = database.clone();

@@ -4,7 +4,6 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::db::DbGuardEntry;
-use crate::db::NewEventLedgerEntry;
 use crate::db_guard::recovery;
 use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
@@ -23,20 +22,10 @@ pub fn tick_sqlite_guard(
     conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
     let data_version: i64 = conn.query_row("PRAGMA data_version", [], |row| row.get(0))?;
     let detail = serde_json::json!({"data_version": data_version}).to_string();
-    let mut event = NewEventLedgerEntry {
-        source: "db_guard".to_string(),
-        event_type: "sqlite_tick".to_string(),
-        severity: "info".to_string(),
-        project_hash: None,
-        agent_name: None,
-        guard_name: Some(guard.name.clone()),
-        path: Some(path.clone()),
-        detail: Some(detail),
-        pre_state_ref: None,
-        post_state_ref: None,
-        prev_hash: None,
-        causal_parent: None,
-    };
+    let mut event = new_event("db_guard", "sqlite_tick", "info");
+    event.guard_name = Some(guard.name.clone());
+    event.path = Some(path.clone());
+    event.detail = Some(detail);
 
     let prev_version = versions.get(&guard.name).copied();
     versions.insert(guard.name.clone(), data_version);
@@ -87,7 +76,13 @@ pub fn tick_sqlite_guard(
             ctx.config.db_guard.max_baseline_size_mb,
         )?;
         let ts = chrono::Utc::now().to_rfc3339();
-        let _ = ctx.database.set_db_guard_baseline_time(&guard.name, &ts);
+        if let Err(err) = ctx.database.set_db_guard_baseline_time(&guard.name, &ts) {
+            tracing::warn!(
+                "failed to persist sqlite baseline timestamp for guard {}: {}",
+                guard.name,
+                err
+            );
+        }
         let mut baseline_event = new_event("db_guard", "sqlite_baseline", "info");
         baseline_event.guard_name = Some(guard.name.clone());
         baseline_event.path = Some(path.clone());
