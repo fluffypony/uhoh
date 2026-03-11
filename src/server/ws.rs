@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Query, State, WebSocketUpgrade,
+        State, WebSocketUpgrade,
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -11,14 +11,8 @@ use subtle::ConstantTimeEq;
 
 use super::AppState;
 
-#[derive(serde::Deserialize)]
-pub struct WsAuthQuery {
-    token: Option<String>,
-}
-
 pub async fn websocket_handler(
     headers: HeaderMap,
-    Query(query): Query<WsAuthQuery>,
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -32,11 +26,7 @@ pub async fn websocket_handler(
     // If HTTP auth is enabled, require the same bearer token for /ws via
     // Authorization or Sec-WebSocket-Protocol, since /ws is auth-middleware exempt.
     if state.config.server.require_auth {
-        if !websocket_auth_ok(
-            &headers,
-            query.token.as_deref(),
-            state.cached_token.as_deref(),
-        ) {
+        if !websocket_auth_ok(&headers, state.cached_token.as_deref()) {
             return Err(StatusCode::UNAUTHORIZED);
         }
     }
@@ -52,7 +42,6 @@ pub async fn websocket_handler(
 
 fn websocket_auth_ok(
     headers: &HeaderMap,
-    _query_token: Option<&str>,
     cached_token: Option<&str>,
 ) -> bool {
     let expected = match cached_token {
@@ -74,13 +63,8 @@ fn websocket_auth_ok(
     // Sec-WebSocket-Protocol: bearer, <token>
     if let Some(protocol_header) = headers.get("sec-websocket-protocol") {
         if let Ok(protocols) = protocol_header.to_str() {
-            let mut iter = protocols.split(',').map(|s| s.trim());
-            while let Some(name) = iter.next() {
-                if name.eq_ignore_ascii_case("bearer") {
-                    if let Some(token) = iter.next() {
-                        return token.as_bytes().ct_eq(expected.as_bytes()).into();
-                    }
-                }
+            if let Some(token) = extract_protocol_token(protocols) {
+                return token.as_bytes().ct_eq(expected.as_bytes()).into();
             }
         }
     }
@@ -105,6 +89,25 @@ fn extract_matched_protocol(headers: &HeaderMap) -> Option<String> {
     for value in protocols.split(',').map(|s| s.trim()) {
         if value.starts_with("bearer.") {
             return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn extract_protocol_token(protocols: &str) -> Option<&str> {
+    let mut iter = protocols.split(',').map(|s| s.trim());
+    while let Some(name) = iter.next() {
+        if name.eq_ignore_ascii_case("bearer") {
+            if let Some(token) = iter.next() {
+                return Some(token);
+            }
+        }
+    }
+    for value in protocols.split(',').map(|s| s.trim()) {
+        if let Some(token) = value.strip_prefix("bearer.") {
+            if !token.is_empty() {
+                return Some(token);
+            }
         }
     }
     None

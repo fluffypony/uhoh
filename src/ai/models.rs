@@ -127,7 +127,21 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
             continue;
         }
         if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-            break;
+            if let Some(total) = total {
+                if pos == total {
+                    break;
+                }
+            }
+            tracing::warn!(
+                "Range resume rejected for {} at {} bytes, restarting download from zero",
+                model.name,
+                pos
+            );
+            pos = 0;
+            out.set_len(0)?;
+            use std::io::Seek;
+            out.seek(std::io::SeekFrom::Start(0))?;
+            continue;
         }
         if !resp.status().is_success() {
             anyhow::bail!("Failed to download model: HTTP {}", resp.status());
@@ -152,17 +166,20 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
             if pos >= total {
                 break;
             }
+            tracing::info!(
+                "Download interrupted at {} bytes, retrying with resume",
+                pos
+            );
+            continue;
         }
-        if total.is_none() && !received_any {
-            break;
+        if !received_any {
+            tracing::warn!(
+                "Download ended without progress for {} at {} bytes",
+                model.name,
+                pos
+            );
         }
-        if total.is_none() && received_any {
-            break;
-        }
-        tracing::info!(
-            "Download interrupted at {} bytes, retrying with resume",
-            pos
-        );
+        break;
     }
     out.sync_all()?;
     if let Some(bar) = pb {

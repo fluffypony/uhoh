@@ -833,12 +833,8 @@ pub fn mtime_to_millis(t: SystemTime) -> i64 {
         Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
         Err(e) => {
             let dur = e.duration();
-            let millis = dur.as_millis() as i64;
-            if dur.subsec_nanos() > 0 || dur.as_secs() > 0 {
-                -(millis + 1)
-            } else {
-                -millis
-            }
+            let millis = i64::try_from(dur.as_millis()).unwrap_or(i64::MAX);
+            -(millis + 1)
         }
     }
 }
@@ -847,8 +843,9 @@ pub fn millis_to_mtime(millis: i64) -> SystemTime {
     if millis >= 0 {
         std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis as u64)
     } else {
-        let abs_millis = (millis as i128).unsigned_abs().min(u64::MAX as u128) as u64;
-        std::time::UNIX_EPOCH - std::time::Duration::from_millis(abs_millis)
+        let before_epoch = (-(millis as i128) - 1).max(0) as u128;
+        let clamped = before_epoch.min(u64::MAX as u128) as u64;
+        std::time::UNIX_EPOCH - std::time::Duration::from_millis(clamped)
     }
 }
 

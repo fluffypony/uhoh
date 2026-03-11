@@ -137,14 +137,6 @@ async fn handle_connection_async(
     {
         let mut should_forward = true;
 
-        if !authed {
-            authed = validate_auth_line(&line, &expected_token)?;
-            if !authed {
-                return Err(anyhow::anyhow!("MCP proxy authentication failed"));
-            }
-            continue;
-        }
-
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
             if json
                 .get("method")
