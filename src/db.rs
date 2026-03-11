@@ -964,11 +964,7 @@ impl Database {
     }
 
     /// Get file history: all snapshot entries for a given path, newest first
-    pub fn file_history(
-        &self,
-        project_hash: &str,
-        file_path: &str,
-    ) -> Result<Vec<FileHistoryRow>> {
+    pub fn file_history(&self, project_hash: &str, file_path: &str) -> Result<Vec<FileHistoryRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT s.snapshot_id, s.timestamp, f.hash, s.trigger
@@ -2016,12 +2012,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn add_agent(
-        &self,
-        name: &str,
-        profile_path: &str,
-        data_dir: Option<&str>,
-    ) -> Result<()> {
+    pub fn add_agent(&self, name: &str, profile_path: &str, data_dir: Option<&str>) -> Result<()> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(

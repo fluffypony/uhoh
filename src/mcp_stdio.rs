@@ -54,11 +54,17 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
                 }),
             ),
             "ping" | "notifications/initialized" => JsonRpcResponse::success(request.id, json!({})),
-            "tools/list" => JsonRpcResponse::success(request.id, crate::mcp_tools::tool_definitions()),
+            "tools/list" => {
+                JsonRpcResponse::success(request.id, crate::mcp_tools::tool_definitions())
+            }
             "tools/call" => {
                 handle_stdio_tool_call(&database, &uhoh_dir, config, request.id, request.params)
             }
-            _ => JsonRpcResponse::error(request.id, -32601, format!("Method not found: {}", request.method)),
+            _ => JsonRpcResponse::error(
+                request.id,
+                -32601,
+                format!("Method not found: {}", request.method),
+            ),
         };
 
         writeln!(stdout, "{}", serde_json::to_string(&response)?)?;

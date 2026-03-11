@@ -274,8 +274,7 @@ impl DbGuardSubsystem {
         }
 
         for guard in guards {
-            let effective_mode =
-                normalize_guard_mode(guard.engine.as_str(), guard.mode.as_str());
+            let effective_mode = normalize_guard_mode(guard.engine.as_str(), guard.mode.as_str());
             match guard.engine.as_str() {
                 "sqlite" => {
                     let mut engine = SqliteEngine {
@@ -293,7 +292,9 @@ impl DbGuardSubsystem {
                         event.guard_name = Some(guard.name.clone());
                         event.detail = Some(err.to_string());
                         if let Err(append_err) = ctx.event_ledger.append(event) {
-                            tracing::error!("failed to append guard_tick_failed event: {append_err}");
+                            tracing::error!(
+                                "failed to append guard_tick_failed event: {append_err}"
+                            );
                         }
                         continue;
                     }
@@ -312,7 +313,9 @@ impl DbGuardSubsystem {
                         event.guard_name = Some(guard.name.clone());
                         event.detail = Some(err.to_string());
                         if let Err(append_err) = ctx.event_ledger.append(event) {
-                            tracing::error!("failed to append guard_tick_failed event: {append_err}");
+                            tracing::error!(
+                                "failed to append guard_tick_failed event: {append_err}"
+                            );
                         }
                         continue;
                     }
@@ -333,7 +336,9 @@ impl DbGuardSubsystem {
                         event.guard_name = Some(guard.name.clone());
                         event.detail = Some(err.to_string());
                         if let Err(append_err) = ctx.event_ledger.append(event) {
-                            tracing::error!("failed to append guard_tick_failed event: {append_err}");
+                            tracing::error!(
+                                "failed to append guard_tick_failed event: {append_err}"
+                            );
                         }
                         continue;
                     }
@@ -364,9 +369,10 @@ impl DbGuardSubsystem {
             let baseline = guard_base.join("baselines");
             let recovery_dir = guard_base.join("recovery");
             if baseline.exists() {
-                if let Err(err) =
-                    recovery::cleanup_retention(&baseline, ctx.config.db_guard.recovery_retention_days)
-                {
+                if let Err(err) = recovery::cleanup_retention(
+                    &baseline,
+                    ctx.config.db_guard.recovery_retention_days,
+                ) {
                     tracing::warn!(
                         "db_guard baseline retention cleanup failed for {}: {}",
                         guard.name,

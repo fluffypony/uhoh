@@ -148,7 +148,12 @@ fn event_ledger_descendant_ids_returns_causal_descendants() {
         .insert_event_ledger(&event("agent", "child", Some("src/lib.rs"), Some(root)))
         .unwrap();
     let grandchild = db
-        .insert_event_ledger(&event("agent", "grandchild", Some("src/lib.rs"), Some(child)))
+        .insert_event_ledger(&event(
+            "agent",
+            "grandchild",
+            Some("src/lib.rs"),
+            Some(child),
+        ))
         .unwrap();
 
     let mut ids = db.event_ledger_descendant_ids(root).unwrap();

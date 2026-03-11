@@ -735,6 +735,8 @@ fn test_list_db_guards_rejects_invalid_engine_or_mode() {
     )
     .unwrap();
 
-    let err = db.list_db_guards().expect_err("invalid db_guard engine must error");
+    let err = db
+        .list_db_guards()
+        .expect_err("invalid db_guard engine must error");
     assert!(err.to_string().contains("invalid db_guard engine"));
 }

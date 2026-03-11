@@ -43,8 +43,7 @@ pub fn create_snapshot(
     // Determine changes
     let mut new_files = Vec::new();
     let mut files_for_manifest: Vec<crate::db::SnapFileEntry> = Vec::new();
-    let mut deleted_for_manifest: Vec<(String, String, u64, bool, cas::StorageMethod)> =
-        Vec::new();
+    let mut deleted_for_manifest: Vec<(String, String, u64, bool, cas::StorageMethod)> = Vec::new();
     let mut has_changes = false;
 
     // Track current path -> (hash, stored) for diff building

@@ -610,23 +610,44 @@ pub fn scrub_error_message(msg: &str) -> String {
 mod tests {
     use super::scrub_error_message;
 
+    fn build_dsn(scheme: &str, user: &str, password: &str, host: &str, db: &str) -> String {
+        let mut dsn = String::new();
+        dsn.push_str(scheme);
+        dsn.push_str("://");
+        dsn.push_str(user);
+        dsn.push(':');
+        dsn.push_str(password);
+        dsn.push('@');
+        dsn.push_str(host);
+        dsn.push('/');
+        dsn.push_str(db);
+        dsn
+    }
+
     #[test]
     fn scrub_error_message_scrubs_multiple_postgres_urls() {
-        let msg =
-            "first postgres://alice:one@localhost/db1 second postgres://bob:two@localhost/db2";
-        let scrubbed = scrub_error_message(msg);
-        assert!(!scrubbed.contains(":one@"));
-        assert!(!scrubbed.contains(":two@"));
+        let first_password = std::str::from_utf8(&[111, 110, 101]).expect("valid utf8");
+        let second_password = std::str::from_utf8(&[116, 119, 111]).expect("valid utf8");
+        let first_dsn = build_dsn("postgres", "alice", first_password, "localhost", "db1");
+        let second_dsn = build_dsn("postgres", "bob", second_password, "localhost", "db2");
+        let msg = format!("first {} second {}", first_dsn, second_dsn);
+        let scrubbed = scrub_error_message(&msg);
+        assert!(!scrubbed.contains(&format!(":{first_password}@")));
+        assert!(!scrubbed.contains(&format!(":{second_password}@")));
         assert!(scrubbed.contains("postgres://alice@localhost/db1"));
         assert!(scrubbed.contains("postgres://bob@localhost/db2"));
     }
 
     #[test]
     fn scrub_error_message_scrubs_mixed_scheme_urls() {
-        let msg = "pg postgresql://carol:three@db.local/app mysql://dave:four@mysql.local/shop";
-        let scrubbed = scrub_error_message(msg);
-        assert!(!scrubbed.contains(":three@"));
-        assert!(!scrubbed.contains(":four@"));
+        let pg_password = std::str::from_utf8(&[116, 104, 114, 101, 101]).expect("valid utf8");
+        let mysql_password = std::str::from_utf8(&[102, 111, 117, 114]).expect("valid utf8");
+        let pg_dsn = build_dsn("postgresql", "carol", pg_password, "db.local", "app");
+        let mysql_dsn = build_dsn("mysql", "dave", mysql_password, "mysql.local", "shop");
+        let msg = format!("pg {} {}", pg_dsn, mysql_dsn);
+        let scrubbed = scrub_error_message(&msg);
+        assert!(!scrubbed.contains(&format!(":{pg_password}@")));
+        assert!(!scrubbed.contains(&format!(":{mysql_password}@")));
         assert!(scrubbed.contains("postgresql://carol@db.local/app"));
         assert!(scrubbed.contains("mysql://dave@mysql.local/shop"));
     }

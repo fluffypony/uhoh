@@ -1221,7 +1221,8 @@ async fn run_tick_maintenance(ctx: TickMaintenanceCtx<'_>) -> TickOutcome {
                 config_path.display(),
                 err
             );
-            let mut event = crate::event_ledger::new_event("daemon", "config_reload_failed", "warn");
+            let mut event =
+                crate::event_ledger::new_event("daemon", "config_reload_failed", "warn");
             event.detail = Some(format!("path={}, error={}", config_path.display(), err));
             if let Err(append_err) = event_ledger.append(event) {
                 tracing::error!("failed to append config_reload_failed event: {append_err}");

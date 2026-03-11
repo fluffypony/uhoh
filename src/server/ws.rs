@@ -40,10 +40,7 @@ pub async fn websocket_handler(
     Ok(upgrade.on_upgrade(move |socket| handle_socket(socket, state)))
 }
 
-fn websocket_auth_ok(
-    headers: &HeaderMap,
-    cached_token: Option<&str>,
-) -> bool {
+fn websocket_auth_ok(headers: &HeaderMap, cached_token: Option<&str>) -> bool {
     let expected = match cached_token {
         Some(t) if !t.is_empty() => t,
         _ => return false,
