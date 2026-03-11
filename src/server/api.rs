@@ -584,36 +584,20 @@ pub async fn restore_snapshot(
         None
     };
 
-    struct RestoreLockGuard {
-        locks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-        key: String,
-    }
-    impl Drop for RestoreLockGuard {
-        fn drop(&mut self) {
-            if let Ok(mut guard) = self.locks.lock() {
-                guard.remove(&self.key);
+    let mut lock_guard: Option<super::restore_guards::RestoreLockGuard> = None;
+    if let Some(restore_key) = restore_key {
+        match super::restore_guards::RestoreLockGuard::acquire(restore_locks.clone(), restore_key) {
+            Ok(guard) => {
+                lock_guard = Some(guard);
+            }
+            Err(e) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
             }
         }
-    }
-
-    let mut lock_guard: Option<RestoreLockGuard> = None;
-    if let Some(restore_key) = restore_key {
-        let mut locks = match restore_locks.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if locks.contains(&restore_key) {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({ "error": "Restore already in progress for this project" })),
-            )
-                .into_response();
-        }
-        locks.insert(restore_key.clone());
-        lock_guard = Some(RestoreLockGuard {
-            locks: restore_locks.clone(),
-            key: restore_key.clone(),
-        });
     }
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
@@ -622,22 +606,10 @@ pub async fn restore_snapshot(
             resolve::validate_path_within_project(std::path::Path::new(&project.current_path), tp)?;
         }
 
-        struct RestoreFlagGuard {
-            flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        }
-        impl Drop for RestoreFlagGuard {
-            fn drop(&mut self) {
-                self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-
         let _restore_guard = if !dry_run {
-            if restore_in_progress.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                anyhow::bail!("Another restore is already in progress");
-            }
-            Some(RestoreFlagGuard {
-                flag: restore_in_progress.clone(),
-            })
+            Some(super::restore_guards::RestoreFlagGuard::acquire(
+                restore_in_progress.clone(),
+            )?)
         } else {
             None
         };

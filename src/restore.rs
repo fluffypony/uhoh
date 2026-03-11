@@ -7,7 +7,7 @@ use crate::cas;
 use crate::db::{Database, ProjectEntry};
 use crate::snapshot;
 
-const RESTORE_IN_PROGRESS_FILE: &str = ".restore-in-progress";
+pub(crate) const RESTORE_IN_PROGRESS_FILE: &str = ".restore-in-progress";
 
 struct RestoreSignalGuard {
     path: PathBuf,
@@ -190,29 +190,6 @@ fn quick_hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn validate_restore_path(project_path: &Path, relative_path: &str) -> Result<()> {
-    let rel = Path::new(relative_path);
-    if rel.is_absolute() {
-        anyhow::bail!("Absolute path in snapshot manifest: {relative_path}");
-    }
-    for component in rel.components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            anyhow::bail!("Path traversal detected in snapshot manifest: {relative_path}");
-        }
-    }
-
-    let full = project_path.join(rel);
-    if let Ok(canonical) = dunce::canonicalize(&full) {
-        if let Ok(project_canonical) = dunce::canonicalize(project_path) {
-            if !canonical.starts_with(project_canonical) {
-                anyhow::bail!("Path '{relative_path}' resolves outside project directory");
-            }
-        }
-    }
-
-    Ok(())
-}
-
 pub fn cmd_restore(
     uhoh_dir: &Path,
     database: &Database,
@@ -233,7 +210,7 @@ pub fn cmd_restore(
 
     let target_filter = target_path
         .map(|path| {
-            validate_restore_path(project_path, path)?;
+            crate::resolve::validate_path_within_project(project_path, path)?;
             Ok::<String, anyhow::Error>(if path.starts_with("b64:") {
                 path.to_string()
             } else {
@@ -296,13 +273,13 @@ pub fn cmd_restore(
         // Files to delete: in current manifest but not in target manifest
         if let Some(filter) = target_filter.as_ref() {
             if current_tracked.contains(filter) && !target_paths.contains(filter) {
-                validate_restore_path(project_path, filter)?;
+                crate::resolve::validate_path_within_project(project_path, filter)?;
                 to_delete.push(filter.clone());
             }
         } else {
             for path in &current_tracked {
                 if !target_paths.contains(path) {
-                    validate_restore_path(project_path, path)?;
+                    crate::resolve::validate_path_within_project(project_path, path)?;
                     to_delete.push(path.clone());
                 }
             }
@@ -313,7 +290,7 @@ pub fn cmd_restore(
             if !file.stored {
                 continue;
             }
-            validate_restore_path(project_path, &file.path)?;
+            crate::resolve::validate_path_within_project(project_path, &file.path)?;
             let rel = crate::cas::decode_relpath_to_os(&file.path);
             let abs_path = project_path.join(&rel);
             // Skip if current file already matches target (hash, type, and exec bit)
@@ -514,7 +491,7 @@ pub fn cmd_restore(
         bar.finish_and_clear();
 
         for path in &to_delete {
-            validate_restore_path(project_path, path)?;
+            crate::resolve::validate_path_within_project(project_path, path)?;
             let dst = project_path.join(crate::cas::decode_relpath_to_os(path));
             if let Ok(meta) = dst.symlink_metadata() {
                 if meta.is_dir() {

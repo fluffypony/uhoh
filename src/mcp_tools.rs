@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::event_ledger::{new_event, EventLedger};
 use crate::resolve;
+use crate::server::restore_guards::{RestoreFlagGuard, RestoreLockGuard};
 use crate::server::events::ServerEvent;
 use tokio::sync::broadcast;
 
@@ -46,22 +47,6 @@ pub struct McpToolContext {
 pub enum RestoreInProgressFlag {
     Shared(Arc<std::sync::atomic::AtomicBool>),
     Global(&'static std::sync::atomic::AtomicBool),
-}
-
-impl RestoreInProgressFlag {
-    fn swap(&self, value: bool) -> bool {
-        match self {
-            Self::Shared(flag) => flag.swap(value, std::sync::atomic::Ordering::SeqCst),
-            Self::Global(flag) => flag.swap(value, std::sync::atomic::Ordering::SeqCst),
-        }
-    }
-
-    fn store(&self, value: bool) {
-        match self {
-            Self::Shared(flag) => flag.store(value, std::sync::atomic::Ordering::SeqCst),
-            Self::Global(flag) => flag.store(value, std::sync::atomic::Ordering::SeqCst),
-        }
-    }
 }
 
 /// Shared MCP tool definitions used by both HTTP and STDIO transports.
@@ -273,34 +258,11 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
     let project = resolve::resolve_project(&context.database, path.or(hash), None)
         .map_err(|e| McpToolError::internal(e.to_string()))?;
 
-    struct RestoreLockGuard {
-        locks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-        key: String,
-    }
-    impl Drop for RestoreLockGuard {
-        fn drop(&mut self) {
-            if let Ok(mut guard) = self.locks.lock() {
-                guard.remove(&self.key);
-            }
-        }
-    }
-
     let _project_lock_guard = if !dry_run {
         if let Some(restore_locks) = &context.restore_locks {
-            let mut locks = match restore_locks.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if locks.contains(&project.hash) {
-                return Err(McpToolError::internal(
-                    "Restore already in progress for this project",
-                ));
-            }
-            locks.insert(project.hash.clone());
-            Some(RestoreLockGuard {
-                locks: restore_locks.clone(),
-                key: project.hash.clone(),
-            })
+            let guard = RestoreLockGuard::acquire(restore_locks.clone(), project.hash.clone())
+                .map_err(|e: anyhow::Error| McpToolError::internal(e.to_string()))?;
+            Some(guard)
         } else {
             None
         }
@@ -313,25 +275,40 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
             .map_err(|e| McpToolError::invalid_params(e.to_string()))?;
     }
 
-    struct RestoreFlagGuard {
-        flag: RestoreInProgressFlag,
+    struct GlobalRestoreFlagGuard {
+        flag: &'static std::sync::atomic::AtomicBool,
     }
-    impl Drop for RestoreFlagGuard {
+    impl Drop for GlobalRestoreFlagGuard {
         fn drop(&mut self) {
-            self.flag.store(false);
+            self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
-    let _restore_guard = if !dry_run {
+    #[allow(dead_code)]
+    enum RestoreGuard {
+        Shared(RestoreFlagGuard),
+        Global(GlobalRestoreFlagGuard),
+    }
+
+    let _restore_guard: Option<RestoreGuard> = if !dry_run {
         let flag = context
             .restore_in_progress
             .as_ref()
             .ok_or_else(|| McpToolError::internal("Restore lock is not configured"))?
             .clone();
-        if flag.swap(true) {
-            return Err(McpToolError::internal("Another restore is already in progress"));
+        match flag {
+            RestoreInProgressFlag::Shared(flag) => {
+                let guard = RestoreFlagGuard::acquire(flag)
+                    .map_err(|e: anyhow::Error| McpToolError::internal(e.to_string()))?;
+                Some(RestoreGuard::Shared(guard))
+            }
+            RestoreInProgressFlag::Global(flag) => {
+                if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    return Err(McpToolError::internal("Another restore is already in progress"));
+                }
+                Some(RestoreGuard::Global(GlobalRestoreFlagGuard { flag }))
+            }
         }
-        Some(RestoreFlagGuard { flag })
     } else {
         None
     };

@@ -947,10 +947,9 @@ struct TickOutcome {
 }
 
 const MAX_DELETED_PATHS: usize = 100_000;
-const RESTORE_IN_PROGRESS_FILE: &str = ".restore-in-progress";
 
 fn restore_marker_active(uhoh_dir: &Path) -> bool {
-    let marker_path = uhoh_dir.join(RESTORE_IN_PROGRESS_FILE);
+    let marker_path = uhoh_dir.join(crate::restore::RESTORE_IN_PROGRESS_FILE);
     if !marker_path.exists() {
         return false;
     }
@@ -1011,7 +1010,7 @@ fn restore_marker_active(uhoh_dir: &Path) -> bool {
 
 /// Read the project_hash from the .restore-in-progress marker, if present.
 fn read_restoring_project_hash(uhoh_dir: &Path) -> Option<String> {
-    let marker_path = uhoh_dir.join(RESTORE_IN_PROGRESS_FILE);
+    let marker_path = uhoh_dir.join(crate::restore::RESTORE_IN_PROGRESS_FILE);
     let text = std::fs::read_to_string(&marker_path).ok()?;
     text.lines()
         .find(|l| l.starts_with("project_hash="))
