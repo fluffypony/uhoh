@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::server::mcp::{JsonRpcRequest, JsonRpcResponse};
+use crate::mcp_protocol::{dispatch_protocol_request, JsonRpcRequest, JsonRpcResponse, ProtocolAction};
 
 static RESTORE_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -36,39 +36,23 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
             }
         };
 
-        // JSON-RPC notifications (no id) must not receive a response per spec.
-        if request.id.is_none() {
-            continue;
+        match dispatch_protocol_request(request) {
+            ProtocolAction::Notification => continue,
+            ProtocolAction::Response(response) => {
+                writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
+                stdout.flush()?;
+            }
+            ProtocolAction::ToolsList { id } => {
+                let response = crate::mcp_tools::tools_list_response(id);
+                writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
+                stdout.flush()?;
+            }
+            ProtocolAction::ToolsCall { id, params } => {
+                let response = handle_stdio_tool_call(&database, &uhoh_dir, config, id, params);
+                writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
+                stdout.flush()?;
+            }
         }
-
-        let response = match request.method.as_str() {
-            "initialize" => JsonRpcResponse::success(
-                request.id,
-                json!({
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": { "tools": {} },
-                    "serverInfo": {
-                        "name": "uhoh",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                }),
-            ),
-            "ping" | "notifications/initialized" => JsonRpcResponse::success(request.id, json!({})),
-            "tools/list" => {
-                JsonRpcResponse::success(request.id, crate::mcp_tools::tool_definitions())
-            }
-            "tools/call" => {
-                handle_stdio_tool_call(&database, &uhoh_dir, config, request.id, request.params)
-            }
-            _ => JsonRpcResponse::error(
-                request.id,
-                -32601,
-                format!("Method not found: {}", request.method),
-            ),
-        };
-
-        writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
-        stdout.flush()?;
     }
 
     Ok(())
@@ -81,11 +65,6 @@ fn handle_stdio_tool_call(
     id: Option<Value>,
     params: Option<Value>,
 ) -> JsonRpcResponse {
-    let (tool_name, args) = match crate::mcp_tools::parse_tool_call(params) {
-        Ok(parsed) => parsed,
-        Err(err) => return JsonRpcResponse::error(id, err.code, err.message),
-    };
-
     let context = crate::mcp_tools::McpToolContext {
         database: Arc::new(database.clone_handle()),
         uhoh_dir: uhoh_dir.to_path_buf(),
@@ -97,8 +76,5 @@ fn handle_stdio_tool_call(
         restore_locks: None,
     };
 
-    match crate::mcp_tools::dispatch_tool_call(&context, &tool_name, args) {
-        Ok(value) => JsonRpcResponse::success(id, value),
-        Err(err) => JsonRpcResponse::error(id, err.code, err.message),
-    }
+    crate::mcp_tools::tools_call_response(&context, id, params)
 }
