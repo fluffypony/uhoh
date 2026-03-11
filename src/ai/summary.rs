@@ -7,6 +7,41 @@ pub struct FileChangeSummary {
     pub modified: Vec<String>,
 }
 
+pub fn append_diff_chunk(
+    out: &mut String,
+    chars_used: &mut usize,
+    max_chars: usize,
+    truncated: &mut bool,
+    chunk: &str,
+) {
+    if *truncated || chunk.is_empty() {
+        return;
+    }
+    if *chars_used >= max_chars {
+        out.push_str("\n[Diff truncated]\n");
+        *truncated = true;
+        return;
+    }
+
+    let remaining = max_chars.saturating_sub(*chars_used);
+    if chunk.len() <= remaining {
+        out.push_str(chunk);
+        *chars_used = chars_used.saturating_add(chunk.len());
+        return;
+    }
+
+    let mut cut = remaining;
+    while cut > 0 && !chunk.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    if cut > 0 {
+        out.push_str(&chunk[..cut]);
+        *chars_used = chars_used.saturating_add(cut);
+    }
+    out.push_str("\n[Diff truncated]\n");
+    *truncated = true;
+}
+
 /// Blocking generator that spawns the sidecar if needed and queries it for a short summary.
 pub fn generate_summary_blocking(
     uhoh_dir: &std::path::Path,

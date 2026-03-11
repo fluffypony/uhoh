@@ -7,8 +7,8 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::event_ledger::{new_event, EventLedger};
 use crate::resolve;
-use crate::server::restore_guards::{RestoreFlagGuard, RestoreLockGuard};
 use crate::server::events::ServerEvent;
+use crate::server::restore_guards::{RestoreFlagGuard, RestoreLockGuard, StaticRestoreFlagGuard};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone)]
@@ -128,7 +128,10 @@ pub fn parse_tool_call(params: Option<Value>) -> Result<(String, Value), McpTool
     if tool_name.is_empty() {
         return Err(McpToolError::invalid_params("Missing tool name"));
     }
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     Ok((tool_name, args))
 }
 
@@ -275,19 +278,10 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
             .map_err(|e| McpToolError::invalid_params(e.to_string()))?;
     }
 
-    struct GlobalRestoreFlagGuard {
-        flag: &'static std::sync::atomic::AtomicBool,
-    }
-    impl Drop for GlobalRestoreFlagGuard {
-        fn drop(&mut self) {
-            self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
     #[allow(dead_code)]
     enum RestoreGuard {
         Shared(RestoreFlagGuard),
-        Global(GlobalRestoreFlagGuard),
+        Global(StaticRestoreFlagGuard),
     }
 
     let _restore_guard: Option<RestoreGuard> = if !dry_run {
@@ -303,10 +297,9 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
                 Some(RestoreGuard::Shared(guard))
             }
             RestoreInProgressFlag::Global(flag) => {
-                if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    return Err(McpToolError::internal("Another restore is already in progress"));
-                }
-                Some(RestoreGuard::Global(GlobalRestoreFlagGuard { flag }))
+                let guard = StaticRestoreFlagGuard::acquire(flag)
+                    .map_err(|e: anyhow::Error| McpToolError::internal(e.to_string()))?;
+                Some(RestoreGuard::Global(guard))
             }
         }
     } else {

@@ -36,6 +36,22 @@ pub struct TimelineParams {
     pub to: Option<String>,
 }
 
+fn internal_error_response(error: impl ToString) -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": error.to_string() })),
+    )
+        .into_response()
+}
+
+fn bad_request_response(error: impl ToString) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": error.to_string() })),
+    )
+        .into_response()
+}
+
 pub async fn list_projects(State(state): State<AppState>) -> impl IntoResponse {
     let db = state.database.clone();
     let result = tokio::task::spawn_blocking(move || db.list_projects()).await;
@@ -57,16 +73,8 @@ pub async fn list_projects(State(state): State<AppState>) -> impl IntoResponse {
                 .collect();
             (StatusCode::OK, Json(json!({ "projects": list }))).into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(Err(e)) => internal_error_response(e),
+        Err(e) => internal_error_response(e),
     }
 }
 
@@ -100,16 +108,8 @@ pub async fn list_snapshots(
                 .collect();
             Json(json!({ "snapshots": list })).into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(Err(e)) => internal_error_response(e),
+        Err(e) => internal_error_response(e),
     }
 }
 
@@ -142,11 +142,7 @@ pub async fn get_snapshot(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e),
     }
 }
 
@@ -193,11 +189,7 @@ pub async fn get_snapshot_files(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e),
     }
 }
 
@@ -363,11 +355,7 @@ pub async fn get_diff(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e),
     }
 }
 
@@ -417,11 +405,7 @@ pub async fn get_file_content(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e),
     }
 }
 
@@ -477,11 +461,7 @@ pub async fn create_snapshot(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e),
     }
 }
 
@@ -515,11 +495,7 @@ pub async fn set_snapshot_pin(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => internal_error_response(e),
     }
 }
 
@@ -565,20 +541,8 @@ pub async fn restore_snapshot(
         .await
         {
             Ok(Ok(key)) => Some(key),
-            Ok(Err(e)) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": format!("Internal error: {e}") })),
-                )
-                    .into_response();
-            }
+            Ok(Err(e)) => return bad_request_response(e),
+            Err(e) => return internal_error_response(format!("Internal error: {e}")),
         }
     } else {
         None
@@ -595,7 +559,7 @@ pub async fn restore_snapshot(
                     StatusCode::CONFLICT,
                     Json(json!({ "error": e.to_string() })),
                 )
-                    .into_response();
+                    .into_response()
             }
         }
     }
@@ -649,16 +613,8 @@ pub async fn restore_snapshot(
 
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(Err(e)) => bad_request_response(e),
+        Err(e) => internal_error_response(e),
     }
 }
 
@@ -690,16 +646,8 @@ pub async fn search(
                 .collect();
             Json(json!({ "results": list })).into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(Err(e)) => internal_error_response(e),
+        Err(e) => internal_error_response(e),
     }
 }
 
@@ -752,15 +700,7 @@ pub async fn get_timeline(
             }))
             .into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(Err(e)) => internal_error_response(e),
+        Err(e) => internal_error_response(e),
     }
 }

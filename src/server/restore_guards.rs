@@ -50,3 +50,22 @@ impl Drop for RestoreFlagGuard {
         self.flag.store(false, Ordering::SeqCst);
     }
 }
+
+pub(crate) struct StaticRestoreFlagGuard {
+    flag: &'static AtomicBool,
+}
+
+impl StaticRestoreFlagGuard {
+    pub(crate) fn acquire(flag: &'static AtomicBool) -> Result<Self> {
+        if flag.swap(true, Ordering::SeqCst) {
+            bail!("Another restore is already in progress");
+        }
+        Ok(Self { flag })
+    }
+}
+
+impl Drop for StaticRestoreFlagGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}

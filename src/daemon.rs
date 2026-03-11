@@ -1865,7 +1865,7 @@ async fn process_ai_summary_queue(
                                         (String::from_utf8(old), String::from_utf8(new))
                                     {
                                         let d = similar::TextDiff::from_lines(&old_s, &new_s);
-                                        append_ai_diff_chunk(
+                                        crate::ai::summary::append_diff_chunk(
                                             &mut diff_chunks,
                                             &mut diff_chars,
                                             max_diff_chars,
@@ -1877,7 +1877,7 @@ async fn process_ai_summary_queue(
                                         }
                                         for hunk in d.unified_diff().context_radius(2).iter_hunks()
                                         {
-                                            append_ai_diff_chunk(
+                                            crate::ai::summary::append_diff_chunk(
                                                 &mut diff_chunks,
                                                 &mut diff_chars,
                                                 max_diff_chars,
@@ -1893,7 +1893,7 @@ async fn process_ai_summary_queue(
                                                     similar::ChangeTag::Insert => '+',
                                                     similar::ChangeTag::Equal => ' ',
                                                 };
-                                                append_ai_diff_chunk(
+                                                crate::ai::summary::append_diff_chunk(
                                                     &mut diff_chunks,
                                                     &mut diff_chars,
                                                     max_diff_chars,
@@ -1910,7 +1910,7 @@ async fn process_ai_summary_queue(
                                         }
                                     }
                                 } else {
-                                    append_ai_diff_chunk(
+                                    crate::ai::summary::append_diff_chunk(
                                         &mut diff_chunks,
                                         &mut diff_chars,
                                         max_diff_chars,
@@ -1999,41 +1999,6 @@ async fn process_ai_summary_queue(
             }
         }
     }
-}
-
-fn append_ai_diff_chunk(
-    out: &mut String,
-    chars_used: &mut usize,
-    max_chars: usize,
-    truncated: &mut bool,
-    chunk: &str,
-) {
-    if *truncated || chunk.is_empty() {
-        return;
-    }
-    if *chars_used >= max_chars {
-        out.push_str("\n[Diff truncated]\n");
-        *truncated = true;
-        return;
-    }
-
-    let remaining = max_chars.saturating_sub(*chars_used);
-    if chunk.len() <= remaining {
-        out.push_str(chunk);
-        *chars_used = chars_used.saturating_add(chunk.len());
-        return;
-    }
-
-    let mut cut = remaining;
-    while cut > 0 && !chunk.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    if cut > 0 {
-        out.push_str(&chunk[..cut]);
-        *chars_used = chars_used.saturating_add(cut);
-    }
-    out.push_str("\n[Diff truncated]\n");
-    *truncated = true;
 }
 
 fn check_moved_folders(

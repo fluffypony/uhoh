@@ -589,29 +589,45 @@ fn parse_pgpass_fields(line: &str) -> Vec<String> {
 
 pub fn scrub_error_message(msg: &str) -> String {
     let mut out = msg.to_string();
-    if let Some(idx) = out.find("postgres://") {
-        let end = out[idx..]
-            .find(char::is_whitespace)
-            .map(|v| idx + v)
-            .unwrap_or(out.len());
-        let dsn = &out[idx..end];
-        out.replace_range(idx..end, &scrub_dsn(dsn));
-    }
-    if let Some(idx) = out.find("postgresql://") {
-        let end = out[idx..]
-            .find(char::is_whitespace)
-            .map(|v| idx + v)
-            .unwrap_or(out.len());
-        let dsn = &out[idx..end];
-        out.replace_range(idx..end, &scrub_dsn(dsn));
-    }
-    if let Some(idx) = out.find("mysql://") {
-        let end = out[idx..]
-            .find(char::is_whitespace)
-            .map(|v| idx + v)
-            .unwrap_or(out.len());
-        let dsn = &out[idx..end];
-        out.replace_range(idx..end, &scrub_dsn(dsn));
+    for scheme in ["postgres://", "postgresql://", "mysql://"] {
+        let mut search_from = 0usize;
+        while let Some(rel_idx) = out[search_from..].find(scheme) {
+            let idx = search_from + rel_idx;
+            let end = out[idx..]
+                .find(char::is_whitespace)
+                .map(|v| idx + v)
+                .unwrap_or(out.len());
+            let dsn = out[idx..end].to_string();
+            let scrubbed = scrub_dsn(&dsn);
+            out.replace_range(idx..end, &scrubbed);
+            search_from = idx.saturating_add(scrubbed.len());
+        }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scrub_error_message;
+
+    #[test]
+    fn scrub_error_message_scrubs_multiple_postgres_urls() {
+        let msg =
+            "first postgres://alice:one@localhost/db1 second postgres://bob:two@localhost/db2";
+        let scrubbed = scrub_error_message(msg);
+        assert!(!scrubbed.contains(":one@"));
+        assert!(!scrubbed.contains(":two@"));
+        assert!(scrubbed.contains("postgres://alice@localhost/db1"));
+        assert!(scrubbed.contains("postgres://bob@localhost/db2"));
+    }
+
+    #[test]
+    fn scrub_error_message_scrubs_mixed_scheme_urls() {
+        let msg = "pg postgresql://carol:three@db.local/app mysql://dave:four@mysql.local/shop";
+        let scrubbed = scrub_error_message(msg);
+        assert!(!scrubbed.contains(":three@"));
+        assert!(!scrubbed.contains(":four@"));
+        assert!(scrubbed.contains("postgresql://carol@db.local/app"));
+        assert!(scrubbed.contains("mysql://dave@mysql.local/shop"));
+    }
 }

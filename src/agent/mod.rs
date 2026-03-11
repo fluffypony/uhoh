@@ -173,60 +173,61 @@ impl Subsystem for AgentSubsystem {
 }
 
 impl AgentSubsystem {
+    fn record_background_failure(&mut self, message: String) {
+        self.background_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.healthy = false;
+        self.fatal_error = Some(message.clone());
+        tracing::error!("{message}");
+    }
+
+    async fn poll_result_task(
+        task: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+        label: &str,
+    ) -> Option<String> {
+        if !task
+            .as_ref()
+            .map(|task| task.is_finished())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+
+        if let Some(task) = task.take() {
+            match task.await {
+                Ok(Ok(())) => None,
+                Ok(Err(err)) => Some(format!("{label} task failed: {err}")),
+                Err(err) => Some(format!("{label} task panicked: {err}")),
+            }
+        } else {
+            None
+        }
+    }
+
     async fn poll_background_tasks(&mut self) {
-        if self
+        let intercept_finished = self
             .intercept_task
             .as_ref()
             .map(|task| task.is_finished())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if let Some(message) =
+            Self::poll_result_task(&mut self.intercept_task, "session tailer").await
         {
-            if let Some(task) = self.intercept_task.take() {
-                match task.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => {
-                        self.background_failures
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        self.healthy = false;
-                        self.fatal_error = Some(format!("session tailer task failed: {err}"));
-                        tracing::error!("session tailer task failed: {err}");
-                    }
-                    Err(err) => {
-                        self.background_failures
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        self.healthy = false;
-                        self.fatal_error = Some(format!("session tailer task panicked: {err}"));
-                        tracing::error!("session tailer task panicked: {err}");
-                    }
-                }
-            }
+            self.record_background_failure(message);
+        }
+        if intercept_finished {
             self.intercept_started = false;
         }
 
-        if self
+        let proxy_finished = self
             .proxy_task
             .as_ref()
             .map(|task| task.is_finished())
-            .unwrap_or(false)
-        {
-            if let Some(task) = self.proxy_task.take() {
-                match task.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => {
-                        self.background_failures
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        self.healthy = false;
-                        self.fatal_error = Some(format!("mcp proxy task failed: {err}"));
-                        tracing::error!("mcp proxy task failed: {err}");
-                    }
-                    Err(err) => {
-                        self.background_failures
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        self.healthy = false;
-                        self.fatal_error = Some(format!("mcp proxy task panicked: {err}"));
-                        tracing::error!("mcp proxy task panicked: {err}");
-                    }
-                }
-            }
+            .unwrap_or(false);
+        if let Some(message) = Self::poll_result_task(&mut self.proxy_task, "mcp proxy").await {
+            self.record_background_failure(message);
+        }
+        if proxy_finished {
             self.proxy_shutdown = None;
             self.proxy_started = false;
             self.proxy_failures = self.proxy_failures.saturating_add(1);
@@ -243,11 +244,7 @@ impl AgentSubsystem {
         {
             if let Some(task) = self.fanotify_task.take() {
                 if let Err(err) = task.await {
-                    self.background_failures
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    self.healthy = false;
-                    self.fatal_error = Some(format!("fanotify task panicked: {err}"));
-                    tracing::error!("fanotify task panicked: {err}");
+                    self.record_background_failure(format!("fanotify task panicked: {err}"));
                 }
             }
             self.fanotify_started = false;

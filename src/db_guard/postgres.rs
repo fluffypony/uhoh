@@ -72,6 +72,31 @@ struct DdlPollWorker {
 static PG_DDL_POLL_WORKERS: Lazy<Mutex<HashMap<String, DdlPollWorker>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+fn emit_recovery_event(
+    ctx: &SubsystemContext,
+    guard_name: &str,
+    event_type: &str,
+    detail: serde_json::Value,
+    artifact: &recovery::ArtifactInfo,
+) {
+    if let Err(err) = ctx.event_ledger.append(NewEventLedgerEntry {
+        source: "db_guard".to_string(),
+        event_type: event_type.to_string(),
+        severity: "critical".to_string(),
+        project_hash: None,
+        agent_name: None,
+        guard_name: Some(guard_name.to_string()),
+        path: None,
+        detail: Some(detail.to_string()),
+        pre_state_ref: Some(artifact.blake3.clone()),
+        post_state_ref: None,
+        prev_hash: None,
+        causal_parent: None,
+    }) {
+        tracing::error!("failed to append {event_type} event: {err}");
+    }
+}
+
 pub fn tick_postgres_guard(
     ctx: &SubsystemContext,
     guard: &DbGuardEntry,
@@ -162,28 +187,17 @@ pub fn tick_postgres_guard(
                 ctx.config.db_guard.recovery_retention_days,
                 ctx.config.db_guard.max_recovery_file_mb,
             ) {
-                let detail = serde_json::json!({
+                emit_recovery_event(
+                    ctx,
+                    &guard.name,
+                    "mass_delete",
+                    serde_json::json!({
                     "deleted_rows": deleted_rows,
-                    "artifact": artifact.path,
-                    "blake3": artifact.blake3,
-                })
-                .to_string();
-                if let Err(err) = ctx.event_ledger.append(NewEventLedgerEntry {
-                    source: "db_guard".to_string(),
-                    event_type: "mass_delete".to_string(),
-                    severity: "critical".to_string(),
-                    project_hash: None,
-                    agent_name: None,
-                    guard_name: Some(guard.name.clone()),
-                    path: None,
-                    detail: Some(detail),
-                    pre_state_ref: Some(artifact.blake3),
-                    post_state_ref: None,
-                    prev_hash: None,
-                    causal_parent: None,
-                }) {
-                    tracing::error!("failed to append mass_delete event: {err}");
-                }
+                    "artifact": artifact.path.clone(),
+                    "blake3": artifact.blake3.clone(),
+                    }),
+                    &artifact,
+                );
             }
         } else if pct >= ctx.config.db_guard.mass_delete_pct_threshold {
             let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
@@ -197,30 +211,19 @@ pub fn tick_postgres_guard(
                 ctx.config.db_guard.recovery_retention_days,
                 ctx.config.db_guard.max_recovery_file_mb,
             ) {
-                let detail = serde_json::json!({
+                emit_recovery_event(
+                    ctx,
+                    &guard.name,
+                    "mass_delete",
+                    serde_json::json!({
                     "deleted_rows": deleted_rows,
                     "total_rows": total_rows,
                     "deleted_ratio": pct,
-                    "artifact": artifact.path,
-                    "blake3": artifact.blake3,
-                })
-                .to_string();
-                if let Err(err) = ctx.event_ledger.append(NewEventLedgerEntry {
-                    source: "db_guard".to_string(),
-                    event_type: "mass_delete".to_string(),
-                    severity: "critical".to_string(),
-                    project_hash: None,
-                    agent_name: None,
-                    guard_name: Some(guard.name.clone()),
-                    path: None,
-                    detail: Some(detail),
-                    pre_state_ref: Some(artifact.blake3),
-                    post_state_ref: None,
-                    prev_hash: None,
-                    causal_parent: None,
-                }) {
-                    tracing::error!("failed to append mass_delete event: {err}");
-                }
+                    "artifact": artifact.path.clone(),
+                    "blake3": artifact.blake3.clone(),
+                    }),
+                    &artifact,
+                );
             }
         }
     }
@@ -243,28 +246,17 @@ pub fn tick_postgres_guard(
                 ctx.config.db_guard.recovery_retention_days,
                 ctx.config.db_guard.max_recovery_file_mb,
             ) {
-                let detail = serde_json::json!({
+                emit_recovery_event(
+                    ctx,
+                    &guard.name,
+                    "drop_table",
+                    serde_json::json!({
                     "notify_payload": payload,
-                    "artifact": artifact.path,
-                    "blake3": artifact.blake3,
-                })
-                .to_string();
-                if let Err(err) = ctx.event_ledger.append(NewEventLedgerEntry {
-                    source: "db_guard".to_string(),
-                    event_type: "drop_table".to_string(),
-                    severity: "critical".to_string(),
-                    project_hash: None,
-                    agent_name: None,
-                    guard_name: Some(guard.name.clone()),
-                    path: None,
-                    detail: Some(detail),
-                    pre_state_ref: Some(artifact.blake3),
-                    post_state_ref: None,
-                    prev_hash: None,
-                    causal_parent: None,
-                }) {
-                    tracing::error!("failed to append drop_table event: {err}");
-                }
+                    "artifact": artifact.path.clone(),
+                    "blake3": artifact.blake3.clone(),
+                    }),
+                    &artifact,
+                );
             }
         }
     }

@@ -680,7 +680,7 @@ pub fn create_snapshot(
                     // Enforce size cap and skip binary
                     if prev.size > MAX_AI_DIFF_FILE_SIZE {
                         let note = format!("--- {path}\n[File too large for AI diff]\n");
-                        append_diff_chunk(
+                        crate::ai::summary::append_diff_chunk(
                             &mut diff_chunks,
                             &mut diff_chars,
                             max_diff_chars,
@@ -704,7 +704,7 @@ pub fn create_snapshot(
                             || content_inspector::inspect(head_new).is_binary()
                         {
                             let note = format!("--- {path}\n[Binary file]\n");
-                            append_diff_chunk(
+                            crate::ai::summary::append_diff_chunk(
                                 &mut diff_chunks,
                                 &mut diff_chars,
                                 max_diff_chars,
@@ -724,7 +724,7 @@ pub fn create_snapshot(
                         {
                             let d = similar::TextDiff::from_lines(&old_s, &new_s);
                             let header = format!("--- a/{path}\n+++ b/{path}\n");
-                            append_diff_chunk(
+                            crate::ai::summary::append_diff_chunk(
                                 &mut diff_chunks,
                                 &mut diff_chars,
                                 max_diff_chars,
@@ -740,7 +740,7 @@ pub fn create_snapshot(
                                     break;
                                 }
                                 let hunk_header = format!("{}\n", hunk.header());
-                                append_diff_chunk(
+                                crate::ai::summary::append_diff_chunk(
                                     &mut diff_chunks,
                                     &mut diff_chars,
                                     max_diff_chars,
@@ -761,7 +761,7 @@ pub fn create_snapshot(
                                         similar::ChangeTag::Equal => ' ',
                                     };
                                     let line = format!("{}{}", sign, change);
-                                    append_diff_chunk(
+                                    crate::ai::summary::append_diff_chunk(
                                         &mut diff_chunks,
                                         &mut diff_chars,
                                         max_diff_chars,
@@ -826,41 +826,6 @@ pub fn create_snapshot(
     enforce_storage_limit(database, total_project_size, project_hash, config)?;
 
     Ok(Some(snapshot_id))
-}
-
-fn append_diff_chunk(
-    out: &mut String,
-    chars_used: &mut usize,
-    max_chars: usize,
-    truncated: &mut bool,
-    chunk: &str,
-) {
-    if *truncated || chunk.is_empty() {
-        return;
-    }
-    if *chars_used >= max_chars {
-        out.push_str("\n[Diff truncated]\n");
-        *truncated = true;
-        return;
-    }
-
-    let remaining = max_chars.saturating_sub(*chars_used);
-    if chunk.len() <= remaining {
-        out.push_str(chunk);
-        *chars_used = chars_used.saturating_add(chunk.len());
-        return;
-    }
-
-    let mut cut = remaining;
-    while cut > 0 && !chunk.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    if cut > 0 {
-        out.push_str(&chunk[..cut]);
-        *chars_used = chars_used.saturating_add(cut);
-    }
-    out.push_str("\n[Diff truncated]\n");
-    *truncated = true;
 }
 
 pub fn mtime_to_millis(t: SystemTime) -> i64 {
