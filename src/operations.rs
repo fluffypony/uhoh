@@ -10,13 +10,13 @@ use crate::db::{Database, ProjectEntry};
 
 pub fn cmd_mark(database: &Database, project: &ProjectEntry, label: &str) -> Result<()> {
     // If an operation is active, close it using the latest snapshot as last_snapshot_id
-    if let Some((op_id, _)) = database.get_active_operation(&project.hash)? {
+    if let Some(op) = database.get_active_operation(&project.hash)? {
         let latest = database
             .list_snapshots(&project.hash)?
             .first()
             .map(|s| s.snapshot_id)
             .unwrap_or(0);
-        database.close_operation_with_last(op_id, latest)?;
+        database.close_operation_with_last(op.id, latest)?;
         tracing::info!("Closed previous active operation at {}", {
             cas::id_to_base58(latest)
         });
@@ -42,37 +42,43 @@ pub fn cmd_mark(database: &Database, project: &ProjectEntry, label: &str) -> Res
 
 pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) -> Result<()> {
     // If an op is active, close it and use current latest as its last snapshot
-    if let Some((op_id, label)) = database.get_active_operation(&project.hash)? {
+    if let Some(op) = database.get_active_operation(&project.hash)? {
         let latest = database
             .list_snapshots(&project.hash)?
             .first()
             .map(|s| s.snapshot_id)
             .unwrap_or(0);
-        database.close_operation_with_last(op_id, latest)?;
+        database.close_operation_with_last(op.id, latest)?;
         tracing::info!(
             "Closed active operation: {} at {}",
-            label,
+            op.label,
             cas::id_to_base58(latest)
         );
     }
 
     // Find the last completed operation
-    let (_op_id, label, first_snap, _last_snap) = database
+    let completed = database
         .get_latest_completed_operation(&project.hash)?
         .context("No completed operations to undo")?;
 
     // Restore to first_snap itself — this is the clean pre-operation state
     // recorded when `uhoh mark` was called. Previous code incorrectly went one
     // snapshot further back via snapshot_before(), destroying a valid snapshot.
-    if first_snap > 0 {
-        let id_str = cas::id_to_base58(first_snap);
-        println!("Undoing operation \"{label}\": restoring to snapshot {id_str}");
+    if completed.first_snapshot_id > 0 {
+        let id_str = cas::id_to_base58(completed.first_snapshot_id);
+        println!(
+            "Undoing operation \"{}\": restoring to snapshot {id_str}",
+            completed.label
+        );
         crate::restore::cmd_restore(
             uhoh_dir, database, project, &id_str, None, false,
             true, // force (since this is an undo, we're intentional)
         )?;
     } else {
-        println!("No snapshot found for operation \"{label}\". Cannot undo.");
+        println!(
+            "No snapshot found for operation \"{}\". Cannot undo.",
+            completed.label
+        );
     }
 
     Ok(())
@@ -85,21 +91,24 @@ pub fn cmd_list_operations(database: &Database, project: &ProjectEntry) -> Resul
         return Ok(());
     }
     println!("Operations for {}:", project.current_path);
-    for (id, label, started, ended, first_snap, last_snap) in &ops {
-        let status = if ended.is_some() {
+    for op in &ops {
+        let status = if op.ended_at.is_some() {
             "completed"
         } else {
             "active"
         };
-        let snap_range = match (first_snap, last_snap) {
+        let snap_range = match (op.first_snapshot_id, op.last_snapshot_id) {
             (Some(f), Some(l)) => format!(
                 "snapshots {}..{}",
-                cas::id_to_base58(*f),
-                cas::id_to_base58(*l)
+                cas::id_to_base58(f),
+                cas::id_to_base58(l)
             ),
             _ => "no snapshots".to_string(),
         };
-        println!("  #{id} [{status}] \"{label}\" started={started} {snap_range}");
+        println!(
+            "  #{} [{status}] \"{}\" started={} {snap_range}",
+            op.id, op.label, op.started_at
+        );
     }
     Ok(())
 }

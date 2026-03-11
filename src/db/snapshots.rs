@@ -52,7 +52,7 @@ pub fn create_snapshot_tx(
                 *stored as i32,
                 *executable as i32,
                 mtime,
-                storage_method,
+                storage_method.to_db(),
                 *is_symlink as i32,
             ])?;
         }
@@ -70,7 +70,7 @@ pub fn create_snapshot_tx(
                 hash,
                 size,
                 *stored as i32,
-                storage_method
+                storage_method.to_db()
             ])?;
         }
     }

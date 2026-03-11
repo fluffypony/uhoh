@@ -1,4 +1,5 @@
 use tempfile::TempDir;
+use uhoh::db::LedgerSource;
 
 #[cfg(unix)]
 #[test]
@@ -462,7 +463,7 @@ fn test_emergency_snapshot_retained_within_window() {
     // Create snapshots with emergency trigger
     let ts_recent = chrono::Utc::now().to_rfc3339();
     let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
-    let deleted: Vec<(String, String, u64, bool, i64)> = Vec::new();
+    let deleted: Vec<(String, String, u64, bool, uhoh::cas::StorageMethod)> = Vec::new();
 
     let (rowid, _) = db
         .create_snapshot(
@@ -497,7 +498,7 @@ fn test_emergency_snapshot_pruned_after_window() {
     // Create emergency snapshot with old timestamp (72h ago, beyond 48h default)
     let old_ts = (chrono::Utc::now() - chrono::Duration::hours(72)).to_rfc3339();
     let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
-    let deleted: Vec<(String, String, u64, bool, i64)> = Vec::new();
+    let deleted: Vec<(String, String, u64, bool, uhoh::cas::StorageMethod)> = Vec::new();
 
     let (old_rowid, _) = db
         .create_snapshot(
@@ -544,7 +545,7 @@ fn test_predecessor_protection_in_compaction() {
     db.add_project("emrg5", "/fake/path").unwrap();
 
     let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
-    let deleted: Vec<(String, String, u64, bool, i64)> = Vec::new();
+    let deleted: Vec<(String, String, u64, bool, uhoh::cas::StorageMethod)> = Vec::new();
 
     // Create predecessor snapshot (old but not emergency)
     let pred_ts = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
@@ -698,4 +699,44 @@ fn test_restore_sets_and_clears_restore_marker_file() {
         !marker.exists(),
         "restore marker file should be cleaned up after restore"
     );
+}
+
+#[test]
+fn test_ledger_verify_tolerates_unknown_source_severity_strings() {
+    let tmp = TempDir::new().unwrap();
+    let db = uhoh::db::Database::open(&tmp.path().join("test.db")).unwrap();
+
+    let mut event = uhoh::event_ledger::new_event(LedgerSource::Agent, "manual_injected", "info");
+    event.detail = Some("seed".to_string());
+    event.source = "legacy_source".into();
+    event.severity = "legacy_severity".into();
+    let id = db.insert_event_ledger(&event).unwrap();
+
+    let (count, broken) = db.verify_event_ledger_chain().unwrap();
+    assert_eq!(count, 1);
+    assert!(!broken.contains(&id));
+}
+
+#[test]
+fn test_list_db_guards_rejects_invalid_engine_or_mode() {
+    let tmp = TempDir::new().unwrap();
+    let db = uhoh::db::Database::open(&tmp.path().join("test.db")).unwrap();
+
+    let conn = rusqlite::Connection::open(tmp.path().join("test.db")).unwrap();
+    conn.execute(
+        "INSERT INTO db_guards (name, engine, connection_ref, tables_csv, watched_tables_cache, mode, created_at, active)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 1)",
+        rusqlite::params![
+            "bad_guard",
+            "oracle",
+            "sqlite:///tmp/demo.db",
+            "*",
+            "triggers",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )
+    .unwrap();
+
+    let err = db.list_db_guards().expect_err("invalid db_guard engine must error");
+    assert!(err.to_string().contains("invalid db_guard engine"));
 }

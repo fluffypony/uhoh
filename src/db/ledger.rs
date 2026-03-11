@@ -1,4 +1,4 @@
-use super::{EventLedgerEntry, NewEventLedgerEntry};
+use super::{EventLedgerEntry, LedgerSeverity, LedgerSource, NewEventLedgerEntry};
 use rusqlite::types::Value;
 use rusqlite::Row;
 
@@ -54,12 +54,18 @@ impl<'r> TryFrom<&Row<'r>> for EventLedgerEntry {
     type Error = rusqlite::Error;
 
     fn try_from(row: &Row<'r>) -> Result<Self, Self::Error> {
+        let source_raw: String = row.get(2)?;
+        let severity_raw: String = row.get(4)?;
         Ok(EventLedgerEntry {
             id: row.get(0)?,
             ts: row.get(1)?,
-            source: row.get(2)?,
+            source: LedgerSource::from_str(&source_raw)
+                .map(|value| value.as_str().to_string())
+                .unwrap_or(source_raw),
             event_type: row.get(3)?,
-            severity: row.get(4)?,
+            severity: LedgerSeverity::from_str(&severity_raw)
+                .map(|value| value.as_str().to_string())
+                .unwrap_or(severity_raw),
             project_hash: row.get(5)?,
             agent_name: row.get(6)?,
             guard_name: row.get(7)?,
@@ -83,6 +89,26 @@ pub fn compute_event_chain_hash_with_id(
     event: &NewEventLedgerEntry,
     ts: &str,
 ) -> String {
+    compute_event_chain_hash_with_id_raw(
+        prev_hash,
+        id,
+        event.source.as_str(),
+        &event.event_type,
+        event.severity.as_str(),
+        event,
+        ts,
+    )
+}
+
+pub fn compute_event_chain_hash_with_id_raw(
+    prev_hash: &str,
+    id: i64,
+    source: &str,
+    event_type: &str,
+    severity: &str,
+    event: &NewEventLedgerEntry,
+    ts: &str,
+) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(prev_hash.as_bytes());
     hasher.update(&[0u8]);
@@ -90,11 +116,11 @@ pub fn compute_event_chain_hash_with_id(
     hasher.update(&[0u8]);
     hasher.update(ts.as_bytes());
     hasher.update(&[0u8]);
-    hasher.update(event.source.as_bytes());
+    hasher.update(source.as_bytes());
     hasher.update(&[0u8]);
-    hasher.update(event.event_type.as_bytes());
+    hasher.update(event_type.as_bytes());
     hasher.update(&[0u8]);
-    hasher.update(event.severity.as_bytes());
+    hasher.update(severity.as_bytes());
     hasher.update(&[0u8]);
     hasher.update(event.project_hash.as_deref().unwrap_or("").as_bytes());
     hasher.update(&[0u8]);

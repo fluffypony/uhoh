@@ -24,6 +24,7 @@ struct DaemonMaintenanceSubsystem {
     sidecar_check_interval: std::time::Duration,
     last_sidecar_check: Option<std::time::Instant>,
     vacuum_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    last_failure: Option<String>,
 }
 
 impl DaemonMaintenanceSubsystem {
@@ -39,20 +40,28 @@ impl DaemonMaintenanceSubsystem {
             ),
             last_sidecar_check: None,
             vacuum_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_failure: None,
         }
     }
 
     async fn run_tick(&mut self, ctx: &SubsystemContext) {
+        let mut tick_failure: Option<String> = None;
         let db_projects = {
             let db = ctx.database.clone();
             match tokio::task::spawn_blocking(move || db.list_projects()).await {
                 Ok(Ok(v)) => v,
                 Ok(Err(e)) => {
                     tracing::warn!("Failed to poll projects on maintenance tick: {}", e);
+                    if tick_failure.is_none() {
+                        tick_failure = Some(format!("project poll failed: {e}"));
+                    }
                     Vec::new()
                 }
                 Err(e) => {
                     tracing::warn!("Failed joining maintenance project poll task: {:?}", e);
+                    if tick_failure.is_none() {
+                        tick_failure = Some(format!("project poll join failed: {e:?}"));
+                    }
                     Vec::new()
                 }
             }
@@ -134,6 +143,9 @@ impl DaemonMaintenanceSubsystem {
             .await;
             if let Err(e) = backup_res.unwrap_or_else(|e| Err(anyhow::anyhow!("{e:?}"))) {
                 tracing::warn!("Database backup failed: {}", e);
+                if tick_failure.is_none() {
+                    tick_failure = Some(format!("database backup failed: {e}"));
+                }
             } else {
                 if let Ok(entries) = std::fs::read_dir(&backups_dir) {
                     let mut files: Vec<_> = entries.flatten().collect();
@@ -221,7 +233,12 @@ impl DaemonMaintenanceSubsystem {
                     status: "failed".to_string(),
                     detail: e.to_string(),
                 });
+            if tick_failure.is_none() {
+                tick_failure = Some(format!("mlx auto-update failed: {e}"));
+            }
         }
+
+        self.last_failure = tick_failure;
     }
 }
 
@@ -253,7 +270,10 @@ impl Subsystem for DaemonMaintenanceSubsystem {
     }
 
     fn health_check(&self) -> SubsystemHealth {
-        SubsystemHealth::Healthy
+        match &self.last_failure {
+            Some(reason) => SubsystemHealth::Degraded(reason.clone()),
+            None => SubsystemHealth::Healthy,
+        }
     }
 }
 
@@ -1148,18 +1168,32 @@ async fn run_tick_maintenance(
     let mut next_debounce = None;
     let mut next_update = None;
 
-    if let Ok(new_cfg) = Config::load(config_path) {
-        if new_cfg.watch.debounce_quiet_secs != config.watch.debounce_quiet_secs {
-            next_debounce = Some(tokio::time::interval(Duration::from_secs(
-                new_cfg.watch.debounce_quiet_secs,
-            )));
+    match Config::load(config_path) {
+        Ok(new_cfg) => {
+            if new_cfg.watch.debounce_quiet_secs != config.watch.debounce_quiet_secs {
+                next_debounce = Some(tokio::time::interval(Duration::from_secs(
+                    new_cfg.watch.debounce_quiet_secs,
+                )));
+            }
+            if new_cfg.update.check_interval_hours != config.update.check_interval_hours {
+                next_update = Some(tokio::time::interval(Duration::from_secs(
+                    new_cfg.update.check_interval_hours * 3600,
+                )));
+            }
+            next_config = new_cfg;
         }
-        if new_cfg.update.check_interval_hours != config.update.check_interval_hours {
-            next_update = Some(tokio::time::interval(Duration::from_secs(
-                new_cfg.update.check_interval_hours * 3600,
-            )));
+        Err(err) => {
+            tracing::warn!(
+                "Failed to reload config from {} on daemon tick: {}",
+                config_path.display(),
+                err
+            );
+            let mut event = crate::event_ledger::new_event("daemon", "config_reload_failed", "warn");
+            event.detail = Some(format!("path={}, error={}", config_path.display(), err));
+            if let Err(append_err) = event_ledger.append(event) {
+                tracing::error!("failed to append config_reload_failed event: {append_err}");
+            }
         }
-        next_config = new_cfg;
     }
 
     let db_for_poll = database.clone();
@@ -1798,28 +1832,28 @@ async fn process_ai_summary_queue(
     const MAX_PER_TICK: u32 = 2;
     const MAX_ATTEMPTS: i64 = 5;
     if let Ok(jobs) = database.dequeue_pending_ai(MAX_PER_TICK) {
-        for (rowid, project_hash, attempts, _queued_at) in jobs {
-            if attempts >= MAX_ATTEMPTS {
-                let _ = database.delete_pending_ai(rowid);
+        for job in jobs {
+            if job.attempts >= MAX_ATTEMPTS {
+                let _ = database.delete_pending_ai(job.snapshot_rowid);
                 continue;
             }
 
             // Rebuild a minimal diff for this snapshot
             // Fetch files of this snapshot and prior snapshot for the project
-            let this = match database.get_snapshot_by_rowid(rowid) {
+            let this = match database.get_snapshot_by_rowid(job.snapshot_rowid) {
                 Ok(Some(s)) => s,
                 _ => {
-                    let _ = database.delete_pending_ai(rowid);
+                    let _ = database.delete_pending_ai(job.snapshot_rowid);
                     continue;
                 }
             };
             let prev = database
-                .snapshot_before(&project_hash, this.snapshot_id)
+                .snapshot_before(&job.project_hash, this.snapshot_id)
                 .unwrap_or_default();
             let this_files = match database.get_snapshot_files(this.rowid) {
                 Ok(v) => v,
                 Err(_) => {
-                    let _ = database.increment_ai_attempts(rowid);
+                    let _ = database.increment_ai_attempts(job.snapshot_rowid);
                     continue;
                 }
             };
@@ -1963,14 +1997,16 @@ async fn process_ai_summary_queue(
 
             match ai_result {
                 Ok(text) if !text.is_empty() => {
-                    if let Err(e) = database.set_ai_summary(rowid, &text) {
+                    if let Err(e) = database.set_ai_summary(job.snapshot_rowid, &text) {
                         tracing::warn!("Failed to set AI summary: {}", e);
                     } else {
-                        let _ = database.delete_pending_ai(rowid);
-                        if let Ok(Some(snapshot)) = database.get_snapshot_by_rowid(rowid) {
+                        let _ = database.delete_pending_ai(job.snapshot_rowid);
+                        if let Ok(Some(snapshot)) =
+                            database.get_snapshot_by_rowid(job.snapshot_rowid)
+                        {
                             let _ = event_tx.send(
                                 crate::server::events::ServerEvent::AiSummaryCompleted {
-                                    project_hash: project_hash.clone(),
+                                    project_hash: job.project_hash.clone(),
                                     snapshot_id: crate::cas::id_to_base58(snapshot.snapshot_id),
                                     summary: text,
                                 },
@@ -1982,19 +2018,23 @@ async fn process_ai_summary_queue(
                     // Empty summary — likely model unavailable or download failed.
                     tracing::warn!(
                         "AI summary returned empty for snapshot rowid={} (model may be unavailable or still downloading)",
-                        rowid
+                        job.snapshot_rowid
                     );
-                    if let Ok(attempts) = database.increment_ai_attempts(rowid) {
+                    if let Ok(attempts) = database.increment_ai_attempts(job.snapshot_rowid) {
                         // Delete after 3 total failures (empty or error) to avoid queue buildup.
                         // The attempts counter is shared between empty and error paths.
                         if attempts >= 3 {
-                            let _ = database.delete_pending_ai(rowid);
+                            let _ = database.delete_pending_ai(job.snapshot_rowid);
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Deferred AI summary failed for rowid={}: {}", rowid, e);
-                    let _ = database.increment_ai_attempts(rowid);
+                    tracing::warn!(
+                        "Deferred AI summary failed for rowid={}: {}",
+                        job.snapshot_rowid,
+                        e
+                    );
+                    let _ = database.increment_ai_attempts(job.snapshot_rowid);
                 }
             }
         }

@@ -63,7 +63,7 @@ fn test_snapshot_creation_and_query() {
             stored: true,
             executable: false,
             mtime: None,
-            storage_method: 1,
+            storage_method: uhoh::cas::StorageMethod::Copy,
             is_symlink: false,
         },
         uhoh::db::SnapFileEntry {
@@ -73,7 +73,7 @@ fn test_snapshot_creation_and_query() {
             stored: true,
             executable: false,
             mtime: None,
-            storage_method: 1,
+            storage_method: uhoh::cas::StorageMethod::Copy,
             is_symlink: false,
         },
     ];

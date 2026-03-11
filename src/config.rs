@@ -260,9 +260,82 @@ pub struct NotificationsConfig {
     #[serde(default)]
     pub webhook_url: String,
     #[serde(default = "default_webhook_events")]
-    pub webhook_events: Vec<String>,
+    pub webhook_events: Vec<WebhookEventKind>,
     #[serde(default = "default_notifications_cooldown")]
     pub cooldown_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookEventKind {
+    MassDelete,
+    MassDeletePct,
+    DropTable,
+    DropColumn,
+    Truncate,
+    DangerousAgentAction,
+    MlxUpdateFailed,
+    EmergencyDeleteDetected,
+}
+
+impl WebhookEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WebhookEventKind::MassDelete => "mass_delete",
+            WebhookEventKind::MassDeletePct => "mass_delete_pct",
+            WebhookEventKind::DropTable => "drop_table",
+            WebhookEventKind::DropColumn => "drop_column",
+            WebhookEventKind::Truncate => "truncate",
+            WebhookEventKind::DangerousAgentAction => "dangerous_agent_action",
+            WebhookEventKind::MlxUpdateFailed => "mlx_update_failed",
+            WebhookEventKind::EmergencyDeleteDetected => "emergency_delete_detected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAuditScope {
+    Project,
+    Home,
+}
+
+impl AgentAuditScope {
+    pub fn is_home(self) -> bool {
+        matches!(self, AgentAuditScope::Home)
+    }
+}
+
+impl std::fmt::Display for AgentAuditScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            AgentAuditScope::Project => "project",
+            AgentAuditScope::Home => "home",
+        };
+        f.write_str(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DangerousChangePolicy {
+    None,
+    Pause,
+}
+
+impl DangerousChangePolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DangerousChangePolicy::None => "none",
+            DangerousChangePolicy::Pause => "pause",
+        }
+    }
+}
+
+impl std::fmt::Display for DangerousChangePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,13 +373,13 @@ pub struct AgentConfig {
     #[serde(default)]
     pub audit_enabled: bool,
     #[serde(default = "default_agent_audit_scope")]
-    pub audit_scope: String,
+    pub audit_scope: AgentAuditScope,
     #[serde(default = "default_agent_audit_max_events_per_second")]
     pub audit_max_events_per_second: u64,
     #[serde(default)]
     pub sandbox_enabled: bool,
     #[serde(default = "default_agent_on_dangerous_change")]
-    pub on_dangerous_change: String,
+    pub on_dangerous_change: DangerousChangePolicy,
     #[serde(default = "default_agent_pause_timeout")]
     pub pause_timeout_seconds: u64,
     #[serde(default = "default_agent_dangerous_patterns")]
@@ -407,15 +480,16 @@ fn default_mlx_check_interval_hours() -> u64 {
 fn default_mlx_venv_path() -> String {
     "~/.uhoh/venv/mlx".to_string()
 }
-fn default_webhook_events() -> Vec<String> {
+fn default_webhook_events() -> Vec<WebhookEventKind> {
     vec![
-        "mass_delete".to_string(),
-        "drop_table".to_string(),
-        "drop_column".to_string(),
-        "truncate".to_string(),
-        "dangerous_agent_action".to_string(),
-        "mlx_update_failed".to_string(),
-        "emergency_delete_detected".to_string(),
+        WebhookEventKind::MassDelete,
+        WebhookEventKind::MassDeletePct,
+        WebhookEventKind::DropTable,
+        WebhookEventKind::DropColumn,
+        WebhookEventKind::Truncate,
+        WebhookEventKind::DangerousAgentAction,
+        WebhookEventKind::MlxUpdateFailed,
+        WebhookEventKind::EmergencyDeleteDetected,
     ]
 }
 fn default_notifications_cooldown() -> u64 {
@@ -442,14 +516,14 @@ fn default_db_max_recovery_file_mb() -> u64 {
 fn default_agent_proxy_port() -> u16 {
     22823
 }
-fn default_agent_audit_scope() -> String {
-    "project".to_string()
+fn default_agent_audit_scope() -> AgentAuditScope {
+    AgentAuditScope::Project
 }
 fn default_agent_audit_max_events_per_second() -> u64 {
     500
 }
-fn default_agent_on_dangerous_change() -> String {
-    "none".to_string()
+fn default_agent_on_dangerous_change() -> DangerousChangePolicy {
+    DangerousChangePolicy::None
 }
 fn default_agent_pause_timeout() -> u64 {
     300
@@ -693,12 +767,6 @@ impl Config {
             if config.agent.pause_timeout_seconds == 0 {
                 anyhow::bail!("agent.pause_timeout_seconds must be > 0");
             }
-            if !matches!(config.agent.on_dangerous_change.as_str(), "none" | "pause") {
-                anyhow::bail!("agent.on_dangerous_change must be one of: none, pause");
-            }
-            if config.agent.audit_scope.trim().is_empty() {
-                anyhow::bail!("agent.audit_scope must not be empty");
-            }
             if config.agent.audit_max_events_per_second == 0 {
                 anyhow::bail!("agent.audit_max_events_per_second must be > 0");
             }
@@ -738,20 +806,24 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
-    use std::io::Write;
+    use super::{Config, DangerousChangePolicy};
 
     #[test]
     fn invalid_agent_on_dangerous_change_is_rejected() {
-        let mut file = tempfile::NamedTempFile::new().expect("tempfile");
-        write!(
-            file,
-            "[agent]\non_dangerous_change = \"block\"\npause_timeout_seconds = 10\n"
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[watch]\ndebounce_quiet_secs = 2\n\n[agent]\non_dangerous_change = \"block\"\npause_timeout_seconds = 10\n",
         )
         .expect("write config");
-        let err = Config::load(file.path()).expect_err("config must reject unknown mode");
-        assert!(err
-            .to_string()
-            .contains("agent.on_dangerous_change must be one of: none, pause"));
+        let err = Config::load(&path).expect_err("config must reject unknown mode");
+        assert!(err.to_string().contains("Failed to parse config"));
+    }
+
+    #[test]
+    fn dangerous_change_policy_default_is_none() {
+        let cfg = Config::default();
+        assert_eq!(cfg.agent.on_dangerous_change, DangerousChangePolicy::None);
     }
 }

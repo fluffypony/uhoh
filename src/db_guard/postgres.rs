@@ -9,7 +9,6 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::DbGuardEntry;
-use crate::db::NewEventLedgerEntry;
 use crate::db_guard::credentials;
 use crate::db_guard::recovery;
 use crate::event_ledger::new_event;
@@ -79,20 +78,11 @@ fn emit_recovery_event(
     detail: serde_json::Value,
     artifact: &recovery::ArtifactInfo,
 ) {
-    if let Err(err) = ctx.event_ledger.append(NewEventLedgerEntry {
-        source: "db_guard".to_string(),
-        event_type: event_type.to_string(),
-        severity: "critical".to_string(),
-        project_hash: None,
-        agent_name: None,
-        guard_name: Some(guard_name.to_string()),
-        path: None,
-        detail: Some(detail.to_string()),
-        pre_state_ref: Some(artifact.blake3.clone()),
-        post_state_ref: None,
-        prev_hash: None,
-        causal_parent: None,
-    }) {
+    let mut event = new_event("db_guard", event_type, "critical");
+    event.guard_name = Some(guard_name.to_string());
+    event.detail = Some(detail.to_string());
+    event.pre_state_ref = Some(artifact.blake3.clone());
+    if let Err(err) = ctx.event_ledger.append(event) {
         tracing::error!("failed to append {event_type} event: {err}");
     }
 }
@@ -131,7 +121,7 @@ pub fn tick_postgres_guard(
 
     if needs_baseline {
         let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
-        if let Ok(info) = recovery::write_postgres_schema_baseline(
+        match recovery::write_postgres_schema_baseline(
             &ctx.uhoh_dir,
             &guard.name,
             &guard.connection_ref,
@@ -139,13 +129,24 @@ pub fn tick_postgres_guard(
             ctx.config.db_guard.recovery_retention_days,
             ctx.config.db_guard.max_baseline_size_mb,
         ) {
-            let ts = chrono::Utc::now().to_rfc3339();
-            let _ = ctx.database.set_db_guard_baseline_time(&guard.name, &ts);
-            let mut event = new_event("db_guard", "postgres_baseline", "info");
-            event.guard_name = Some(guard.name.clone());
-            event.detail = Some(format!("artifact={}, blake3={}", info.path, info.blake3));
-            if let Err(err) = ctx.event_ledger.append(event) {
-                tracing::error!("failed to append postgres_baseline event: {err}");
+            Ok(info) => {
+                let ts = chrono::Utc::now().to_rfc3339();
+                if let Err(err) = ctx.database.set_db_guard_baseline_time(&guard.name, &ts) {
+                    tracing::warn!(
+                        "failed to persist baseline timestamp for guard {}: {}",
+                        guard.name,
+                        err
+                    );
+                }
+                let mut event = new_event("db_guard", "postgres_baseline", "info");
+                event.guard_name = Some(guard.name.clone());
+                event.detail = Some(format!("artifact={}, blake3={}", info.path, info.blake3));
+                if let Err(err) = ctx.event_ledger.append(event) {
+                    tracing::error!("failed to append postgres_baseline event: {err}");
+                }
+            }
+            Err(err) => {
+                anyhow::bail!("postgres baseline generation failed for {}: {}", guard.name, err);
             }
         }
     }
@@ -168,63 +169,92 @@ pub fn tick_postgres_guard(
 
     // Lightweight delete-counter polling (use resolved credentials).
     let poll_window_secs = tick_interval_secs.saturating_mul(2).max(1);
-    if let Ok(deleted_rows) = poll_delete_count(&poll_dsn, poll_window_secs, &guard.tables_csv) {
-        let total_rows = poll_total_row_count(&poll_dsn).unwrap_or(0);
-        let pct = if total_rows > 0 {
-            deleted_rows as f64 / total_rows as f64
-        } else {
-            0.0
-        };
-        if deleted_rows >= ctx.config.db_guard.mass_delete_row_threshold as i64 {
-            let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
-            if let Ok(artifact) = recovery::write_postgres_schema_recovery(
-                &ctx.uhoh_dir,
-                &guard.name,
-                &guard.connection_ref,
-                &creds,
-                "mass_delete",
-                ctx.config.db_guard.encrypt_recovery,
-                ctx.config.db_guard.recovery_retention_days,
-                ctx.config.db_guard.max_recovery_file_mb,
-            ) {
-                emit_recovery_event(
-                    ctx,
+    match poll_delete_count(&poll_dsn, poll_window_secs, &guard.tables_csv) {
+        Ok(deleted_rows) => {
+            let total_rows = match poll_total_row_count(&poll_dsn) {
+                Ok(total) => total,
+                Err(err) => {
+                    tracing::warn!(
+                        "postgres total row count poll failed for {}: {}",
+                        guard.name,
+                        err
+                    );
+                    0
+                }
+            };
+            let pct = if total_rows > 0 {
+                deleted_rows as f64 / total_rows as f64
+            } else {
+                0.0
+            };
+            if deleted_rows >= ctx.config.db_guard.mass_delete_row_threshold as i64 {
+                let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
+                match recovery::write_postgres_schema_recovery(
+                    &ctx.uhoh_dir,
                     &guard.name,
+                    &guard.connection_ref,
+                    &creds,
                     "mass_delete",
-                    serde_json::json!({
-                    "deleted_rows": deleted_rows,
-                    "artifact": artifact.path.clone(),
-                    "blake3": artifact.blake3.clone(),
-                    }),
-                    &artifact,
-                );
-            }
-        } else if pct >= ctx.config.db_guard.mass_delete_pct_threshold {
-            let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
-            if let Ok(artifact) = recovery::write_postgres_schema_recovery(
-                &ctx.uhoh_dir,
-                &guard.name,
-                &guard.connection_ref,
-                &creds,
-                "mass_delete_pct",
-                ctx.config.db_guard.encrypt_recovery,
-                ctx.config.db_guard.recovery_retention_days,
-                ctx.config.db_guard.max_recovery_file_mb,
-            ) {
-                emit_recovery_event(
-                    ctx,
+                    ctx.config.db_guard.encrypt_recovery,
+                    ctx.config.db_guard.recovery_retention_days,
+                    ctx.config.db_guard.max_recovery_file_mb,
+                ) {
+                    Ok(artifact) => emit_recovery_event(
+                        ctx,
+                        &guard.name,
+                        "mass_delete",
+                        serde_json::json!({
+                            "deleted_rows": deleted_rows,
+                            "artifact": artifact.path.clone(),
+                            "blake3": artifact.blake3.clone(),
+                        }),
+                        &artifact,
+                    ),
+                    Err(err) => {
+                        anyhow::bail!(
+                            "postgres mass-delete recovery write failed for {}: {}",
+                            guard.name,
+                            err
+                        )
+                    }
+                }
+            } else if pct >= ctx.config.db_guard.mass_delete_pct_threshold {
+                let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
+                match recovery::write_postgres_schema_recovery(
+                    &ctx.uhoh_dir,
                     &guard.name,
-                    "mass_delete",
-                    serde_json::json!({
-                    "deleted_rows": deleted_rows,
-                    "total_rows": total_rows,
-                    "deleted_ratio": pct,
-                    "artifact": artifact.path.clone(),
-                    "blake3": artifact.blake3.clone(),
-                    }),
-                    &artifact,
-                );
+                    &guard.connection_ref,
+                    &creds,
+                    "mass_delete_pct",
+                    ctx.config.db_guard.encrypt_recovery,
+                    ctx.config.db_guard.recovery_retention_days,
+                    ctx.config.db_guard.max_recovery_file_mb,
+                ) {
+                    Ok(artifact) => emit_recovery_event(
+                        ctx,
+                        &guard.name,
+                        "mass_delete_pct",
+                        serde_json::json!({
+                            "deleted_rows": deleted_rows,
+                            "total_rows": total_rows,
+                            "deleted_ratio": pct,
+                            "artifact": artifact.path.clone(),
+                            "blake3": artifact.blake3.clone(),
+                        }),
+                        &artifact,
+                    ),
+                    Err(err) => {
+                        anyhow::bail!(
+                            "postgres mass-delete-pct recovery write failed for {}: {}",
+                            guard.name,
+                            err
+                        )
+                    }
+                }
             }
+        }
+        Err(err) => {
+            anyhow::bail!("postgres delete count poll failed for {}: {}", guard.name, err);
         }
     }
 
@@ -236,7 +266,7 @@ pub fn tick_postgres_guard(
     if !payloads.is_empty() {
         for payload in payloads {
             let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
-            if let Ok(artifact) = recovery::write_postgres_schema_recovery(
+            match recovery::write_postgres_schema_recovery(
                 &ctx.uhoh_dir,
                 &guard.name,
                 &guard.connection_ref,
@@ -246,17 +276,20 @@ pub fn tick_postgres_guard(
                 ctx.config.db_guard.recovery_retention_days,
                 ctx.config.db_guard.max_recovery_file_mb,
             ) {
-                emit_recovery_event(
+                Ok(artifact) => emit_recovery_event(
                     ctx,
                     &guard.name,
                     "drop_table",
                     serde_json::json!({
-                    "notify_payload": payload,
-                    "artifact": artifact.path.clone(),
-                    "blake3": artifact.blake3.clone(),
+                        "notify_payload": payload,
+                        "artifact": artifact.path.clone(),
+                        "blake3": artifact.blake3.clone(),
                     }),
                     &artifact,
-                );
+                ),
+                Err(err) => {
+                    anyhow::bail!("postgres DDL recovery write failed for {}: {}", guard.name, err)
+                }
             }
         }
     }
@@ -316,13 +349,22 @@ fn reconcile_wildcard_delete_triggers(
             })
             .to_string(),
         );
-        let _ = ctx.event_ledger.append(event);
+        if let Err(err) = ctx.event_ledger.append(event) {
+            tracing::error!("failed to append postgres_wildcard_trigger_reconciled event: {err}");
+        }
     }
 
     let cache = current_sorted.join(",");
-    let _ = ctx
+    if let Err(err) = ctx
         .database
-        .set_db_guard_watched_tables_cache(&guard.name, Some(&cache));
+        .set_db_guard_watched_tables_cache(&guard.name, Some(&cache))
+    {
+        tracing::warn!(
+            "failed to persist postgres watched table cache for {}: {}",
+            guard.name,
+            err
+        );
+    }
     Ok(())
 }
 

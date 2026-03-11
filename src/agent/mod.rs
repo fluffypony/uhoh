@@ -280,7 +280,7 @@ impl AgentSubsystem {
 
         #[cfg(all(target_os = "linux", feature = "audit-trail"))]
         {
-            let desired_roots = if ctx.config.agent.audit_scope.eq_ignore_ascii_case("home") {
+            let desired_roots = if ctx.config.agent.audit_scope.is_home() {
                 dirs::home_dir().into_iter().collect::<Vec<_>>()
             } else {
                 ctx.database

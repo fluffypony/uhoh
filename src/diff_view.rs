@@ -421,15 +421,18 @@ pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> 
 
     println!("History of '{file_path}':");
     let mut prev_hash = String::new();
-    for (snapshot_id, timestamp, hash, trigger) in &history {
-        let id_str = cas::id_to_base58(*snapshot_id);
-        let changed = if hash != &prev_hash {
+    for item in &history {
+        let id_str = cas::id_to_base58(item.snapshot_id);
+        let changed = if item.hash != prev_hash {
             "changed"
         } else {
             "same"
         };
-        println!("  {timestamp} [{id_str}] {changed} ({trigger})");
-        prev_hash = hash.clone();
+        println!(
+            "  {} [{id_str}] {changed} ({})",
+            item.timestamp, item.trigger
+        );
+        prev_hash = item.hash.clone();
     }
     Ok(())
 }
@@ -507,7 +510,7 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
             stored: false,
             executable,
             mtime: None,
-            storage_method: 0,
+            storage_method: crate::cas::StorageMethod::None,
             is_symlink,
         });
     }
