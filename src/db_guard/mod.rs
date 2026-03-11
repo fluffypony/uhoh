@@ -69,72 +69,6 @@ pub struct DbGuardSubsystem {
     shutdown: Option<CancellationToken>,
 }
 
-trait DbGuardEngine {
-    fn engine_name(&self) -> &'static str;
-    fn tick(
-        &mut self,
-        ctx: &SubsystemContext,
-        guard: &DbGuardEntry,
-        tick_interval_secs: i64,
-    ) -> Result<()>;
-}
-
-struct SqliteEngine<'a> {
-    versions: &'a mut HashMap<String, i64>,
-}
-
-impl DbGuardEngine for SqliteEngine<'_> {
-    fn engine_name(&self) -> &'static str {
-        "sqlite"
-    }
-
-    fn tick(
-        &mut self,
-        ctx: &SubsystemContext,
-        guard: &DbGuardEntry,
-        _tick_interval_secs: i64,
-    ) -> Result<()> {
-        sqlite_guard::tick_sqlite_guard(ctx, guard, self.versions)
-    }
-}
-
-struct PostgresEngine;
-
-impl DbGuardEngine for PostgresEngine {
-    fn engine_name(&self) -> &'static str {
-        "postgres"
-    }
-
-    fn tick(
-        &mut self,
-        ctx: &SubsystemContext,
-        guard: &DbGuardEntry,
-        tick_interval_secs: i64,
-    ) -> Result<()> {
-        postgres::tick_postgres_guard(ctx, guard, tick_interval_secs)
-    }
-}
-
-struct MysqlEngine<'a> {
-    states: &'a mut HashMap<String, mysql::MysqlGuardState>,
-}
-
-impl DbGuardEngine for MysqlEngine<'_> {
-    fn engine_name(&self) -> &'static str {
-        "mysql"
-    }
-
-    fn tick(
-        &mut self,
-        ctx: &SubsystemContext,
-        guard: &DbGuardEntry,
-        _tick_interval_secs: i64,
-    ) -> Result<()> {
-        let state = self.states.entry(guard.name.clone()).or_default();
-        mysql::tick_mysql_guard(ctx, guard, state)
-    }
-}
-
 impl DbGuardSubsystem {
     pub fn new() -> Self {
         Self {
@@ -276,90 +210,14 @@ impl DbGuardSubsystem {
         for guard in guards {
             let effective_mode = normalize_guard_mode(guard.engine.as_str(), guard.mode.as_str());
             match guard.engine.as_str() {
-                "sqlite" => {
-                    let mut engine = SqliteEngine {
-                        versions: &mut self.sqlite_versions,
-                    };
-                    tracing::trace!("db_guard tick via {} engine", engine.engine_name());
-                    if let Err(err) = engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS) {
-                        tracing::warn!("db_guard tick failed for {}: {}", guard.name, err);
-                        self.healthy = false;
-                        if self.last_failure.is_none() {
-                            self.last_failure =
-                                Some(format!("db guard tick failed for {}: {}", guard.name, err));
-                        }
-                        let mut event = new_event("db_guard", "guard_tick_failed", "warn");
-                        event.guard_name = Some(guard.name.clone());
-                        event.detail = Some(err.to_string());
-                        if let Err(append_err) = ctx.event_ledger.append(event) {
-                            tracing::error!(
-                                "failed to append guard_tick_failed event: {append_err}"
-                            );
-                        }
-                        continue;
-                    }
-                }
-                "postgres" => {
-                    let mut engine = PostgresEngine;
-                    tracing::trace!("db_guard tick via {} engine", engine.engine_name());
-                    if let Err(err) = engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS) {
-                        tracing::warn!("db_guard tick failed for {}: {}", guard.name, err);
-                        self.healthy = false;
-                        if self.last_failure.is_none() {
-                            self.last_failure =
-                                Some(format!("db guard tick failed for {}: {}", guard.name, err));
-                        }
-                        let mut event = new_event("db_guard", "guard_tick_failed", "warn");
-                        event.guard_name = Some(guard.name.clone());
-                        event.detail = Some(err.to_string());
-                        if let Err(append_err) = ctx.event_ledger.append(event) {
-                            tracing::error!(
-                                "failed to append guard_tick_failed event: {append_err}"
-                            );
-                        }
-                        continue;
-                    }
-                }
-                "mysql" => {
-                    let mut engine = MysqlEngine {
-                        states: &mut self.mysql_states,
-                    };
-                    tracing::trace!("db_guard tick via {} engine", engine.engine_name());
-                    if let Err(err) = engine.tick(ctx, guard, GUARD_TICK_INTERVAL_SECS) {
-                        tracing::warn!("db_guard tick failed for {}: {}", guard.name, err);
-                        self.healthy = false;
-                        if self.last_failure.is_none() {
-                            self.last_failure =
-                                Some(format!("db guard tick failed for {}: {}", guard.name, err));
-                        }
-                        let mut event = new_event("db_guard", "guard_tick_failed", "warn");
-                        event.guard_name = Some(guard.name.clone());
-                        event.detail = Some(err.to_string());
-                        if let Err(append_err) = ctx.event_ledger.append(event) {
-                            tracing::error!(
-                                "failed to append guard_tick_failed event: {append_err}"
-                            );
-                        }
+                "sqlite" | "postgres" | "mysql" => {
+                    if let Err(err) = self.tick_guard_engine(ctx, guard) {
+                        self.record_guard_tick_failure(ctx, guard, &err);
                         continue;
                     }
                 }
                 _ => {
-                    tracing::warn!(
-                        "Skipping db_guard '{}' with unsupported engine '{}'; expected one of sqlite/postgres/mysql",
-                        guard.name,
-                        guard.engine
-                    );
-                    self.healthy = false;
-                    self.last_failure = Some(format!(
-                        "unsupported db guard engine '{}' for guard {}",
-                        guard.engine, guard.name
-                    ));
-                    let mut event = new_event("db_guard", "guard_engine_unknown", "warn");
-                    event.guard_name = Some(guard.name.clone());
-                    event.detail = Some(format!("engine={}", guard.engine));
-                    if let Err(err) = ctx.event_ledger.append(event) {
-                        tracing::error!("failed to append guard_engine_unknown event: {err}");
-                    }
+                    self.record_unknown_guard_engine(ctx, guard);
                     continue;
                 }
             }
@@ -407,6 +265,62 @@ impl DbGuardSubsystem {
             }
         }
         Ok(())
+    }
+
+    fn tick_guard_engine(&mut self, ctx: &SubsystemContext, guard: &DbGuardEntry) -> Result<()> {
+        tracing::trace!("db_guard tick via {} engine", guard.engine);
+        match guard.engine.as_str() {
+            "sqlite" => sqlite_guard::tick_sqlite_guard(ctx, guard, &mut self.sqlite_versions),
+            "postgres" => postgres::tick_postgres_guard(ctx, guard, GUARD_TICK_INTERVAL_SECS),
+            "mysql" => {
+                let state = self.mysql_states.entry(guard.name.clone()).or_default();
+                mysql::tick_mysql_guard(ctx, guard, state)
+            }
+            _ => anyhow::bail!(
+                "unsupported db guard engine '{}' for guard {}",
+                guard.engine,
+                guard.name
+            ),
+        }
+    }
+
+    fn record_guard_tick_failure(
+        &mut self,
+        ctx: &SubsystemContext,
+        guard: &DbGuardEntry,
+        err: &anyhow::Error,
+    ) {
+        tracing::warn!("db_guard tick failed for {}: {}", guard.name, err);
+        self.healthy = false;
+        if self.last_failure.is_none() {
+            self.last_failure = Some(format!("db guard tick failed for {}: {}", guard.name, err));
+        }
+
+        let mut event = new_event("db_guard", "guard_tick_failed", "warn");
+        event.guard_name = Some(guard.name.clone());
+        event.detail = Some(err.to_string());
+        if let Err(append_err) = ctx.event_ledger.append(event) {
+            tracing::error!("failed to append guard_tick_failed event: {append_err}");
+        }
+    }
+
+    fn record_unknown_guard_engine(&mut self, ctx: &SubsystemContext, guard: &DbGuardEntry) {
+        tracing::warn!(
+            "Skipping db_guard '{}' with unsupported engine '{}'; expected one of sqlite/postgres/mysql",
+            guard.name,
+            guard.engine
+        );
+        self.healthy = false;
+        self.last_failure = Some(format!(
+            "unsupported db guard engine '{}' for guard {}",
+            guard.engine, guard.name
+        ));
+        let mut event = new_event("db_guard", "guard_engine_unknown", "warn");
+        event.guard_name = Some(guard.name.clone());
+        event.detail = Some(format!("engine={}", guard.engine));
+        if let Err(err) = ctx.event_ledger.append(event) {
+            tracing::error!("failed to append guard_engine_unknown event: {err}");
+        }
     }
 }
 
