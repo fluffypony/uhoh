@@ -28,7 +28,7 @@ pub fn tick_audit(ctx: &SubsystemContext, agents: &[AgentEntry]) -> Result<()> {
         event.agent_name = Some(agent.name.clone());
         let payload = AuditEvent::Heartbeat {
             agent: agent.name.clone(),
-            scope: ctx.config.agent.audit_scope.clone(),
+            scope: ctx.config.agent.audit_scope.to_string(),
         };
         event.detail = Some(
             serde_json::json!({

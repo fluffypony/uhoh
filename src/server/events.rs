@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::db::LedgerSeverity;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
@@ -37,13 +39,13 @@ pub enum ServerEvent {
     DbGuardAlert {
         guard_name: String,
         event_type: String,
-        severity: String,
+        severity: LedgerSeverity,
         detail: String,
     },
     AgentAlert {
         agent_name: String,
         event_type: String,
-        severity: String,
+        severity: LedgerSeverity,
         detail: String,
     },
     ProjectAdded {
@@ -119,7 +121,7 @@ impl ServerEvent {
                 severity,
                 ..
             } => {
-                format!("DB guard {guard_name}: {event_type} ({severity})")
+                format!("DB guard {guard_name}: {event_type} ({})", severity.as_str())
             }
             ServerEvent::AgentAlert {
                 agent_name,
@@ -127,7 +129,7 @@ impl ServerEvent {
                 severity,
                 ..
             } => {
-                format!("Agent {agent_name}: {event_type} ({severity})")
+                format!("Agent {agent_name}: {event_type} ({})", severity.as_str())
             }
             ServerEvent::ProjectAdded { path, .. } => format!("Project added: {path}"),
             ServerEvent::ProjectRemoved { project_hash } => {
@@ -166,6 +168,7 @@ impl ServerEvent {
 #[cfg(test)]
 mod tests {
     use super::ServerEvent;
+    use crate::db::LedgerSeverity;
 
     #[test]
     fn server_event_kind_matches_expected_values() {
@@ -178,7 +181,7 @@ mod tests {
         let ev = ServerEvent::DbGuardAlert {
             guard_name: "g".to_string(),
             event_type: "mass_delete".to_string(),
-            severity: "critical".to_string(),
+            severity: LedgerSeverity::Critical,
             detail: "{}".to_string(),
         };
         assert_eq!(ev.kind(), "mass_delete");

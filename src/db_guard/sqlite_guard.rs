@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::db::DbGuardEntry;
+use crate::db::{DbGuardEntry, LedgerSeverity};
 use crate::db_guard::recovery;
 use crate::event_ledger::new_event;
 use crate::subsystem::SubsystemContext;
@@ -32,7 +32,7 @@ pub fn tick_sqlite_guard(
 
     if prev_version.is_some() && prev_version != Some(data_version) {
         event.event_type = "sqlite_data_changed".to_string();
-        event.severity = "warn".to_string();
+        event.severity = LedgerSeverity::Warn;
         let artifact = recovery::write_sqlite_schema_recovery(
             &ctx.uhoh_dir,
             &guard.name,

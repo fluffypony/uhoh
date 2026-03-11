@@ -64,7 +64,7 @@ impl NotificationPipeline {
                 .cfg
                 .webhook_events
                 .iter()
-                .any(|v| v.eq_ignore_ascii_case(&event_type))
+                .any(|v| v.as_str().eq_ignore_ascii_case(&event_type))
         {
             let payload = serde_json::json!({
                 "event_type": event_type,

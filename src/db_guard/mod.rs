@@ -268,7 +268,8 @@ impl DbGuardSubsystem {
         }
 
         for guard in guards {
-            let effective_mode = normalize_guard_mode(&guard.engine, &guard.mode);
+            let effective_mode =
+                normalize_guard_mode(guard.engine.as_str(), guard.mode.as_str());
             match guard.engine.as_str() {
                 "sqlite" => {
                     let mut engine = SqliteEngine {

@@ -1832,28 +1832,28 @@ async fn process_ai_summary_queue(
     const MAX_PER_TICK: u32 = 2;
     const MAX_ATTEMPTS: i64 = 5;
     if let Ok(jobs) = database.dequeue_pending_ai(MAX_PER_TICK) {
-        for (rowid, project_hash, attempts, _queued_at) in jobs {
-            if attempts >= MAX_ATTEMPTS {
-                let _ = database.delete_pending_ai(rowid);
+        for job in jobs {
+            if job.attempts >= MAX_ATTEMPTS {
+                let _ = database.delete_pending_ai(job.snapshot_rowid);
                 continue;
             }
 
             // Rebuild a minimal diff for this snapshot
             // Fetch files of this snapshot and prior snapshot for the project
-            let this = match database.get_snapshot_by_rowid(rowid) {
+            let this = match database.get_snapshot_by_rowid(job.snapshot_rowid) {
                 Ok(Some(s)) => s,
                 _ => {
-                    let _ = database.delete_pending_ai(rowid);
+                    let _ = database.delete_pending_ai(job.snapshot_rowid);
                     continue;
                 }
             };
             let prev = database
-                .snapshot_before(&project_hash, this.snapshot_id)
+                .snapshot_before(&job.project_hash, this.snapshot_id)
                 .unwrap_or_default();
             let this_files = match database.get_snapshot_files(this.rowid) {
                 Ok(v) => v,
                 Err(_) => {
-                    let _ = database.increment_ai_attempts(rowid);
+                    let _ = database.increment_ai_attempts(job.snapshot_rowid);
                     continue;
                 }
             };
@@ -1997,14 +1997,16 @@ async fn process_ai_summary_queue(
 
             match ai_result {
                 Ok(text) if !text.is_empty() => {
-                    if let Err(e) = database.set_ai_summary(rowid, &text) {
+                    if let Err(e) = database.set_ai_summary(job.snapshot_rowid, &text) {
                         tracing::warn!("Failed to set AI summary: {}", e);
                     } else {
-                        let _ = database.delete_pending_ai(rowid);
-                        if let Ok(Some(snapshot)) = database.get_snapshot_by_rowid(rowid) {
+                        let _ = database.delete_pending_ai(job.snapshot_rowid);
+                        if let Ok(Some(snapshot)) =
+                            database.get_snapshot_by_rowid(job.snapshot_rowid)
+                        {
                             let _ = event_tx.send(
                                 crate::server::events::ServerEvent::AiSummaryCompleted {
-                                    project_hash: project_hash.clone(),
+                                    project_hash: job.project_hash.clone(),
                                     snapshot_id: crate::cas::id_to_base58(snapshot.snapshot_id),
                                     summary: text,
                                 },
@@ -2016,19 +2018,23 @@ async fn process_ai_summary_queue(
                     // Empty summary — likely model unavailable or download failed.
                     tracing::warn!(
                         "AI summary returned empty for snapshot rowid={} (model may be unavailable or still downloading)",
-                        rowid
+                        job.snapshot_rowid
                     );
-                    if let Ok(attempts) = database.increment_ai_attempts(rowid) {
+                    if let Ok(attempts) = database.increment_ai_attempts(job.snapshot_rowid) {
                         // Delete after 3 total failures (empty or error) to avoid queue buildup.
                         // The attempts counter is shared between empty and error paths.
                         if attempts >= 3 {
-                            let _ = database.delete_pending_ai(rowid);
+                            let _ = database.delete_pending_ai(job.snapshot_rowid);
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Deferred AI summary failed for rowid={}: {}", rowid, e);
-                    let _ = database.increment_ai_attempts(rowid);
+                    tracing::warn!(
+                        "Deferred AI summary failed for rowid={}: {}",
+                        job.snapshot_rowid,
+                        e
+                    );
+                    let _ = database.increment_ai_attempts(job.snapshot_rowid);
                 }
             }
         }

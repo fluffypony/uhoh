@@ -5,6 +5,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::Path;
 
+use crate::cas::StorageMethod;
+
 /// Thread-safe SQLite database wrapper.
 /// SQLite with WAL mode handles concurrent readers and serialized writers.
 pub struct Database {
@@ -100,6 +102,176 @@ pub struct EventLedgerEntry {
     pub resolved: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerSeverity {
+    Info,
+    Warn,
+    Error,
+    Critical,
+}
+
+impl LedgerSeverity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LedgerSeverity::Info => "info",
+            LedgerSeverity::Warn => "warn",
+            LedgerSeverity::Error => "error",
+            LedgerSeverity::Critical => "critical",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "info" => Some(LedgerSeverity::Info),
+            "warn" => Some(LedgerSeverity::Warn),
+            "error" => Some(LedgerSeverity::Error),
+            "critical" => Some(LedgerSeverity::Critical),
+            _ => None,
+        }
+    }
+}
+
+impl From<&str> for LedgerSeverity {
+    fn from(value: &str) -> Self {
+        Self::from_str(value).unwrap_or(LedgerSeverity::Info)
+    }
+}
+
+impl From<String> for LedgerSeverity {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerSource {
+    Agent,
+    DbGuard,
+    Daemon,
+    Fs,
+    Mlx,
+}
+
+impl LedgerSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LedgerSource::Agent => "agent",
+            LedgerSource::DbGuard => "db_guard",
+            LedgerSource::Daemon => "daemon",
+            LedgerSource::Fs => "fs",
+            LedgerSource::Mlx => "mlx",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "agent" => Some(LedgerSource::Agent),
+            "db_guard" => Some(LedgerSource::DbGuard),
+            "daemon" => Some(LedgerSource::Daemon),
+            "fs" => Some(LedgerSource::Fs),
+            "mlx" => Some(LedgerSource::Mlx),
+            _ => None,
+        }
+    }
+}
+
+impl From<&str> for LedgerSource {
+    fn from(value: &str) -> Self {
+        Self::from_str(value).unwrap_or(LedgerSource::Daemon)
+    }
+}
+
+impl From<String> for LedgerSource {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DbGuardEngine {
+    Sqlite,
+    Postgres,
+    Mysql,
+}
+
+impl DbGuardEngine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DbGuardEngine::Sqlite => "sqlite",
+            DbGuardEngine::Postgres => "postgres",
+            DbGuardEngine::Mysql => "mysql",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "sqlite" => Some(DbGuardEngine::Sqlite),
+            "postgres" => Some(DbGuardEngine::Postgres),
+            "mysql" => Some(DbGuardEngine::Mysql),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for DbGuardEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<&str> for DbGuardEngine {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str().eq_ignore_ascii_case(other)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DbGuardMode {
+    Triggers,
+    SchemaPolling,
+}
+
+impl DbGuardMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DbGuardMode::Triggers => "triggers",
+            DbGuardMode::SchemaPolling => "schema_polling",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "triggers" => Some(DbGuardMode::Triggers),
+            "schema_polling" => Some(DbGuardMode::SchemaPolling),
+            _ => None,
+        }
+    }
+
+    pub fn eq_ignore_ascii_case(self, value: &str) -> bool {
+        self.as_str().eq_ignore_ascii_case(value)
+    }
+
+    pub fn trim(self) -> &'static str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for DbGuardMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<&str> for DbGuardMode {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str().eq_ignore_ascii_case(other)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EventLedgerTraceResult {
     pub entries: Vec<EventLedgerEntry>,
@@ -108,9 +280,9 @@ pub struct EventLedgerTraceResult {
 
 #[derive(Debug, Clone)]
 pub struct NewEventLedgerEntry {
-    pub source: String,
+    pub source: LedgerSource,
     pub event_type: String,
-    pub severity: String,
+    pub severity: LedgerSeverity,
     pub project_hash: Option<String>,
     pub agent_name: Option<String>,
     pub guard_name: Option<String>,
@@ -126,14 +298,24 @@ pub struct NewEventLedgerEntry {
 pub struct DbGuardEntry {
     pub id: i64,
     pub name: String,
-    pub engine: String,
+    pub engine: DbGuardEngine,
     pub connection_ref: String,
     pub tables_csv: String,
     pub watched_tables_cache: Option<String>,
-    pub mode: String,
+    pub mode: DbGuardMode,
     pub created_at: String,
     pub last_baseline_at: Option<String>,
     pub active: bool,
+}
+
+impl DbGuardEntry {
+    pub fn engine_kind(&self) -> DbGuardEngine {
+        self.engine
+    }
+
+    pub fn mode_kind(&self) -> DbGuardMode {
+        self.mode
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -154,18 +336,49 @@ pub struct FileEntryRow {
     pub stored: bool,
     pub executable: bool,
     pub mtime: Option<i64>,
-    pub storage_method: i64,
+    pub storage_method: StorageMethod,
     pub is_symlink: bool,
 }
 
-type OperationListRow = (
-    i64,
-    String,
-    String,
-    Option<String>,
-    Option<u64>,
-    Option<u64>,
-);
+#[derive(Debug, Clone)]
+pub struct OperationListRow {
+    pub id: i64,
+    pub label: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub first_snapshot_id: Option<u64>,
+    pub last_snapshot_id: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingAiSummaryRow {
+    pub snapshot_rowid: i64,
+    pub project_hash: String,
+    pub attempts: i64,
+    pub queued_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveOperationRow {
+    pub id: i64,
+    pub label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletedOperationRow {
+    pub id: i64,
+    pub label: String,
+    pub first_snapshot_id: u64,
+    pub last_snapshot_id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileHistoryRow {
+    pub snapshot_id: u64,
+    pub timestamp: String,
+    pub hash: String,
+    pub trigger: String,
+}
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
@@ -654,7 +867,7 @@ impl Database {
             let stored = row.get::<_, i32>(3)? != 0;
             let executable = row.get::<_, i32>(4)? != 0;
             let mtime = row.get::<_, Option<i64>>(5)?;
-            let storage_method = row.get::<_, i64>(6)?;
+            let storage_method = StorageMethod::from_db(row.get::<_, i64>(6)?);
             let is_symlink = row.get::<_, i32>(7)? != 0;
             Ok(FileEntryRow {
                 path,
@@ -684,7 +897,7 @@ impl Database {
             let hash: String = row.get(1)?;
             let size = row.get::<_, i64>(2)? as u64;
             let stored = row.get::<_, i32>(3)? != 0;
-            let storage_method = row.get::<_, i64>(4)?;
+            let storage_method = StorageMethod::from_db(row.get::<_, i64>(4)?);
             Ok(FileEntryRow {
                 path,
                 hash,
@@ -720,8 +933,7 @@ impl Database {
         &self,
         project_hash: &str,
         file_path: &str,
-    ) -> Result<Vec<(u64, String, String, String)>> {
-        // Returns (snapshot_id, timestamp, hash, trigger)
+    ) -> Result<Vec<FileHistoryRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT s.snapshot_id, s.timestamp, f.hash, s.trigger
@@ -731,12 +943,12 @@ impl Database {
              ORDER BY s.snapshot_id DESC",
         )?;
         let rows = stmt.query_map(params![project_hash, file_path], |row| {
-            Ok((
-                row.get::<_, i64>(0)? as u64,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
+            Ok(FileHistoryRow {
+                snapshot_id: row.get::<_, i64>(0)? as u64,
+                timestamp: row.get::<_, String>(1)?,
+                hash: row.get::<_, String>(2)?,
+                trigger: row.get::<_, String>(3)?,
+            })
         })?;
         let mut entries = Vec::new();
         for row in rows {
@@ -973,7 +1185,7 @@ impl Database {
     }
 
     /// Fetch up to `limit` oldest pending summaries across all projects.
-    pub fn dequeue_pending_ai(&self, limit: u32) -> Result<Vec<(i64, String, i64, String)>> {
+    pub fn dequeue_pending_ai(&self, limit: u32) -> Result<Vec<PendingAiSummaryRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT snapshot_rowid, project_hash, attempts, queued_at
@@ -982,12 +1194,12 @@ impl Database {
              LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-            ))
+            Ok(PendingAiSummaryRow {
+                snapshot_rowid: row.get::<_, i64>(0)?,
+                project_hash: row.get::<_, String>(1)?,
+                attempts: row.get::<_, i64>(2)?,
+                queued_at: row.get::<_, String>(3)?,
+            })
         })?;
         let mut out = Vec::new();
         for r in rows {
@@ -1111,13 +1323,18 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_active_operation(&self, project_hash: &str) -> Result<Option<(i64, String)>> {
+    pub fn get_active_operation(&self, project_hash: &str) -> Result<Option<ActiveOperationRow>> {
         let conn = self.conn()?;
         conn.query_row(
             "SELECT id, label FROM operations WHERE project_hash = ?1 AND ended_at IS NULL
              ORDER BY id DESC LIMIT 1",
             params![project_hash],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok(ActiveOperationRow {
+                    id: row.get(0)?,
+                    label: row.get(1)?,
+                })
+            },
         )
         .optional()
         .context("Failed to query active operation")
@@ -1130,14 +1347,14 @@ impl Database {
              FROM operations WHERE project_hash = ?1 ORDER BY id DESC LIMIT 50",
         )?;
         let rows = stmt.query_map(params![project_hash], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
-                row.get::<_, Option<i64>>(5)?.map(|v| v as u64),
-            ))
+            Ok(OperationListRow {
+                id: row.get::<_, i64>(0)?,
+                label: row.get::<_, String>(1)?,
+                started_at: row.get::<_, String>(2)?,
+                ended_at: row.get::<_, Option<String>>(3)?,
+                first_snapshot_id: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
+                last_snapshot_id: row.get::<_, Option<i64>>(5)?.map(|v| v as u64),
+            })
         })?;
         let mut entries = Vec::new();
         for row in rows {
@@ -1149,7 +1366,7 @@ impl Database {
     pub fn get_latest_completed_operation(
         &self,
         project_hash: &str,
-    ) -> Result<Option<(i64, String, u64, u64)>> {
+    ) -> Result<Option<CompletedOperationRow>> {
         let conn = self.conn()?;
         conn.query_row(
             "SELECT id, label, first_snapshot_id, last_snapshot_id
@@ -1158,12 +1375,12 @@ impl Database {
              ORDER BY id DESC LIMIT 1",
             params![project_hash],
             |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)? as u64,
-                    row.get::<_, i64>(3)? as u64,
-                ))
+                Ok(CompletedOperationRow {
+                    id: row.get::<_, i64>(0)?,
+                    label: row.get::<_, String>(1)?,
+                    first_snapshot_id: row.get::<_, i64>(2)? as u64,
+                    last_snapshot_id: row.get::<_, i64>(3)? as u64,
+                })
             },
         )
         .optional()
@@ -1312,9 +1529,9 @@ impl Database {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)",
             params![
                 ts,
-                event.source,
+                event.source.as_str(),
                 event.event_type,
-                event.severity,
+                event.severity.as_str(),
                 event.project_hash,
                 event.agent_name,
                 event.guard_name,
@@ -1353,9 +1570,9 @@ impl Database {
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0)",
                 params![
                     ts,
-                    event.source,
+                    event.source.as_str(),
                     event.event_type,
-                    event.severity,
+                    event.severity.as_str(),
                     event.project_hash,
                     event.agent_name,
                     event.guard_name,
@@ -1394,10 +1611,13 @@ impl Database {
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
             let ts: String = row.get(1)?;
+            let source_raw: String = row.get(2)?;
+            let event_type_raw: String = row.get(3)?;
+            let severity_raw: String = row.get(4)?;
             let event = NewEventLedgerEntry {
-                source: row.get(2)?,
-                event_type: row.get(3)?,
-                severity: row.get(4)?,
+                source: LedgerSource::from_str(&source_raw).unwrap_or(LedgerSource::Daemon),
+                event_type: event_type_raw.clone(),
+                severity: LedgerSeverity::from_str(&severity_raw).unwrap_or(LedgerSeverity::Info),
                 project_hash: row.get(5)?,
                 agent_name: row.get(6)?,
                 guard_name: row.get(7)?,
@@ -1409,7 +1629,15 @@ impl Database {
                 causal_parent: row.get(13)?,
             };
             let stored_hash: Option<String> = row.get(12)?;
-            let expected = ledger::compute_event_chain_hash_with_id(&prev_hash, id, &event, &ts);
+            let expected = ledger::compute_event_chain_hash_with_id_raw(
+                &prev_hash,
+                id,
+                &source_raw,
+                &event_type_raw,
+                &severity_raw,
+                &event,
+                &ts,
+            );
             if stored_hash.as_deref() != Some(expected.as_str()) {
                 broken.push(id);
             }
@@ -1662,11 +1890,11 @@ impl Database {
     pub fn add_db_guard(
         &self,
         name: &str,
-        engine: &str,
+        engine: DbGuardEngine,
         connection_ref: &str,
         tables_csv: &str,
         watched_tables_cache: Option<&str>,
-        mode: &str,
+        mode: DbGuardMode,
     ) -> Result<()> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -1675,11 +1903,11 @@ impl Database {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
             params![
                 name,
-                engine,
+                engine.as_str(),
                 connection_ref,
                 tables_csv,
                 watched_tables_cache,
-                mode,
+                mode.as_str(),
                 now
             ],
         )?;
@@ -1693,14 +1921,30 @@ impl Database {
              FROM db_guards ORDER BY id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
+            let engine_raw: String = row.get(2)?;
+            let mode_raw: String = row.get(6)?;
+            let engine = DbGuardEngine::from_str(&engine_raw).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    format!("invalid db_guard engine: {engine_raw}").into(),
+                )
+            })?;
+            let mode = DbGuardMode::from_str(&mode_raw).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    format!("invalid db_guard mode: {mode_raw}").into(),
+                )
+            })?;
             Ok(DbGuardEntry {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                engine: row.get(2)?,
+                engine,
                 connection_ref: row.get(3)?,
                 tables_csv: row.get(4)?,
                 watched_tables_cache: row.get(5)?,
-                mode: row.get(6)?,
+                mode,
                 created_at: row.get(7)?,
                 last_baseline_at: row.get(8)?,
                 active: row.get::<_, i32>(9)? != 0,
@@ -1792,7 +2036,7 @@ pub struct SnapFileEntry {
     pub stored: bool,
     pub executable: bool,
     pub mtime: Option<i64>,
-    pub storage_method: i64,
+    pub storage_method: StorageMethod,
     pub is_symlink: bool,
 }
-pub type DeletedFile = (String, String, u64, bool, i64); // (path, hash, size, stored, storage_method)
+pub type DeletedFile = (String, String, u64, bool, StorageMethod); // (path, hash, size, stored, storage_method)

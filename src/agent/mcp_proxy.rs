@@ -254,7 +254,7 @@ async fn intercept_tool_call(
                 "session_id": session_id.clone(),
                 "tool": tool,
                 "args": args,
-                "on_dangerous_change": config.agent.on_dangerous_change,
+                "on_dangerous_change": config.agent.on_dangerous_change.as_str(),
             })
             .to_string(),
         );
@@ -262,11 +262,10 @@ async fn intercept_tool_call(
             tracing::error!("failed to append dangerous_agent_action event: {err}");
         }
 
-        if config
-            .agent
-            .on_dangerous_change
-            .eq_ignore_ascii_case("pause")
-        {
+        if matches!(
+            config.agent.on_dangerous_change,
+            crate::config::DangerousChangePolicy::Pause
+        ) {
             write_pending_approval(
                 uhoh_dir,
                 &approval_id,

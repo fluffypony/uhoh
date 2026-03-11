@@ -287,12 +287,7 @@ async fn main() -> Result<()> {
                     // Show files with storage info
                     let files = database.get_snapshot_files(s.rowid)?;
                     for f in files.iter().take(10) {
-                        let method = match f.storage_method {
-                            0 => "none",
-                            1 => "copy",
-                            2 => "reflink",
-                            _ => "none",
-                        };
+                        let method = f.storage_method.display_name();
                         println!("       {:>8}  {:>7}  {}", f.size, method, f.path);
                     }
                     if files.len() > 10 {
@@ -859,6 +854,15 @@ fn handle_db_commands(
                 mode.as_str()
             };
 
+            let engine_kind = match engine {
+                "sqlite" => db::DbGuardEngine::Sqlite,
+                "postgres" => db::DbGuardEngine::Postgres,
+                "mysql" => db::DbGuardEngine::Mysql,
+                _ => anyhow::bail!("Unsupported DSN format"),
+            };
+            let mode_kind = db::DbGuardMode::from_str(mode)
+                .context("Invalid db guard mode after normalization")?;
+
             let connection_ref = uhoh::db_guard::scrub_dsn(dsn);
             let embedded_creds = extract_dsn_credentials(dsn);
             let mut previous_stored_cred: Option<Option<uhoh::db_guard::CredentialMaterial>> = None;
@@ -921,11 +925,11 @@ fn handle_db_commands(
 
             if let Err(err) = database.add_db_guard(
                 &guard_name,
-                engine,
+                engine_kind,
                 &connection_ref,
                 &tables_csv,
                 watched_tables_cache.as_deref(),
-                mode,
+                mode_kind,
             ) {
                 if let Some(previous) = previous_stored_cred {
                     let restore = previous.unwrap_or(uhoh::db_guard::CredentialMaterial {

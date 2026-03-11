@@ -19,7 +19,7 @@ pub struct CachedFileState {
     pub mtime: SystemTime,
     pub stored: bool,
     pub executable: bool,
-    pub storage_method: i64,
+    pub storage_method: cas::StorageMethod,
     pub is_symlink: bool,
 }
 
@@ -43,7 +43,8 @@ pub fn create_snapshot(
     // Determine changes
     let mut new_files = Vec::new();
     let mut files_for_manifest: Vec<crate::db::SnapFileEntry> = Vec::new();
-    let mut deleted_for_manifest: Vec<(String, String, u64, bool, i64)> = Vec::new();
+    let mut deleted_for_manifest: Vec<(String, String, u64, bool, cas::StorageMethod)> =
+        Vec::new();
     let mut has_changes = false;
 
     // Track current path -> (hash, stored) for diff building
@@ -197,7 +198,7 @@ pub fn create_snapshot(
                                     stored: true,
                                     executable: false,
                                     mtime: Some(mtime_i),
-                                    storage_method: cas::StorageMethod::Copy.to_db(),
+                                    storage_method: cas::StorageMethod::Copy,
                                     is_symlink: true,
                                 });
                                 current_hashes.insert(rel_path.clone(), (hash, true));
@@ -222,7 +223,7 @@ pub fn create_snapshot(
                                     stored: false,
                                     executable: false,
                                     mtime: Some(mtime_to_millis(mtime)),
-                                    storage_method: cas::StorageMethod::None.to_db(),
+                                    storage_method: cas::StorageMethod::None,
                                     is_symlink: true,
                                 });
                                 current_hashes.insert(rel_path.clone(), (String::new(), false));
@@ -256,7 +257,7 @@ pub fn create_snapshot(
                                     stored,
                                     executable,
                                     mtime: Some(mtime_i),
-                                    storage_method: method.to_db(),
+                                    storage_method: method,
                                     is_symlink: false,
                                 });
                                 current_hashes.insert(rel_path.clone(), (hash, stored));
@@ -274,7 +275,7 @@ pub fn create_snapshot(
                                     stored: false,
                                     executable,
                                     mtime: Some(mtime_to_millis(mtime)),
-                                    storage_method: cas::StorageMethod::None.to_db(),
+                                    storage_method: cas::StorageMethod::None,
                                     is_symlink: false,
                                 });
                                 current_hashes.insert(rel_path.clone(), (String::new(), false));
@@ -292,7 +293,7 @@ pub fn create_snapshot(
                             cached.hash.clone(),
                             cached.size,
                             cached.stored,
-                            cas::StorageMethod::from_db(cached.storage_method).to_db(),
+                            cached.storage_method,
                         ));
                         // Mark as inserted so carry-forward doesn't copy it back
                         inserted.insert(rel_path.clone());
@@ -452,7 +453,7 @@ pub fn create_snapshot(
                             stored: true,
                             executable: false,
                             mtime: Some(mtime_i),
-                            storage_method: cas::StorageMethod::Copy.to_db(),
+                            storage_method: cas::StorageMethod::Copy,
                             is_symlink: true,
                         });
                         current_hashes.insert(rel_path.clone(), (hash, true));
@@ -476,7 +477,7 @@ pub fn create_snapshot(
                             stored: false,
                             executable: false,
                             mtime: Some(mtime_to_millis(mtime)),
-                            storage_method: cas::StorageMethod::None.to_db(),
+                            storage_method: cas::StorageMethod::None,
                             is_symlink: true,
                         });
                         current_hashes.insert(rel_path.clone(), (String::new(), false));
@@ -509,7 +510,7 @@ pub fn create_snapshot(
                             stored,
                             executable,
                             mtime: Some(mtime_i),
-                            storage_method: method.to_db(),
+                            storage_method: method,
                             is_symlink: false,
                         });
                         current_hashes.insert(rel_path.clone(), (hash, stored));
@@ -526,7 +527,7 @@ pub fn create_snapshot(
                             stored: false,
                             executable,
                             mtime: Some(mtime_to_millis(mtime)),
-                            storage_method: cas::StorageMethod::None.to_db(),
+                            storage_method: cas::StorageMethod::None,
                             is_symlink: false,
                         });
                         current_hashes.insert(rel_path.clone(), (String::new(), false));
@@ -544,7 +545,7 @@ pub fn create_snapshot(
                     cached.hash.clone(),
                     cached.size,
                     cached.stored,
-                    cas::StorageMethod::from_db(cached.storage_method).to_db(),
+                    cached.storage_method,
                 ));
             }
         }
@@ -633,8 +634,8 @@ pub fn create_snapshot(
     // If there is an active operation for this project and this was not a pre-restore snapshot,
     // keep last_snapshot_id updated so undo has a clear end.
     if actual_trigger != "pre-restore" {
-        if let Ok(Some((op_id, _))) = database.get_active_operation(project_hash) {
-            let _ = database.update_operation_last_snapshot(op_id, snapshot_id);
+        if let Ok(Some(op)) = database.get_active_operation(project_hash) {
+            let _ = database.update_operation_last_snapshot(op.id, snapshot_id);
         }
     }
 

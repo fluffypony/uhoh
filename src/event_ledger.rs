@@ -3,7 +3,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::broadcast;
 
-use crate::db::{Database, EventLedgerEntry, EventLedgerTraceResult, NewEventLedgerEntry};
+use crate::db::{
+    Database, EventLedgerEntry, EventLedgerTraceResult, LedgerSeverity, LedgerSource,
+    NewEventLedgerEntry,
+};
 use crate::server::events::ServerEvent;
 
 #[derive(Clone)]
@@ -65,28 +68,38 @@ impl EventLedger {
 /// Only critical/warn-level events from db_guard and agent sources are bridged,
 /// since other event types (snapshot, restore, etc.) are already emitted directly.
 fn map_to_server_event(event: &NewEventLedgerEntry) -> Option<ServerEvent> {
-    match (event.source.as_str(), event.severity.as_str()) {
-        ("db_guard", "critical" | "warn" | "error") => Some(ServerEvent::DbGuardAlert {
+    match (event.source, event.severity) {
+        (
+            LedgerSource::DbGuard,
+            LedgerSeverity::Critical | LedgerSeverity::Warn | LedgerSeverity::Error,
+        ) => Some(ServerEvent::DbGuardAlert {
             guard_name: event.guard_name.clone().unwrap_or_default(),
             event_type: event.event_type.clone(),
-            severity: event.severity.clone(),
+            severity: event.severity,
             detail: event.detail.clone().unwrap_or_default(),
         }),
-        ("agent", "critical" | "warn" | "error") => Some(ServerEvent::AgentAlert {
+        (
+            LedgerSource::Agent,
+            LedgerSeverity::Critical | LedgerSeverity::Warn | LedgerSeverity::Error,
+        ) => Some(ServerEvent::AgentAlert {
             agent_name: event.agent_name.clone().unwrap_or_default(),
             event_type: event.event_type.clone(),
-            severity: event.severity.clone(),
+            severity: event.severity,
             detail: event.detail.clone().unwrap_or_default(),
         }),
         _ => None,
     }
 }
 
-pub fn new_event(source: &str, event_type: &str, severity: &str) -> NewEventLedgerEntry {
+pub fn new_event(
+    source: impl Into<LedgerSource>,
+    event_type: &str,
+    severity: impl Into<LedgerSeverity>,
+) -> NewEventLedgerEntry {
     NewEventLedgerEntry {
-        source: source.to_string(),
+        source: source.into(),
         event_type: event_type.to_string(),
-        severity: severity.to_string(),
+        severity: severity.into(),
         project_hash: None,
         agent_name: None,
         guard_name: None,
