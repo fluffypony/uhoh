@@ -3,17 +3,32 @@ use rusqlite::{params, Connection};
 
 use crate::db::{DeletedFile, SnapFileEntry};
 
+pub struct SnapshotInsert<'a> {
+    pub project_hash: &'a str,
+    pub snapshot_id: u64,
+    pub timestamp: &'a str,
+    pub trigger: &'a str,
+    pub message: &'a str,
+    pub pinned: bool,
+    pub files: &'a [SnapFileEntry],
+    pub deleted: &'a [DeletedFile],
+}
+
 pub fn create_snapshot_tx(
     tx: &impl std::ops::Deref<Target = Connection>,
-    project_hash: &str,
-    snapshot_id: u64,
-    timestamp: &str,
-    trigger: &str,
-    message: &str,
-    pinned: bool,
-    files: &[SnapFileEntry],
-    deleted: &[DeletedFile],
+    snapshot: SnapshotInsert<'_>,
 ) -> Result<i64> {
+    let SnapshotInsert {
+        project_hash,
+        snapshot_id,
+        timestamp,
+        trigger,
+        message,
+        pinned,
+        files,
+        deleted,
+    } = snapshot;
+
     tx.execute(
         "INSERT INTO snapshots (project_hash, snapshot_id, timestamp, trigger, message, pinned)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

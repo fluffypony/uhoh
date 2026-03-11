@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     /// Watch configuration. Hot-reload applies to debounce_quiet_secs only; other fields require daemon restart.
@@ -538,23 +538,6 @@ fn default_agent_dangerous_patterns() -> Vec<String> {
         "path:package.json".to_string(),
         "path:Cargo.toml".to_string(),
     ]
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            watch: WatchConfig::default(),
-            compaction: CompactionConfig::default(),
-            storage: StorageConfig::default(),
-            ai: AiConfig::default(),
-            update: UpdateConfig::default(),
-            server: ServerConfig::default(),
-            sidecar_update: SidecarUpdateConfig::default(),
-            notifications: NotificationsConfig::default(),
-            db_guard: DbGuardConfig::default(),
-            agent: AgentConfig::default(),
-        }
-    }
 }
 
 impl Default for WatchConfig {

@@ -1,22 +1,21 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-
-use anyhow::{bail, Result};
 
 pub(crate) struct RestoreLockGuard {
-    locks: Arc<Mutex<HashSet<String>>>,
+    locks: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
     key: String,
 }
 
 impl RestoreLockGuard {
-    pub(crate) fn acquire(locks: Arc<Mutex<HashSet<String>>>, key: String) -> Result<Self> {
+    pub(crate) fn acquire(
+        locks: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+        key: String,
+    ) -> anyhow::Result<Self> {
         let mut guard = match locks.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         if guard.contains(&key) {
-            bail!("Restore already in progress for this project");
+            anyhow::bail!("Restore already in progress for this project");
         }
         guard.insert(key.clone());
         drop(guard);
@@ -33,13 +32,15 @@ impl Drop for RestoreLockGuard {
 }
 
 pub(crate) struct RestoreFlagGuard {
-    flag: Arc<AtomicBool>,
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RestoreFlagGuard {
-    pub(crate) fn acquire(flag: Arc<AtomicBool>) -> Result<Self> {
-        if flag.swap(true, Ordering::SeqCst) {
-            bail!("Another restore is already in progress");
+    pub(crate) fn acquire(
+        flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> anyhow::Result<Self> {
+        if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("Another restore is already in progress");
         }
         Ok(Self { flag })
     }
@@ -47,18 +48,18 @@ impl RestoreFlagGuard {
 
 impl Drop for RestoreFlagGuard {
     fn drop(&mut self) {
-        self.flag.store(false, Ordering::SeqCst);
+        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 pub(crate) struct StaticRestoreFlagGuard {
-    flag: &'static AtomicBool,
+    flag: &'static std::sync::atomic::AtomicBool,
 }
 
 impl StaticRestoreFlagGuard {
-    pub(crate) fn acquire(flag: &'static AtomicBool) -> Result<Self> {
-        if flag.swap(true, Ordering::SeqCst) {
-            bail!("Another restore is already in progress");
+    pub(crate) fn acquire(flag: &'static std::sync::atomic::AtomicBool) -> anyhow::Result<Self> {
+        if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("Another restore is already in progress");
         }
         Ok(Self { flag })
     }
@@ -66,6 +67,6 @@ impl StaticRestoreFlagGuard {
 
 impl Drop for StaticRestoreFlagGuard {
     fn drop(&mut self) {
-        self.flag.store(false, Ordering::SeqCst);
+        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }

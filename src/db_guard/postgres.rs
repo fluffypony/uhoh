@@ -146,7 +146,11 @@ pub fn tick_postgres_guard(
                 }
             }
             Err(err) => {
-                anyhow::bail!("postgres baseline generation failed for {}: {}", guard.name, err);
+                anyhow::bail!(
+                    "postgres baseline generation failed for {}: {}",
+                    guard.name,
+                    err
+                );
             }
         }
     }
@@ -254,7 +258,11 @@ pub fn tick_postgres_guard(
             }
         }
         Err(err) => {
-            anyhow::bail!("postgres delete count poll failed for {}: {}", guard.name, err);
+            anyhow::bail!(
+                "postgres delete count poll failed for {}: {}",
+                guard.name,
+                err
+            );
         }
     }
 
@@ -288,7 +296,11 @@ pub fn tick_postgres_guard(
                     &artifact,
                 ),
                 Err(err) => {
-                    anyhow::bail!("postgres DDL recovery write failed for {}: {}", guard.name, err)
+                    anyhow::bail!(
+                        "postgres DDL recovery write failed for {}: {}",
+                        guard.name,
+                        err
+                    )
                 }
             }
         }

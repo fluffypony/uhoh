@@ -526,7 +526,6 @@ fn test_emergency_snapshot_pruned_after_window() {
         keep_hourly_days: 0,
         keep_daily_days: 0,
         keep_weekly_beyond: false,
-        ..Default::default()
     };
     let _ = uhoh::compaction::compact_project(&db, "emrg4", &cfg).unwrap();
 
@@ -576,7 +575,6 @@ fn test_predecessor_protection_in_compaction() {
         keep_hourly_days: 0,
         keep_daily_days: 0,
         keep_weekly_beyond: false,
-        ..Default::default()
     };
     let _ = uhoh::compaction::compact_project(&db, "emrg5", &cfg).unwrap();
 
@@ -737,6 +735,8 @@ fn test_list_db_guards_rejects_invalid_engine_or_mode() {
     )
     .unwrap();
 
-    let err = db.list_db_guards().expect_err("invalid db_guard engine must error");
+    let err = db
+        .list_db_guards()
+        .expect_err("invalid db_guard engine must error");
     assert!(err.to_string().contains("invalid db_guard engine"));
 }

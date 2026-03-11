@@ -706,7 +706,7 @@ pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_dangerous_tool_call, validate_auth_line};
+    use super::{is_dangerous_tool_call, random_hex, validate_auth_line};
 
     #[test]
     fn dangerous_tool_pattern_exact_and_substring() {
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn auth_accepts_jsonrpc_handshake_and_rejects_raw_token() {
-        let expected_auth_value = "auth-handshake-sample";
+        let expected_auth_value = random_hex(16);
         let handshake = serde_json::json!({
             "jsonrpc": "2.0",
             "id": "uhoh-auth",
@@ -745,9 +745,9 @@ mod tests {
             "params": { "token": expected_auth_value }
         })
         .to_string();
-        assert!(validate_auth_line(&handshake, expected_auth_value).expect("valid handshake"));
+        assert!(validate_auth_line(&handshake, &expected_auth_value).expect("valid handshake"));
         assert!(
-            !validate_auth_line(expected_auth_value, expected_auth_value)
+            !validate_auth_line(&expected_auth_value, &expected_auth_value)
                 .expect("raw token should fail")
         );
     }

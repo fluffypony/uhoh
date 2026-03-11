@@ -4,6 +4,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::Path;
+use std::str::FromStr;
 
 use crate::cas::StorageMethod;
 
@@ -121,7 +122,7 @@ impl LedgerSeverity {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "info" => Some(LedgerSeverity::Info),
             "warn" => Some(LedgerSeverity::Warn),
@@ -132,9 +133,17 @@ impl LedgerSeverity {
     }
 }
 
+impl FromStr for LedgerSeverity {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(value).ok_or(())
+    }
+}
+
 impl From<&str> for LedgerSeverity {
     fn from(value: &str) -> Self {
-        Self::from_str(value).unwrap_or(LedgerSeverity::Info)
+        Self::parse(value).unwrap_or(LedgerSeverity::Info)
     }
 }
 
@@ -165,7 +174,7 @@ impl LedgerSource {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "agent" => Some(LedgerSource::Agent),
             "db_guard" => Some(LedgerSource::DbGuard),
@@ -177,9 +186,17 @@ impl LedgerSource {
     }
 }
 
+impl FromStr for LedgerSource {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(value).ok_or(())
+    }
+}
+
 impl From<&str> for LedgerSource {
     fn from(value: &str) -> Self {
-        Self::from_str(value).unwrap_or(LedgerSource::Daemon)
+        Self::parse(value).unwrap_or(LedgerSource::Daemon)
     }
 }
 
@@ -206,13 +223,21 @@ impl DbGuardEngine {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "sqlite" => Some(DbGuardEngine::Sqlite),
             "postgres" => Some(DbGuardEngine::Postgres),
             "mysql" => Some(DbGuardEngine::Mysql),
             _ => None,
         }
+    }
+}
+
+impl FromStr for DbGuardEngine {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(value).ok_or(())
     }
 }
 
@@ -243,7 +268,7 @@ impl DbGuardMode {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "triggers" => Some(DbGuardMode::Triggers),
             "schema_polling" => Some(DbGuardMode::SchemaPolling),
@@ -257,6 +282,14 @@ impl DbGuardMode {
 
     pub fn trim(self) -> &'static str {
         self.as_str()
+    }
+}
+
+impl FromStr for DbGuardMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(value).ok_or(())
     }
 }
 
@@ -610,14 +643,16 @@ impl Database {
 
         let rowid = snapshots::create_snapshot_tx(
             &tx,
-            project_hash,
-            snapshot_id,
-            timestamp,
-            trigger,
-            message,
-            pinned,
-            files,
-            deleted,
+            snapshots::SnapshotInsert {
+                project_hash,
+                snapshot_id,
+                timestamp,
+                trigger,
+                message,
+                pinned,
+                files,
+                deleted,
+            },
         )?;
 
         tx.commit()?;
@@ -929,11 +964,7 @@ impl Database {
     }
 
     /// Get file history: all snapshot entries for a given path, newest first
-    pub fn file_history(
-        &self,
-        project_hash: &str,
-        file_path: &str,
-    ) -> Result<Vec<FileHistoryRow>> {
+    pub fn file_history(&self, project_hash: &str, file_path: &str) -> Result<Vec<FileHistoryRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT s.snapshot_id, s.timestamp, f.hash, s.trigger
@@ -1615,9 +1646,9 @@ impl Database {
             let event_type_raw: String = row.get(3)?;
             let severity_raw: String = row.get(4)?;
             let event = NewEventLedgerEntry {
-                source: LedgerSource::from_str(&source_raw).unwrap_or(LedgerSource::Daemon),
+                source: LedgerSource::parse(&source_raw).unwrap_or(LedgerSource::Daemon),
                 event_type: event_type_raw.clone(),
-                severity: LedgerSeverity::from_str(&severity_raw).unwrap_or(LedgerSeverity::Info),
+                severity: LedgerSeverity::parse(&severity_raw).unwrap_or(LedgerSeverity::Info),
                 project_hash: row.get(5)?,
                 agent_name: row.get(6)?,
                 guard_name: row.get(7)?,
@@ -1923,14 +1954,14 @@ impl Database {
         let rows = stmt.query_map([], |row| {
             let engine_raw: String = row.get(2)?;
             let mode_raw: String = row.get(6)?;
-            let engine = DbGuardEngine::from_str(&engine_raw).ok_or_else(|| {
+            let engine = DbGuardEngine::parse(&engine_raw).ok_or_else(|| {
                 rusqlite::Error::FromSqlConversionFailure(
                     2,
                     rusqlite::types::Type::Text,
                     format!("invalid db_guard engine: {engine_raw}").into(),
                 )
             })?;
-            let mode = DbGuardMode::from_str(&mode_raw).ok_or_else(|| {
+            let mode = DbGuardMode::parse(&mode_raw).ok_or_else(|| {
                 rusqlite::Error::FromSqlConversionFailure(
                     6,
                     rusqlite::types::Type::Text,
@@ -1981,12 +2012,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn add_agent(
-        &self,
-        name: &str,
-        profile_path: &str,
-        data_dir: Option<&str>,
-    ) -> Result<()> {
+    pub fn add_agent(&self, name: &str, profile_path: &str, data_dir: Option<&str>) -> Result<()> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(

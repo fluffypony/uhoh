@@ -46,16 +46,13 @@ fn revert_event(uhoh_dir: &Path, database: &Database, event: &EventLedgerEntry) 
     // Fail-closed: if we can't verify the path is within a project, reject the revert.
     let projects = database.list_projects().unwrap_or_default();
     let mut matched_project_root: Option<std::path::PathBuf> = None;
-    for project in projects
-        .iter()
-        .filter(|p| {
-            event
-                .project_hash
-                .as_ref()
-                .map(|ph| &p.hash == ph)
-                .unwrap_or(true)
-        })
-    {
+    for project in projects.iter().filter(|p| {
+        event
+            .project_hash
+            .as_ref()
+            .map(|ph| &p.hash == ph)
+            .unwrap_or(true)
+    }) {
         let project_root = Path::new(&project.current_path);
         let check_path = target.parent().unwrap_or(target);
         let within = if let (Ok(canon_check), Ok(canon_root)) = (
@@ -117,7 +114,7 @@ fn revert_event(uhoh_dir: &Path, database: &Database, event: &EventLedgerEntry) 
 
 pub fn resolve_event(
     database: &Database,
-    event_ledger: &EventLedger,
+    _event_ledger: &EventLedger,
     uhoh_dir: &Path,
     event_id: i64,
 ) -> Result<()> {
@@ -133,5 +130,7 @@ pub fn resolve_event(
         }
     }
 
-    event_ledger.mark_resolved(event_id)
+    // Keep ledger status consistent with the revert set: root + causal descendants.
+    database.event_ledger_mark_resolved_cascade(event_id)?;
+    Ok(())
 }

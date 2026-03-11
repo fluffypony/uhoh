@@ -60,6 +60,12 @@ impl AgentSubsystem {
     }
 }
 
+impl Default for AgentSubsystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
     mcp_proxy::ensure_proxy_token(uhoh_dir)
 }
@@ -332,32 +338,30 @@ impl AgentSubsystem {
         if ctx.config.agent.audit_enabled {
             audit::tick_audit(ctx, agents)?;
         }
-        if ctx.config.agent.mcp_proxy_enabled {
-            if !self.proxy_started {
-                // Localized backoff to avoid infinite restart loops
-                if let Some(retry_at) = self.proxy_next_retry {
-                    if std::time::Instant::now() < retry_at {
-                        return Ok(());
-                    }
-                }
-                if self.proxy_failures >= 20 {
-                    tracing::error!("MCP proxy permanently disabled after 20 failures");
+        if ctx.config.agent.mcp_proxy_enabled && !self.proxy_started {
+            // Localized backoff to avoid infinite restart loops
+            if let Some(retry_at) = self.proxy_next_retry {
+                if std::time::Instant::now() < retry_at {
                     return Ok(());
                 }
-                // Clear fatal_error on successful restart attempt to allow recovery
-                if self.proxy_failures > 0 {
-                    self.fatal_error = None;
-                    self.healthy = true;
-                }
-                self.proxy_started = true;
-                let ctx_cl = ctx.clone();
-                let token = CancellationToken::new();
-                let token_cl = token.clone();
-                self.proxy_shutdown = Some(token);
-                self.proxy_task = Some(tokio::spawn(async move {
-                    mcp_proxy::run_proxy(ctx_cl, token_cl).await
-                }));
             }
+            if self.proxy_failures >= 20 {
+                tracing::error!("MCP proxy permanently disabled after 20 failures");
+                return Ok(());
+            }
+            // Clear fatal_error on successful restart attempt to allow recovery
+            if self.proxy_failures > 0 {
+                self.fatal_error = None;
+                self.healthy = true;
+            }
+            self.proxy_started = true;
+            let ctx_cl = ctx.clone();
+            let token = CancellationToken::new();
+            let token_cl = token.clone();
+            self.proxy_shutdown = Some(token);
+            self.proxy_task = Some(tokio::spawn(async move {
+                mcp_proxy::run_proxy(ctx_cl, token_cl).await
+            }));
         }
         Ok(())
     }

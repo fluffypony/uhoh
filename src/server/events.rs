@@ -121,7 +121,10 @@ impl ServerEvent {
                 severity,
                 ..
             } => {
-                format!("DB guard {guard_name}: {event_type} ({})", severity.as_str())
+                format!(
+                    "DB guard {guard_name}: {event_type} ({})",
+                    severity.as_str()
+                )
             }
             ServerEvent::AgentAlert {
                 agent_name,
