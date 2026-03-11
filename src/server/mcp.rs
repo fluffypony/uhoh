@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::AppState;
-use crate::resolve;
 
 pub async fn mcp_get_not_supported() -> impl IntoResponse {
     (
@@ -53,7 +52,7 @@ pub struct JsonRpcError {
 }
 
 impl JsonRpcResponse {
-    fn success(id: Option<Value>, result: Value) -> Self {
+    pub fn success(id: Option<Value>, result: Value) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             result: Some(result),
@@ -62,7 +61,7 @@ impl JsonRpcResponse {
         }
     }
 
-    fn error(id: Option<Value>, code: i64, message: String) -> Self {
+    pub fn error(id: Option<Value>, code: i64, message: String) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             result: None,
@@ -155,337 +154,30 @@ async fn handle_tools_call(
     id: Option<Value>,
     params: Option<Value>,
 ) -> JsonRpcResponse {
-    let params = match params {
-        Some(v) => v,
-        None => return JsonRpcResponse::error(id, -32602, "Missing params".to_string()),
-    };
-    let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let args = params.get("arguments").cloned().unwrap_or(json!({}));
-
-    match tool_name {
-        "create_snapshot" => tool_create_snapshot(state, id, args).await,
-        "list_snapshots" => tool_list_snapshots(state, id, args).await,
-        "restore_snapshot" => tool_restore_snapshot(state, id, args).await,
-        "uhoh_pre_notify" => tool_pre_notify(state, id, args).await,
-        _ => JsonRpcResponse::error(id, -32602, format!("Unknown tool: {tool_name}")),
-    }
-}
-
-async fn tool_pre_notify(state: AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
-    let agent = args
-        .get("agent")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown-agent")
-        .to_string();
-    let action = args
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown-action")
-        .to_string();
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let db = state.database.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-        let mut event = crate::event_ledger::new_event("agent", "pre_notify", "info");
-        event.agent_name = Some(agent.clone());
-        event.path = path.clone();
-        event.detail = Some(format!("action={action}"));
-        let ledger = crate::event_ledger::EventLedger::new(db.clone());
-        let event_id = ledger.append(event)?;
-        Ok(json!({
-            "content": [{"type": "text", "text": "pre-notify accepted"}],
-            "event_id": event_id,
-        }))
-    })
-    .await;
-
-    match result {
-        Ok(Ok(value)) => JsonRpcResponse::success(id, value),
-        Ok(Err(e)) => JsonRpcResponse::error(id, -32000, e.to_string()),
-        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {e}")),
-    }
-}
-
-async fn tool_create_snapshot(state: AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
-    let db = state.database.clone();
-    let cfg = state.config.clone();
-    let uhoh_dir = state.uhoh_dir.clone();
-    let event_tx = state.event_tx.clone();
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let hash = args
-        .get("project_hash")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let message = args
-        .get("message")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-        let project = resolve::resolve_project(&db, path.as_deref().or(hash.as_deref()), None)?;
-        let project_path = std::path::Path::new(&project.current_path);
-        let info = crate::snapshot::create_snapshot(
-            &uhoh_dir,
-            &db,
-            &project.hash,
-            project_path,
-            "mcp",
-            message.as_deref(),
-            &cfg,
-            None,
-        )?;
-
-        if let Some(snapshot_id) = info {
-            if let Some(rowid) = db.latest_snapshot_rowid(&project.hash)? {
-                if let Some(row) = db.get_snapshot_by_rowid(rowid)? {
-                    let _ = event_tx.send(crate::server::events::ServerEvent::SnapshotCreated {
-                        project_hash: project.hash.clone(),
-                        snapshot_id: crate::cas::id_to_base58(snapshot_id),
-                        timestamp: row.timestamp.clone(),
-                        trigger: "mcp".to_string(),
-                        file_count: row.file_count as usize,
-                        message: message.clone(),
-                    });
-                }
-            }
-            Ok(json!({
-                "content": [{"type": "text", "text": format!("Snapshot created: {}", crate::cas::id_to_base58(snapshot_id))}],
-                "snapshot_id": crate::cas::id_to_base58(snapshot_id)
-            }))
-        } else {
-            Ok(json!({
-                "content": [{"type": "text", "text": "No changes detected; snapshot not created."}]
-            }))
-        }
-    })
-    .await;
-
-    match result {
-        Ok(Ok(value)) => JsonRpcResponse::success(id, value),
-        Ok(Err(e)) => JsonRpcResponse::error(id, -32000, e.to_string()),
-        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {e}")),
-    }
-}
-
-async fn tool_list_snapshots(state: AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
-    let db = state.database.clone();
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let hash = args
-        .get("project_hash")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-        let project = resolve::resolve_project(&db, path.as_deref().or(hash.as_deref()), None)?;
-        let snapshots = db.list_snapshots_paginated(&project.hash, limit, offset)?;
-        let list: Vec<Value> = snapshots
-            .iter()
-            .map(|s| {
-                json!({
-                    "id": crate::cas::id_to_base58(s.snapshot_id),
-                    "timestamp": s.timestamp,
-                    "trigger": s.trigger,
-                    "message": s.message,
-                    "pinned": s.pinned,
-                    "file_count": s.file_count,
-                    "ai_summary": s.ai_summary,
-                })
-            })
-            .collect();
-        Ok(json!({
-            "content": [{"type":"text", "text": format!("Found {} snapshots", list.len())}],
-            "snapshots": list,
-            "project_hash": project.hash,
-            "project_path": project.current_path,
-        }))
-    })
-    .await;
-
-    match result {
-        Ok(Ok(value)) => JsonRpcResponse::success(id, value),
-        Ok(Err(e)) => JsonRpcResponse::error(id, -32000, e.to_string()),
-        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {e}")),
-    }
-}
-
-async fn tool_restore_snapshot(state: AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
-    let snapshot_id = match args.get("snapshot_id").and_then(|v| v.as_str()) {
-        Some(v) => v.to_string(),
-        None => return JsonRpcResponse::error(id, -32602, "Missing snapshot_id".to_string()),
-    };
-    let dry_run = args
-        .get("dry_run")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let confirm = args
-        .get("confirm")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let target_path = args
-        .get("target_path")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    if !dry_run && !confirm {
-        return JsonRpcResponse::error(
-            id,
-            -32602,
-            "Non-dry-run restore requires confirm: true".to_string(),
-        );
-    }
-
-    let db = state.database.clone();
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let hash = args
-        .get("project_hash")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let target_path_for_task = target_path.clone();
-    let uhoh_dir = state.uhoh_dir.clone();
-    let restore_in_progress = state.restore_in_progress.clone();
-    let restore_locks = state.restore_locks.clone();
-    let event_tx = state.event_tx.clone();
-
-    // Normalize the lock key to the resolved project hash so REST and MCP share
-    // identical lock semantics regardless of path/hash inputs.
-    let lock_key = if !dry_run {
-        let db_for_key = db.clone();
-        let path_for_key = path.clone();
-        let hash_for_key = hash.clone();
-        match tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            let project = resolve::resolve_project(
-                &db_for_key,
-                path_for_key.as_deref().or(hash_for_key.as_deref()),
-                None,
-            )?;
-            Ok(project.hash)
-        })
-        .await
-        {
-            Ok(Ok(key)) => Some(key),
-            Ok(Err(e)) => return JsonRpcResponse::error(id, -32602, e.to_string()),
-            Err(e) => {
-                return JsonRpcResponse::error(id, -32000, format!("Internal error: {e}"));
-            }
-        }
-    } else {
-        None
+    let (tool_name, args) = match crate::mcp_tools::parse_tool_call(params) {
+        Ok(parsed) => parsed,
+        Err(err) => return JsonRpcResponse::error(id, err.code, err.message),
     };
 
-    struct McpRestoreLockGuard {
-        locks: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-        key: String,
-    }
-    impl Drop for McpRestoreLockGuard {
-        fn drop(&mut self) {
-            if let Ok(mut guard) = self.locks.lock() {
-                guard.remove(&self.key);
-            }
-        }
-    }
+    let tool_context = crate::mcp_tools::McpToolContext {
+        database: state.database.clone(),
+        uhoh_dir: state.uhoh_dir.clone(),
+        config: state.config.clone(),
+        event_tx: Some(state.event_tx.clone()),
+        restore_in_progress: Some(crate::mcp_tools::RestoreInProgressFlag::Shared(
+            state.restore_in_progress.clone(),
+        )),
+        restore_locks: Some(state.restore_locks.clone()),
+    };
 
-    let mut _lock_guard: Option<McpRestoreLockGuard> = None;
-    if let Some(lock_key) = lock_key {
-        let mut locks = match restore_locks.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if locks.contains(&lock_key) {
-            return JsonRpcResponse::error(
-                id,
-                -32000,
-                "Restore already in progress for this project".to_string(),
-            );
-        }
-        locks.insert(lock_key.clone());
-        _lock_guard = Some(McpRestoreLockGuard {
-            locks: restore_locks.clone(),
-            key: lock_key,
-        });
-    }
-
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-        let project = resolve::resolve_project(&db, path.as_deref().or(hash.as_deref()), None)?;
-        if let Some(tp) = target_path_for_task.as_deref() {
-            resolve::validate_path_within_project(std::path::Path::new(&project.current_path), tp)?;
-        }
-
-        struct RestoreFlagGuard {
-            flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        }
-        impl Drop for RestoreFlagGuard {
-            fn drop(&mut self) {
-                self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-
-        let _restore_guard = if !dry_run {
-            if restore_in_progress.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                anyhow::bail!("Another restore is already in progress");
-            }
-            Some(RestoreFlagGuard {
-                flag: restore_in_progress.clone(),
-            })
-        } else {
-            None
-        };
-
-        let outcome = crate::restore::cmd_restore(
-            &uhoh_dir,
-            &db,
-            &project,
-            &snapshot_id,
-            target_path_for_task.as_deref(),
-            dry_run,
-            true,
-        )?;
-
-        if !dry_run && outcome.applied {
-            let _ = event_tx.send(crate::server::events::ServerEvent::SnapshotRestored {
-                project_hash: project.hash,
-                snapshot_id: outcome.snapshot_id.clone(),
-                files_modified: outcome.files_restored,
-                files_deleted: outcome.files_deleted,
-            });
-        }
-
-        Ok(json!({
-            "content": [{"type":"text", "text": if dry_run {
-                format!("Dry run complete for snapshot {snapshot_id}")
-            } else if outcome.applied {
-                format!("Snapshot {snapshot_id} restored")
-            } else {
-                format!("Restore for snapshot {snapshot_id} was not applied")
-            }}],
-            "restored": outcome.applied,
-            "dry_run": outcome.dry_run,
-            "files_modified": outcome.files_restored,
-            "files_deleted": outcome.files_deleted,
-            "files_to_modify": outcome.files_to_restore,
-            "files_to_delete": outcome.files_to_delete,
-        }))
+    let result = tokio::task::spawn_blocking(move || {
+        crate::mcp_tools::dispatch_tool_call(&tool_context, &tool_name, args)
     })
     .await;
 
-    // Lock cleanup handled by McpRestoreLockGuard drop
-    drop(_lock_guard);
-
     match result {
         Ok(Ok(value)) => JsonRpcResponse::success(id, value),
-        Ok(Err(e)) => JsonRpcResponse::error(id, -32000, e.to_string()),
-        Err(e) => JsonRpcResponse::error(id, -32000, format!("Internal error: {e}")),
+        Ok(Err(err)) => JsonRpcResponse::error(id, err.code, err.message),
+        Err(err) => JsonRpcResponse::error(id, -32000, format!("Internal error: {err}")),
     }
 }

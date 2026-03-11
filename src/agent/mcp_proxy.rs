@@ -746,15 +746,18 @@ mod tests {
 
     #[test]
     fn auth_accepts_jsonrpc_handshake_and_rejects_raw_token() {
-        let token = "abcd1234";
+        let expected_auth_value = "auth-handshake-sample";
         let handshake = serde_json::json!({
             "jsonrpc": "2.0",
             "id": "uhoh-auth",
             "method": "uhoh/auth",
-            "params": { "token": token }
+            "params": { "token": expected_auth_value }
         })
         .to_string();
-        assert!(validate_auth_line(&handshake, token).expect("valid handshake"));
-        assert!(!validate_auth_line(token, token).expect("raw token should fail"));
+        assert!(validate_auth_line(&handshake, expected_auth_value).expect("valid handshake"));
+        assert!(
+            !validate_auth_line(expected_auth_value, expected_auth_value)
+                .expect("raw token should fail")
+        );
     }
 }
