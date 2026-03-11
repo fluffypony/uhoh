@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use crate::config::Config;
 use crate::db::Database;
 use crate::event_ledger::{new_event, EventLedger};
+use crate::mcp_protocol::JsonRpcResponse;
 use crate::resolve;
 use crate::server::events::ServerEvent;
 use crate::server::restore_guards::{RestoreFlagGuard, RestoreLockGuard, StaticRestoreFlagGuard};
@@ -51,9 +52,9 @@ pub enum RestoreInProgressFlag {
 
 /// Shared MCP tool definitions used by both HTTP and STDIO transports.
 ///
-/// Tool *handling* is currently duplicated between `server/mcp.rs` (handle_tools_call)
-/// and `mcp_stdio.rs` (handle_stdio_tool_call) due to async/sync transport differences.
-/// When modifying tool behavior, update both implementations to keep them in sync.
+/// Tool behavior and JSON-RPC response shaping are centralized in this module.
+/// Transport adapters in `server/mcp.rs` and `mcp_stdio.rs` should only differ in
+/// I/O concerns and async/sync execution boundaries.
 pub fn tool_definitions() -> serde_json::Value {
     json!({
         "tools": [
@@ -148,6 +149,26 @@ pub fn dispatch_tool_call(
         _ => Err(McpToolError::invalid_params(format!(
             "Unknown tool: {tool_name}"
         ))),
+    }
+}
+
+pub fn tools_list_response(id: Option<Value>) -> JsonRpcResponse {
+    JsonRpcResponse::success(id, tool_definitions())
+}
+
+pub fn tools_call_response(
+    context: &McpToolContext,
+    id: Option<Value>,
+    params: Option<Value>,
+) -> JsonRpcResponse {
+    let (tool_name, args) = match parse_tool_call(params) {
+        Ok(parsed) => parsed,
+        Err(err) => return JsonRpcResponse::error(id, err.code, err.message),
+    };
+
+    match dispatch_tool_call(context, &tool_name, args) {
+        Ok(value) => JsonRpcResponse::success(id, value),
+        Err(err) => JsonRpcResponse::error(id, err.code, err.message),
     }
 }
 
