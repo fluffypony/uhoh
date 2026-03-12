@@ -1460,30 +1460,6 @@ fn extract_artifact_path(detail: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
-fn write_secure_runtime_json(path: &std::path::Path, payload: &[u8]) -> Result<()> {
-    if path
-        .symlink_metadata()
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        anyhow::bail!("Refusing to write approval response through symlink");
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, payload)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    }
-    std::fs::rename(&tmp, path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
-}
-
 fn apply_recovery_artifact(
     entry: &db::EventLedgerEntry,
     path: &str,
@@ -1579,7 +1555,7 @@ fn apply_postgres_recovery(connection_ref: &str, sql: &str) -> Result<()> {
 }
 
 fn build_connect_dsn_with_resolved_credentials(connection_ref: &str) -> Result<String> {
-    uhoh::db_guard::postgres::build_connect_dsn(connection_ref)
+    uhoh::db_guard::build_connect_dsn(connection_ref)
 }
 
 fn session_matches_event(entry: &db::EventLedgerEntry, session_id: &str) -> bool {
@@ -1697,132 +1673,21 @@ fn handle_agent_commands(
             }
         }
         AgentAction::Approve => {
-            let runtime = uhoh_dir.join("agents/runtime");
-            std::fs::create_dir_all(&runtime)?;
-            let token = uhoh::agent::ensure_proxy_token(uhoh_dir)?;
-            let mut approved_any = false;
-            for entry in std::fs::read_dir(&runtime)? {
-                let entry = entry?;
-                let path = entry.path();
-                if !path
-                    .file_name()
-                    .and_then(|v| v.to_str())
-                    .map(|v| v.ends_with(".pending.json"))
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                let Some(stem) = path
-                    .file_name()
-                    .and_then(|v| v.to_str())
-                    .and_then(|v| v.strip_suffix(".pending.json"))
-                else {
-                    continue;
-                };
-                let pending_raw = std::fs::read_to_string(&path)
-                    .with_context(|| format!("Failed reading {}", path.display()))?;
-                let pending_json: serde_json::Value = serde_json::from_str(&pending_raw)
-                    .with_context(|| {
-                        format!("Invalid pending approval JSON: {}", path.display())
-                    })?;
-                let approval_id = pending_json
-                    .get("approval_id")
-                    .and_then(|v| v.as_str())
-                    .context("Pending approval missing approval_id")?;
-                let challenge = pending_json
-                    .get("challenge")
-                    .and_then(|v| v.as_str())
-                    .context("Pending approval missing challenge")?;
-                let response = uhoh::agent::build_approval_response(&token, approval_id, challenge);
-                let body = serde_json::json!({
-                    "approval_id": approval_id,
-                    "response": response,
-                });
-                write_secure_runtime_json(
-                    &runtime.join(format!("{stem}.approved.json")),
-                    &serde_json::to_vec_pretty(&body)?,
-                )?;
-                approved_any = true;
-            }
-            if approved_any {
+            if uhoh::agent::approve_pending_actions(uhoh_dir, true)? > 0 {
                 println!("Approved pending agent action");
             } else {
                 println!("No pending agent actions found");
             }
         }
         AgentAction::Deny => {
-            let runtime = uhoh_dir.join("agents/runtime");
-            let mut denied_any = false;
-            if let Ok(entries) = std::fs::read_dir(&runtime) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let is_pending = path
-                        .file_name()
-                        .and_then(|v| v.to_str())
-                        .map(|v| v.ends_with(".pending.json"))
-                        .unwrap_or(false);
-                    if is_pending {
-                        let _ = std::fs::remove_file(&path);
-                        denied_any = true;
-                    }
-                }
-            }
-            if denied_any {
+            if uhoh::agent::deny_pending_actions(uhoh_dir)? > 0 {
                 println!("Denied pending agent action(s)");
             } else {
                 println!("No pending agent actions found to deny");
             }
         }
         AgentAction::Resume => {
-            let runtime = uhoh_dir.join("agents/runtime");
-            std::fs::create_dir_all(&runtime)?;
-            // Approval logic is pure file I/O — works on all platforms.
-            let mut resumed_any = false;
-            if let Ok(entries) = std::fs::read_dir(&runtime) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
-                        continue;
-                    };
-                    if !name.ends_with(".pending.json") {
-                        continue;
-                    }
-                    let Some(stem) = name.strip_suffix(".pending.json") else {
-                        continue;
-                    };
-                    let pending_raw = match std::fs::read_to_string(&path) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    let pending_json: serde_json::Value = match serde_json::from_str(&pending_raw) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    let Some(approval_id) =
-                        pending_json.get("approval_id").and_then(|v| v.as_str())
-                    else {
-                        continue;
-                    };
-                    let Some(challenge) = pending_json.get("challenge").and_then(|v| v.as_str())
-                    else {
-                        continue;
-                    };
-
-                    let token = uhoh::agent::ensure_proxy_token(uhoh_dir)?;
-                    let response =
-                        uhoh::agent::build_approval_response(&token, approval_id, challenge);
-                    let body = serde_json::json!({
-                        "approval_id": approval_id,
-                        "response": response,
-                    });
-                    write_secure_runtime_json(
-                        &runtime.join(format!("{stem}.approved.json")),
-                        &serde_json::to_vec_pretty(&body)?,
-                    )?;
-                    resumed_any = true;
-                }
-            }
-            if resumed_any {
+            if uhoh::agent::approve_pending_actions(uhoh_dir, false)? > 0 {
                 println!("Approved pending agent action(s); proxy resumed processing");
                 return Ok(());
             }

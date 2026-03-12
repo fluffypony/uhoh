@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-use super::AppState;
+use super::ApiState;
 use crate::resolve;
 
 #[derive(Deserialize)]
@@ -121,7 +121,7 @@ fn conflict_response(error: impl ToString) -> axum::response::Response {
     ApiError::conflict(error).into_response()
 }
 
-pub async fn list_projects(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn list_projects(State(state): State<ApiState>) -> impl IntoResponse {
     let db = state.database.clone();
     let result = tokio::task::spawn_blocking(move || db.list_projects()).await;
     match result {
@@ -148,7 +148,7 @@ pub async fn list_projects(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 pub async fn list_snapshots(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Path(hash): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> impl IntoResponse {
@@ -183,7 +183,7 @@ pub async fn list_snapshots(
 }
 
 pub async fn get_snapshot(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Path((hash, snap_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let db = state.database.clone();
@@ -213,7 +213,7 @@ pub async fn get_snapshot(
 }
 
 pub async fn get_snapshot_files(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Path((hash, snap_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let db = state.database.clone();
@@ -326,7 +326,7 @@ fn insert_into_tree(
 }
 
 pub async fn get_diff(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Path((hash, snap_id)): Path<(String, String)>,
     Query(params): Query<DiffParams>,
 ) -> impl IntoResponse {
@@ -426,7 +426,7 @@ pub async fn get_diff(
 }
 
 pub async fn get_file_content(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Path((hash, snap_id, file_path)): Path<(String, String, String)>,
 ) -> impl IntoResponse {
     let db = state.database.clone();
@@ -475,7 +475,7 @@ pub async fn get_file_content(
 }
 
 pub async fn create_snapshot(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Path(hash): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -531,7 +531,7 @@ pub async fn create_snapshot(
 }
 
 pub async fn set_snapshot_pin(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Path((hash, snap_id)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -562,7 +562,7 @@ pub async fn set_snapshot_pin(
 }
 
 pub async fn restore_snapshot(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Path((hash, snap_id)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
@@ -683,7 +683,7 @@ pub async fn restore_snapshot(
 }
 
 pub async fn search(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Query(params): Query<SearchParams>,
 ) -> impl IntoResponse {
     let db = state.database.clone();
@@ -716,7 +716,7 @@ pub async fn search(
 }
 
 pub async fn get_timeline(
-    State(state): State<AppState>,
+    State(state): State<ApiState>,
     Path(hash): Path<String>,
     Query(params): Query<TimelineParams>,
 ) -> impl IntoResponse {

@@ -39,13 +39,22 @@ impl JsonRpcResponse {
     }
 
     pub fn error(id: Option<Value>, code: i64, message: String) -> Self {
+        Self::error_with_data(id, code, message, None)
+    }
+
+    pub fn error_with_data(
+        id: Option<Value>,
+        code: i64,
+        message: String,
+        data: Option<Value>,
+    ) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             result: None,
             error: Some(JsonRpcError {
                 code,
                 message,
-                data: None,
+                data,
             }),
             id,
         }

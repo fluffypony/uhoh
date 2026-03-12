@@ -6,8 +6,7 @@ pub mod ws;
 
 use anyhow::Result;
 use axum::{
-    extract::Extension,
-    extract::State,
+    extract::{Extension, FromRef, State},
     http::Method,
     middleware,
     response::IntoResponse,
@@ -37,6 +36,86 @@ pub struct AppState {
     pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
     /// Cached server auth token, read once at startup.
     pub cached_token: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct ApiState {
+    pub database: Arc<Database>,
+    pub uhoh_dir: PathBuf,
+    pub config: crate::config::Config,
+    pub event_tx: broadcast::Sender<ServerEvent>,
+    pub restore_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    pub restore_locks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+#[derive(Clone)]
+pub struct HealthState {
+    pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
+}
+
+#[derive(Clone)]
+pub struct McpState {
+    pub port: u16,
+    pub runtime: crate::mcp_tools::McpRuntime,
+}
+
+#[derive(Clone)]
+pub struct WsState {
+    pub event_tx: broadcast::Sender<ServerEvent>,
+    pub require_auth: bool,
+    pub cached_token: Option<String>,
+}
+
+impl FromRef<AppState> for ApiState {
+    fn from_ref(input: &AppState) -> Self {
+        Self {
+            database: input.database.clone(),
+            uhoh_dir: input.uhoh_dir.clone(),
+            config: input.config.clone(),
+            event_tx: input.event_tx.clone(),
+            restore_in_progress: input.restore_in_progress.clone(),
+            restore_locks: input.restore_locks.clone(),
+        }
+    }
+}
+
+impl FromRef<AppState> for HealthState {
+    fn from_ref(input: &AppState) -> Self {
+        Self {
+            subsystem_manager: input.subsystem_manager.clone(),
+        }
+    }
+}
+
+impl FromRef<AppState> for McpState {
+    fn from_ref(input: &AppState) -> Self {
+        Self {
+            port: input.config.server.port,
+            runtime: crate::mcp_tools::McpRuntime {
+                tools: crate::mcp_tools::McpToolContext {
+                    database: input.database.clone(),
+                    uhoh_dir: input.uhoh_dir.clone(),
+                    config: input.config.clone(),
+                    event_tx: Some(input.event_tx.clone()),
+                    restore_in_progress: Some(crate::mcp_tools::RestoreInProgressFlag::Shared(
+                        input.restore_in_progress.clone(),
+                    )),
+                    restore_locks: Some(input.restore_locks.clone()),
+                },
+                executor: crate::mcp_tools::McpToolExecutor::SpawnBlocking,
+            },
+        }
+    }
+}
+
+impl FromRef<AppState> for WsState {
+    fn from_ref(input: &AppState) -> Self {
+        Self {
+            event_tx: input.event_tx.clone(),
+            require_auth: input.config.server.require_auth,
+            cached_token: input.cached_token.clone(),
+        }
+    }
 }
 
 pub async fn start_server(
@@ -171,7 +250,7 @@ pub async fn start_server(
     Ok(handle)
 }
 
-async fn health_check(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+async fn health_check(State(state): State<HealthState>) -> axum::Json<serde_json::Value> {
     let manager = state.subsystem_manager.lock().await;
     let subsystems = manager
         .health_snapshot()

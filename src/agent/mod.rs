@@ -8,7 +8,8 @@ mod sandbox;
 mod undo;
 
 pub use mcp_proxy::{
-    auth_handshake_line as proxy_auth_handshake_line, build_approval_response, ensure_proxy_token,
+    approve_pending_actions, auth_handshake_line as proxy_auth_handshake_line,
+    build_approval_response, deny_pending_actions, ensure_proxy_token,
 };
 pub use profiles::{load_agent_profile, resolve_session_log_path};
 pub use sandbox::{apply_landlock, sandbox_supported};

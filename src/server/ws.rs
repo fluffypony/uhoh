@@ -9,11 +9,11 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use subtle::ConstantTimeEq;
 
-use super::AppState;
+use super::WsState;
 
 pub async fn websocket_handler(
     headers: HeaderMap,
-    State(state): State<AppState>,
+    State(state): State<WsState>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Validate Origin header to prevent cross-site WebSocket hijacking.
@@ -25,9 +25,7 @@ pub async fn websocket_handler(
 
     // If HTTP auth is enabled, require the same bearer token for /ws via
     // Authorization or Sec-WebSocket-Protocol, since /ws is auth-middleware exempt.
-    if state.config.server.require_auth
-        && !websocket_auth_ok(&headers, state.cached_token.as_deref())
-    {
+    if state.require_auth && !websocket_auth_ok(&headers, state.cached_token.as_deref()) {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -108,7 +106,7 @@ fn extract_protocol_token(protocols: &str) -> Option<&str> {
     None
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: WsState) {
     let (mut sender, mut receiver) = socket.split();
     let mut event_rx = state.event_tx.subscribe();
 

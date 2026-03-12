@@ -1,8 +1,8 @@
 mod credentials;
 mod mysql;
-pub mod postgres;
+mod postgres;
 mod recovery;
-mod sqlite_guard;
+mod sqlite;
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -22,7 +22,7 @@ pub use credentials::scrub_error_message;
 pub use credentials::store_encrypted_credential;
 pub use credentials::store_postgres_credentials_cli;
 pub use credentials::CredentialMaterial;
-pub use postgres::pg_connect_spawn;
+pub use postgres::{build_connect_dsn, pg_connect_spawn};
 pub use recovery::decrypt_recovery_payload;
 pub use recovery::write_postgres_schema_baseline;
 pub use recovery::write_sqlite_baseline;
@@ -81,7 +81,7 @@ impl DbGuardEngine for SqliteEngine {
         ctx: &SubsystemContext,
         guard: &DbGuardEntry,
     ) -> Result<()> {
-        sqlite_guard::tick_sqlite_guard(ctx, guard, &mut subsystem.sqlite_versions)
+        sqlite::tick_sqlite_guard(ctx, guard, &mut subsystem.sqlite_versions)
     }
 }
 

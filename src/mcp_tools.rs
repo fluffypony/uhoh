@@ -18,6 +18,7 @@ use tokio::sync::broadcast;
 pub struct McpToolError {
     pub code: i64,
     pub message: String,
+    pub data: Option<Value>,
 }
 
 impl McpToolError {
@@ -25,6 +26,23 @@ impl McpToolError {
         Self {
             code: -32602,
             message: message.into(),
+            data: Some(json!({ "category": "validation" })),
+        }
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: -32004,
+            message: message.into(),
+            data: Some(json!({ "category": "not_found" })),
+        }
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            code: -32009,
+            message: message.into(),
+            data: Some(json!({ "category": "conflict" })),
         }
     }
 
@@ -32,6 +50,7 @@ impl McpToolError {
         Self {
             code: -32000,
             message: message.into(),
+            data: Some(json!({ "category": "backend" })),
         }
     }
 }
@@ -182,12 +201,12 @@ pub fn tools_call_response(
 ) -> JsonRpcResponse {
     let (tool_name, args) = match parse_tool_call(params) {
         Ok(parsed) => parsed,
-        Err(err) => return JsonRpcResponse::error(id, err.code, err.message),
+        Err(err) => return JsonRpcResponse::error_with_data(id, err.code, err.message, err.data),
     };
 
     match dispatch_tool_call(context, &tool_name, args) {
         Ok(value) => JsonRpcResponse::success(id, value),
-        Err(err) => JsonRpcResponse::error(id, err.code, err.message),
+        Err(err) => JsonRpcResponse::error_with_data(id, err.code, err.message, err.data),
     }
 }
 
@@ -236,8 +255,8 @@ fn tool_create_snapshot(context: &McpToolContext, args: Value) -> Result<Value, 
     let hash = args.get("project_hash").and_then(|v| v.as_str());
     let message = args.get("message").and_then(|v| v.as_str());
 
-    let project = resolve::resolve_project(&context.database, path.or(hash), None)
-        .map_err(|e| McpToolError::internal(e.to_string()))?;
+    let project =
+        resolve::resolve_project(&context.database, path.or(hash), None).map_err(classify_lookup_error)?;
     let project_path = Path::new(&project.current_path);
 
     let info = crate::snapshot::create_snapshot(
@@ -286,8 +305,8 @@ fn tool_list_snapshots(context: &McpToolContext, args: Value) -> Result<Value, M
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-    let project = resolve::resolve_project(&context.database, path.or(hash), None)
-        .map_err(|e| McpToolError::internal(e.to_string()))?;
+    let project =
+        resolve::resolve_project(&context.database, path.or(hash), None).map_err(classify_lookup_error)?;
     let snapshots = context
         .database
         .list_snapshots_paginated(&project.hash, limit, offset)
@@ -340,13 +359,13 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
     let hash = args.get("project_hash").and_then(|v| v.as_str());
     let target_path = args.get("target_path").and_then(|v| v.as_str());
 
-    let project = resolve::resolve_project(&context.database, path.or(hash), None)
-        .map_err(|e| McpToolError::internal(e.to_string()))?;
+    let project =
+        resolve::resolve_project(&context.database, path.or(hash), None).map_err(classify_lookup_error)?;
 
     let _project_lock_guard = if !dry_run {
         if let Some(restore_locks) = &context.restore_locks {
             let guard = RestoreLockGuard::acquire(restore_locks.clone(), project.hash.clone())
-                .map_err(|e: anyhow::Error| McpToolError::internal(e.to_string()))?;
+                .map_err(|e: anyhow::Error| McpToolError::conflict(e.to_string()))?;
             Some(guard)
         } else {
             None
@@ -375,12 +394,12 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
         match flag {
             RestoreInProgressFlag::Shared(flag) => {
                 let guard = RestoreFlagGuard::acquire(flag)
-                    .map_err(|e: anyhow::Error| McpToolError::internal(e.to_string()))?;
+                    .map_err(|e: anyhow::Error| McpToolError::conflict(e.to_string()))?;
                 Some(RestoreGuard::Shared(guard))
             }
             RestoreInProgressFlag::Global(flag) => {
                 let guard = StaticRestoreFlagGuard::acquire(flag)
-                    .map_err(|e: anyhow::Error| McpToolError::internal(e.to_string()))?;
+                    .map_err(|e: anyhow::Error| McpToolError::conflict(e.to_string()))?;
                 Some(RestoreGuard::Global(guard))
             }
         }
@@ -405,7 +424,7 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
             confirm_large_delete: None,
         },
     )
-    .map_err(|e| McpToolError::internal(e.to_string()))?;
+    .map_err(classify_restore_error)?;
 
     if !dry_run && outcome.applied {
         if let Some(tx) = &context.event_tx {
@@ -468,4 +487,30 @@ fn required_string_field<'a>(args: &'a Value, field: &str) -> Result<&'a str, Mc
         .ok_or_else(|| McpToolError::invalid_params(format!("Missing {field}")))?
         .as_str()
         .ok_or_else(|| McpToolError::invalid_params(format!("{field} must be a string")))
+}
+
+fn classify_lookup_error(err: anyhow::Error) -> McpToolError {
+    let message = err.to_string();
+    if message.to_ascii_lowercase().contains("not registered")
+        || message.to_ascii_lowercase().contains("no project matching")
+        || message.to_ascii_lowercase().contains("not found")
+    {
+        McpToolError::not_found(message)
+    } else {
+        McpToolError::internal(message)
+    }
+}
+
+fn classify_restore_error(err: anyhow::Error) -> McpToolError {
+    let message = err.to_string();
+    let lowered = message.to_ascii_lowercase();
+    if lowered.contains("not found") {
+        McpToolError::not_found(message)
+    } else if lowered.contains("already in progress") {
+        McpToolError::conflict(message)
+    } else if lowered.contains("invalid") || lowered.contains("requires confirm") {
+        McpToolError::invalid_params(message)
+    } else {
+        McpToolError::internal(message)
+    }
 }

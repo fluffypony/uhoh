@@ -427,12 +427,51 @@ fn runtime_dir(uhoh_dir: &Path) -> PathBuf {
     uhoh_dir.join("agents").join("runtime")
 }
 
+struct PendingApprovalFile {
+    stem: String,
+    approval_id: String,
+    challenge: String,
+}
+
 fn pending_approval_path(uhoh_dir: &Path, approval_id: &str) -> PathBuf {
     runtime_dir(uhoh_dir).join(format!("{approval_id}.pending.json"))
 }
 
 fn approved_path(uhoh_dir: &Path, approval_id: &str) -> PathBuf {
     runtime_dir(uhoh_dir).join(format!("{approval_id}{APPROVAL_RESPONSE_FILE_SUFFIX}"))
+}
+
+pub fn approve_pending_actions(uhoh_dir: &Path, strict: bool) -> Result<usize> {
+    let runtime = runtime_dir(uhoh_dir);
+    ensure_secure_runtime_dir(&runtime)?;
+    let token = ensure_proxy_token(uhoh_dir)?;
+    let mut approved_count = 0;
+
+    for pending in list_pending_approval_files(&runtime, strict)? {
+        let response = build_approval_response(&token, &pending.approval_id, &pending.challenge);
+        let body = serde_json::json!({
+            "approval_id": pending.approval_id,
+            "response": response,
+        });
+        write_approved_response(&runtime, &pending.stem, &serde_json::to_vec_pretty(&body)?)?;
+        approved_count += 1;
+    }
+
+    Ok(approved_count)
+}
+
+pub fn deny_pending_actions(uhoh_dir: &Path) -> Result<usize> {
+    let runtime = runtime_dir(uhoh_dir);
+    let mut denied_count = 0;
+    if let Ok(entries) = std::fs::read_dir(&runtime) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_pending_approval_path(&path) && std::fs::remove_file(&path).is_ok() {
+                denied_count += 1;
+            }
+        }
+    }
+    Ok(denied_count)
 }
 
 fn write_pending_approval(
@@ -584,6 +623,87 @@ fn read_approval_response(path: &Path) -> Result<Option<ApprovalResponse>> {
         }
     };
     Ok(Some(parsed))
+}
+
+fn list_pending_approval_files(runtime: &Path, strict: bool) -> Result<Vec<PendingApprovalFile>> {
+    let mut approvals = Vec::new();
+    let entries = match std::fs::read_dir(runtime) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(approvals),
+        Err(err) => return Err(err.into()),
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) if !strict => {
+                tracing::warn!("Ignoring unreadable pending approval entry: {err}");
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let path = entry.path();
+        if !is_pending_approval_path(&path) {
+            continue;
+        }
+        match parse_pending_approval_file(&path) {
+            Ok(Some(pending)) => approvals.push(pending),
+            Ok(None) => {}
+            Err(err) if !strict => {
+                tracing::warn!("Ignoring invalid pending approval {}: {err}", path.display());
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(approvals)
+}
+
+fn parse_pending_approval_file(path: &Path) -> Result<Option<PendingApprovalFile>> {
+    let Some(stem) = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .and_then(|v| v.strip_suffix(".pending.json"))
+    else {
+        return Ok(None);
+    };
+    let pending_raw =
+        std::fs::read_to_string(path).with_context(|| format!("Failed reading {}", path.display()))?;
+    let pending_json: serde_json::Value = serde_json::from_str(&pending_raw)
+        .with_context(|| format!("Invalid pending approval JSON: {}", path.display()))?;
+    let approval_id = pending_json
+        .get("approval_id")
+        .and_then(|v| v.as_str())
+        .context("Pending approval missing approval_id")?;
+    let challenge = pending_json
+        .get("challenge")
+        .and_then(|v| v.as_str())
+        .context("Pending approval missing challenge")?;
+
+    Ok(Some(PendingApprovalFile {
+        stem: stem.to_string(),
+        approval_id: approval_id.to_string(),
+        challenge: challenge.to_string(),
+    }))
+}
+
+fn is_pending_approval_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|v| v.to_str())
+        .map(|v| v.ends_with(".pending.json"))
+        .unwrap_or(false)
+}
+
+fn write_approved_response(runtime: &Path, stem: &str, payload: &[u8]) -> Result<()> {
+    let path = runtime.join(format!("{stem}{APPROVAL_RESPONSE_FILE_SUFFIX}"));
+    if path
+        .symlink_metadata()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        anyhow::bail!("Refusing to write approval response through symlink");
+    }
+    atomic_write_secure(&path, payload, "approved")
 }
 
 fn ensure_secure_runtime_dir(path: &Path) -> Result<()> {
