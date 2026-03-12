@@ -672,23 +672,14 @@ async fn main() -> Result<()> {
             let since_rfc3339 = since_cutoff.map(|c| c.to_rfc3339());
 
             let events = database.event_ledger_recent_since(
-                None,
+                normalized_source,
                 None,
                 None,
                 None,
                 since_rfc3339.as_deref(),
                 1000,
             )?;
-            let mut filtered = Vec::new();
-            for entry in events {
-                if let Some(ref src) = normalized_source {
-                    if !source_matches(src, entry.source) {
-                        continue;
-                    }
-                }
-
-                filtered.push(entry);
-            }
+            let mut filtered = events;
             filtered.reverse();
 
             if filtered.is_empty() {
@@ -858,29 +849,22 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-fn normalize_timeline_source(source: &str) -> Result<String> {
+fn normalize_timeline_source(source: &str) -> Result<uhoh::db::LedgerSource> {
     let source = source.trim().to_ascii_lowercase();
     let normalized = match source.as_str() {
-        "fs" | "filesystem" => "fs",
-        "db" | "db_guard" | "database" => "db_guard",
-        "agent" => "agent",
+        "fs" | "filesystem" => uhoh::db::LedgerSource::Fs,
+        "db" | "db_guard" | "database" => uhoh::db::LedgerSource::DbGuard,
+        "agent" => uhoh::db::LedgerSource::Agent,
+        "daemon" => uhoh::db::LedgerSource::Daemon,
+        "mlx" => uhoh::db::LedgerSource::Mlx,
         _ => {
             anyhow::bail!(
-                "Invalid --source '{}'. Expected one of: fs, db, agent",
+                "Invalid --source '{}'. Expected one of: fs, db_guard, agent, daemon, mlx",
                 source
             )
         }
     };
-    Ok(normalized.to_string())
-}
-
-fn source_matches(requested: &str, event_source: uhoh::db::LedgerSource) -> bool {
-    match requested {
-        "db_guard" => event_source == "db_guard",
-        "fs" => event_source == "fs",
-        "agent" => event_source == "agent",
-        _ => event_source == requested,
-    }
+    Ok(normalized)
 }
 
 fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {

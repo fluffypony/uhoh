@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use r2d2::{CustomizeConnection, Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, types::Type, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use std::path::Path;
 use std::str::FromStr;
@@ -43,6 +43,57 @@ type DbConn = PooledConnection<SqliteConnectionManager>;
 mod ledger;
 
 mod snapshots;
+
+fn row_u64(row: &Row<'_>, index: usize, field: &'static str) -> rusqlite::Result<u64> {
+    let value = row.get::<_, i64>(index)?;
+    u64::try_from(value).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            Type::Integer,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("negative persisted value for {field}: {value}"),
+            )),
+        )
+    })
+}
+
+fn row_opt_u64(row: &Row<'_>, index: usize, field: &'static str) -> rusqlite::Result<Option<u64>> {
+    row.get::<_, Option<i64>>(index)?
+        .map(|value| {
+            u64::try_from(value).map_err(|_| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    Type::Integer,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("negative persisted value for {field}: {value}"),
+                    )),
+                )
+            })
+        })
+        .transpose()
+}
+
+fn checked_db_u64(value: i64, field: &'static str) -> Result<u64> {
+    u64::try_from(value)
+        .map_err(|_| anyhow::anyhow!("negative persisted value for {field}: {value}"))
+}
+
+fn checked_usize_u64(value: usize, field: &'static str) -> Result<u64> {
+    u64::try_from(value).map_err(|_| anyhow::anyhow!("value too large for {field}: {value}"))
+}
+
+fn invalid_db_text_conversion(index: usize, field: &'static str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid persisted {field}: {value}"),
+        )),
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct ProjectEntry {
@@ -142,6 +193,11 @@ impl LedgerSeverity {
             _ => None,
         }
     }
+
+    fn parse_persisted(value: &str, index: usize) -> rusqlite::Result<Self> {
+        Self::parse(value)
+            .ok_or_else(|| invalid_db_text_conversion(index, "ledger severity", value))
+    }
 }
 
 impl FromStr for LedgerSeverity {
@@ -206,6 +262,10 @@ impl LedgerSource {
             "mlx" => Some(LedgerSource::Mlx),
             _ => None,
         }
+    }
+
+    fn parse_persisted(value: &str, index: usize) -> rusqlite::Result<Self> {
+        Self::parse(value).ok_or_else(|| invalid_db_text_conversion(index, "ledger source", value))
     }
 }
 
@@ -719,13 +779,13 @@ impl Database {
         let rows = stmt.query_map(params![project_hash], |row| {
             Ok(SnapshotRow {
                 rowid: row.get(0)?,
-                snapshot_id: row.get::<_, i64>(1)? as u64,
+                snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                 timestamp: row.get(2)?,
                 trigger: row.get(3)?,
                 message: row.get(4)?,
                 pinned: row.get::<_, i32>(5)? != 0,
                 ai_summary: row.get(6)?,
-                file_count: row.get::<_, i64>(7)? as u64,
+                file_count: row_u64(row, 7, "snapshots.file_count")?,
             })
         })?;
         let mut snapshots = Vec::new();
@@ -754,13 +814,13 @@ impl Database {
         let rows = stmt.query_map(params![project_hash, limit as i64, offset as i64], |row| {
             Ok(SnapshotRow {
                 rowid: row.get(0)?,
-                snapshot_id: row.get::<_, i64>(1)? as u64,
+                snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                 timestamp: row.get(2)?,
                 trigger: row.get(3)?,
                 message: row.get(4)?,
                 pinned: row.get::<_, i32>(5)? != 0,
                 ai_summary: row.get(6)?,
-                file_count: row.get::<_, i64>(7)? as u64,
+                file_count: row_u64(row, 7, "snapshots.file_count")?,
             })
         })?;
         let mut snapshots = Vec::new();
@@ -789,12 +849,12 @@ impl Database {
                 let rows = stmt.query_map(params![project_hash], |row| {
                     Ok(SnapshotSummary {
                         rowid: row.get(0)?,
-                        snapshot_id: row.get::<_, i64>(1)? as u64,
+                        snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                         timestamp: row.get(2)?,
                         trigger: row.get(3)?,
                         message: row.get(4)?,
                         pinned: row.get::<_, i32>(5)? != 0,
-                        file_count: row.get::<_, i64>(6)? as u64,
+                        file_count: row_u64(row, 6, "snapshots.file_count")?,
                     })
                 })?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -811,12 +871,12 @@ impl Database {
                 let rows = stmt.query_map(params![project_hash, from], |row| {
                     Ok(SnapshotSummary {
                         rowid: row.get(0)?,
-                        snapshot_id: row.get::<_, i64>(1)? as u64,
+                        snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                         timestamp: row.get(2)?,
                         trigger: row.get(3)?,
                         message: row.get(4)?,
                         pinned: row.get::<_, i32>(5)? != 0,
-                        file_count: row.get::<_, i64>(6)? as u64,
+                        file_count: row_u64(row, 6, "snapshots.file_count")?,
                     })
                 })?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -833,12 +893,12 @@ impl Database {
                 let rows = stmt.query_map(params![project_hash, to], |row| {
                     Ok(SnapshotSummary {
                         rowid: row.get(0)?,
-                        snapshot_id: row.get::<_, i64>(1)? as u64,
+                        snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                         timestamp: row.get(2)?,
                         trigger: row.get(3)?,
                         message: row.get(4)?,
                         pinned: row.get::<_, i32>(5)? != 0,
-                        file_count: row.get::<_, i64>(6)? as u64,
+                        file_count: row_u64(row, 6, "snapshots.file_count")?,
                     })
                 })?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -855,12 +915,12 @@ impl Database {
                 let rows = stmt.query_map(params![project_hash, from, to], |row| {
                     Ok(SnapshotSummary {
                         rowid: row.get(0)?,
-                        snapshot_id: row.get::<_, i64>(1)? as u64,
+                        snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                         timestamp: row.get(2)?,
                         trigger: row.get(3)?,
                         message: row.get(4)?,
                         pinned: row.get::<_, i32>(5)? != 0,
-                        file_count: row.get::<_, i64>(6)? as u64,
+                        file_count: row_u64(row, 6, "snapshots.file_count")?,
                     })
                 })?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -881,13 +941,13 @@ impl Database {
             |row| {
                 Ok(SnapshotRow {
                     rowid: row.get(0)?,
-                    snapshot_id: row.get::<_, i64>(1)? as u64,
+                    snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                     timestamp: row.get(2)?,
                     trigger: row.get(3)?,
                     message: row.get(4)?,
                     pinned: row.get::<_, i32>(5)? != 0,
                     ai_summary: row.get(6)?,
-                    file_count: row.get::<_, i64>(7)? as u64,
+                    file_count: row_u64(row, 7, "snapshots.file_count")?,
                 })
             },
         )
@@ -902,7 +962,7 @@ impl Database {
             params![project_hash],
             |row| row.get(0),
         )?;
-        Ok(count as u64)
+        checked_db_u64(count, "snapshots.count")
     }
 
     pub fn find_snapshot_by_base58(
@@ -922,13 +982,13 @@ impl Database {
             |row| {
                 Ok(SnapshotRow {
                     rowid: row.get(0)?,
-                    snapshot_id: row.get::<_, i64>(1)? as u64,
+                    snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                     timestamp: row.get(2)?,
                     trigger: row.get(3)?,
                     message: row.get(4)?,
                     pinned: row.get::<_, i32>(5)? != 0,
                     ai_summary: row.get(6)?,
-                    file_count: row.get::<_, i64>(7)? as u64,
+                    file_count: row_u64(row, 7, "snapshots.file_count")?,
                 })
             },
         )
@@ -945,7 +1005,7 @@ impl Database {
         let rows = stmt.query_map(params![snapshot_rowid], |row| {
             let path: String = row.get(0)?;
             let hash: String = row.get(1)?;
-            let size = row.get::<_, i64>(2)? as u64;
+            let size = row_u64(row, 2, "snapshot_files.size")?;
             let stored = row.get::<_, i32>(3)? != 0;
             let executable = row.get::<_, i32>(4)? != 0;
             let mtime = row.get::<_, Option<i64>>(5)?;
@@ -977,7 +1037,7 @@ impl Database {
         let rows = stmt.query_map(params![snapshot_rowid], |row| {
             let path: String = row.get(0)?;
             let hash: String = row.get(1)?;
-            let size = row.get::<_, i64>(2)? as u64;
+            let size = row_u64(row, 2, "snapshot_deleted.size")?;
             let stored = row.get::<_, i32>(3)? != 0;
             let storage_method = StorageMethod::from_db(row.get::<_, i64>(4)?);
             Ok(FileEntryRow {
@@ -1022,7 +1082,7 @@ impl Database {
         )?;
         let rows = stmt.query_map(params![project_hash, file_path], |row| {
             Ok(FileHistoryRow {
-                snapshot_id: row.get::<_, i64>(0)? as u64,
+                snapshot_id: row_u64(row, 0, "snapshots.snapshot_id")?,
                 timestamp: row.get::<_, String>(1)?,
                 hash: row.get::<_, String>(2)?,
                 trigger: row.get::<_, String>(3)?,
@@ -1208,7 +1268,7 @@ impl Database {
             let rows = stmt.query_map(params![fts_query, ph, limit as i64], |row| {
                 Ok(SearchResult {
                     snapshot_rowid: row.get(0)?,
-                    snapshot_id: row.get::<_, i64>(1)? as u64,
+                    snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                     timestamp: row.get(2)?,
                     trigger: row.get(3)?,
                     message: row.get(4)?,
@@ -1232,7 +1292,7 @@ impl Database {
             let rows = stmt.query_map(params![fts_query, limit as i64], |row| {
                 Ok(SearchResult {
                     snapshot_rowid: row.get(0)?,
-                    snapshot_id: row.get::<_, i64>(1)? as u64,
+                    snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                     timestamp: row.get(2)?,
                     trigger: row.get(3)?,
                     message: row.get(4)?,
@@ -1319,8 +1379,8 @@ impl Database {
         let affected = conn.execute(
             "DELETE FROM pending_ai_summaries WHERE queued_at < ?1",
             params![cutoff_s],
-        )? as u64;
-        Ok(affected)
+        )?;
+        checked_usize_u64(affected, "pending_ai_summaries.delete_count")
     }
 
     /// Remove event ledger entries older than `ttl_days` to prevent unbounded growth.
@@ -1331,7 +1391,8 @@ impl Database {
         let affected = conn.execute(
             "DELETE FROM event_ledger WHERE ts < ?1 AND resolved = 1",
             params![cutoff_s],
-        )? as u64;
+        )?;
+        let affected = checked_usize_u64(affected, "event_ledger.delete_count")?;
         if affected > 0 {
             tracing::debug!(
                 "Pruned {} resolved event ledger entries older than {} days",
@@ -1430,8 +1491,8 @@ impl Database {
                 label: row.get::<_, String>(1)?,
                 started_at: row.get::<_, String>(2)?,
                 ended_at: row.get::<_, Option<String>>(3)?,
-                first_snapshot_id: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
-                last_snapshot_id: row.get::<_, Option<i64>>(5)?.map(|v| v as u64),
+                first_snapshot_id: row_opt_u64(row, 4, "operations.first_snapshot_id")?,
+                last_snapshot_id: row_opt_u64(row, 5, "operations.last_snapshot_id")?,
             })
         })?;
         let mut entries = Vec::new();
@@ -1456,8 +1517,8 @@ impl Database {
                 Ok(CompletedOperationRow {
                     id: row.get::<_, i64>(0)?,
                     label: row.get::<_, String>(1)?,
-                    first_snapshot_id: row.get::<_, i64>(2)? as u64,
-                    last_snapshot_id: row.get::<_, i64>(3)? as u64,
+                    first_snapshot_id: row_u64(row, 2, "operations.first_snapshot_id")?,
+                    last_snapshot_id: row_u64(row, 3, "operations.last_snapshot_id")?,
                 })
             },
         )
@@ -1483,13 +1544,13 @@ impl Database {
             |row| {
                 Ok(SnapshotRow {
                     rowid: row.get(0)?,
-                    snapshot_id: row.get::<_, i64>(1)? as u64,
+                    snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                     timestamp: row.get(2)?,
                     trigger: row.get(3)?,
                     message: row.get(4)?,
                     pinned: row.get::<_, i32>(5)? != 0,
                     ai_summary: row.get(6)?,
-                    file_count: row.get::<_, i64>(7)? as u64,
+                    file_count: row_u64(row, 7, "snapshots.file_count")?,
                 })
             },
         )
@@ -1511,13 +1572,13 @@ impl Database {
         let rows = stmt.query_map(params![project_hash], |row| {
             Ok(SnapshotRow {
                 rowid: row.get(0)?,
-                snapshot_id: row.get::<_, i64>(1)? as u64,
+                snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                 timestamp: row.get(2)?,
                 trigger: row.get(3)?,
                 message: row.get(4)?,
                 pinned: row.get::<_, i32>(5)? != 0,
                 ai_summary: row.get(6)?,
-                file_count: row.get::<_, i64>(7)? as u64,
+                file_count: row_u64(row, 7, "snapshots.file_count")?,
             })
         })?;
         let mut snapshots = Vec::new();
@@ -1540,7 +1601,7 @@ impl Database {
             params![project_hash],
             |row| row.get(0),
         )?;
-        Ok(size as u64)
+        checked_db_u64(size, "snapshot_files.total_size")
     }
 
     /// Increment the cached blob bytes counter by delta (can be negative).
@@ -1568,7 +1629,7 @@ impl Database {
                 |row| row.get(0),
             )
             .unwrap_or(0);
-        Ok(if v < 0 { 0 } else { v as u64 })
+        checked_db_u64(v.max(0), "stats.blob_bytes")
     }
 
     /// Run incremental vacuum to reclaim free pages without exclusive lock.
@@ -1586,7 +1647,7 @@ impl Database {
             params![snapshot_rowid],
             |row| row.get(0),
         )?;
-        Ok(size as u64)
+        checked_db_u64(size, "snapshot_files.snapshot_size")
     }
 
     pub fn insert_event_ledger(&self, event: &NewEventLedgerEntry) -> Result<i64> {
@@ -1693,9 +1754,9 @@ impl Database {
             let event_type_raw: String = row.get(3)?;
             let severity_raw: String = row.get(4)?;
             let event = NewEventLedgerEntry {
-                source: LedgerSource::parse(&source_raw).unwrap_or(LedgerSource::Daemon),
+                source: LedgerSource::parse_persisted(&source_raw, 2)?,
                 event_type: event_type_raw.clone(),
-                severity: LedgerSeverity::parse(&severity_raw).unwrap_or(LedgerSeverity::Info),
+                severity: LedgerSeverity::parse_persisted(&severity_raw, 4)?,
                 project_hash: row.get(5)?,
                 agent_name: row.get(6)?,
                 guard_name: row.get(7)?,
@@ -1740,7 +1801,7 @@ impl Database {
 
     pub fn event_ledger_recent(
         &self,
-        source: Option<&str>,
+        source: Option<LedgerSource>,
         guard_name: Option<&str>,
         agent_name: Option<&str>,
         session: Option<&str>,
@@ -1751,7 +1812,7 @@ impl Database {
 
     pub fn event_ledger_recent_since(
         &self,
-        source: Option<&str>,
+        source: Option<LedgerSource>,
         guard_name: Option<&str>,
         agent_name: Option<&str>,
         session: Option<&str>,

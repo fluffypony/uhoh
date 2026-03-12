@@ -35,7 +35,7 @@ pub fn handle_cli_action(uhoh_dir: &Path, database: &Database, action: &AgentAct
         }
         AgentAction::Log { name, session } => {
             let events = database.event_ledger_recent(
-                Some("agent"),
+                Some(db::LedgerSource::Agent),
                 None,
                 name.as_deref(),
                 session.as_deref(),

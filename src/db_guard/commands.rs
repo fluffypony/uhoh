@@ -187,8 +187,13 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
             }
         }
         DbAction::Events { name, table } => {
-            let events =
-                database.event_ledger_recent(Some("db_guard"), name.as_deref(), None, None, 100)?;
+            let events = database.event_ledger_recent(
+                Some(db::LedgerSource::DbGuard),
+                name.as_deref(),
+                None,
+                None,
+                100,
+            )?;
             for event in events {
                 if let Some(table_name) = table {
                     if !event_matches_table_filter(&event, table_name) {

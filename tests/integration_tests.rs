@@ -747,7 +747,7 @@ fn test_restore_sets_and_clears_restore_marker_file() {
 }
 
 #[test]
-fn test_ledger_verify_tolerates_unknown_source_severity_strings() {
+fn test_ledger_reads_reject_unknown_source_severity_strings() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("test.db");
     let db = uhoh::db::Database::open(&db_path).unwrap();
@@ -771,44 +771,20 @@ fn test_ledger_verify_tolerates_unknown_source_severity_strings() {
     .unwrap();
     let id = conn.last_insert_rowid();
 
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"");
-    hasher.update(&[0u8]);
-    hasher.update(id.to_string().as_bytes());
-    hasher.update(&[0u8]);
-    hasher.update(ts.as_bytes());
-    hasher.update(&[0u8]);
-    hasher.update(b"legacy_source");
-    hasher.update(&[0u8]);
-    hasher.update(b"manual_injected");
-    hasher.update(&[0u8]);
-    hasher.update(b"legacy_severity");
-    hasher.update(&[0u8]);
-    hasher.update(b"");
-    hasher.update(&[0u8]);
-    hasher.update(b"");
-    hasher.update(&[0u8]);
-    hasher.update(b"");
-    hasher.update(&[0u8]);
-    hasher.update(b"");
-    hasher.update(&[0u8]);
-    hasher.update(b"seed");
-    hasher.update(&[0u8]);
-    hasher.update(b"");
-    hasher.update(&[0u8]);
-    hasher.update(b"");
-    hasher.update(&[0u8]);
-    hasher.update(b"");
-    let chain_hash = hasher.finalize().to_hex().to_string();
-    conn.execute(
-        "UPDATE event_ledger SET prev_hash = ?1 WHERE id = ?2",
-        rusqlite::params![chain_hash, id],
-    )
-    .unwrap();
+    let get_err = db
+        .event_ledger_get(id)
+        .expect_err("legacy source/severity should be rejected when decoding ledger rows");
+    assert!(!get_err.to_string().is_empty());
 
-    let (count, broken) = db.verify_event_ledger_chain().unwrap();
-    assert_eq!(count, 1);
-    assert!(!broken.contains(&id));
+    let recent_err = db
+        .event_ledger_recent(None, None, None, None, 10)
+        .expect_err("recent ledger queries should reject invalid persisted enum values");
+    assert!(!recent_err.to_string().is_empty());
+
+    let verify_err = db
+        .verify_event_ledger_chain()
+        .expect_err("ledger verification should reject invalid persisted enum values");
+    assert!(!verify_err.to_string().is_empty());
 }
 
 #[test]

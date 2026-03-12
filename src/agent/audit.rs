@@ -8,7 +8,7 @@ use crate::subsystem::AgentContext;
 pub enum AuditEvent {
     Heartbeat {
         agent: String,
-        scope: String,
+        scope: crate::config::AgentAuditScope,
     },
     FanotifyPreImage {
         path: String,
@@ -28,7 +28,7 @@ pub fn tick_audit(ctx: &AgentContext, agents: &[AgentEntry]) -> Result<()> {
         event.agent_name = Some(agent.name.clone());
         let payload = AuditEvent::Heartbeat {
             agent: agent.name.clone(),
-            scope: ctx.config.agent.audit_scope.to_string(),
+            scope: ctx.config.agent.audit_scope,
         };
         event.detail = Some(
             serde_json::json!({

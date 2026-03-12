@@ -3,7 +3,7 @@ use rusqlite::types::Value;
 use rusqlite::Row;
 
 pub struct LedgerRecentFilters<'a> {
-    pub source: Option<&'a str>,
+    pub source: Option<LedgerSource>,
     pub guard_name: Option<&'a str>,
     pub agent_name: Option<&'a str>,
     pub session: Option<&'a str>,
@@ -16,7 +16,7 @@ pub fn build_recent_query(filters: LedgerRecentFilters<'_>, limit: i64) -> (Stri
 
     if let Some(source) = filters.source {
         where_clauses.push("source = ?");
-        params.push(Value::from(source.to_string()));
+        params.push(Value::from(source.as_str().to_string()));
     }
     if let Some(guard_name) = filters.guard_name {
         where_clauses.push("guard_name = ?");
@@ -59,9 +59,9 @@ impl<'r> TryFrom<&Row<'r>> for EventLedgerEntry {
         Ok(EventLedgerEntry {
             id: row.get(0)?,
             ts: row.get(1)?,
-            source: LedgerSource::parse(&source_raw).unwrap_or(LedgerSource::Daemon),
+            source: LedgerSource::parse_persisted(&source_raw, 2)?,
             event_type: row.get(3)?,
-            severity: LedgerSeverity::parse(&severity_raw).unwrap_or(LedgerSeverity::Info),
+            severity: LedgerSeverity::parse_persisted(&severity_raw, 4)?,
             project_hash: row.get(5)?,
             agent_name: row.get(6)?,
             guard_name: row.get(7)?,
