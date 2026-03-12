@@ -478,13 +478,16 @@ fn intercept_tailer_uses_async_fs_and_sleep_primitives() {
 
 #[test]
 fn daemon_registers_maintenance_subsystem_for_compaction_backup_ai() {
-    let source = std::fs::read_to_string("src/daemon.rs").expect("read daemon");
-    assert!(source.contains("struct DaemonMaintenanceSubsystem"));
-    assert!(source.contains(
+    let daemon = std::fs::read_to_string("src/daemon.rs").expect("read daemon");
+    let maintenance =
+        std::fs::read_to_string("src/daemon/maintenance.rs").expect("read maintenance module");
+    assert!(daemon.contains("mod maintenance;"));
+    assert!(daemon.contains(
         "subsystem_manager_inner.register(Box::new(DaemonMaintenanceSubsystem::new(&config)))"
     ));
-    assert!(source.contains("fn name(&self) -> &str"));
-    assert!(source.contains("\"daemon_maintenance\""));
+    assert!(maintenance.contains("struct DaemonMaintenanceSubsystem"));
+    assert!(maintenance.contains("fn name(&self) -> &str"));
+    assert!(maintenance.contains("\"daemon_maintenance\""));
 }
 
 #[test]

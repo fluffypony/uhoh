@@ -31,6 +31,33 @@ pub struct CreateSnapshotRequest<'a> {
     pub changed_paths: Option<&'a [PathBuf]>,
 }
 
+type DeletedManifestEntry = (String, String, u64, bool, cas::StorageMethod);
+
+struct SnapshotScanResult {
+    has_changes: bool,
+    new_files: Vec<String>,
+    files_for_manifest: Vec<crate::db::SnapFileEntry>,
+    deleted_for_manifest: Vec<DeletedManifestEntry>,
+    current_hashes: HashMap<String, (String, bool)>,
+}
+
+impl SnapshotScanResult {
+    fn new() -> Self {
+        Self {
+            has_changes: false,
+            new_files: Vec::new(),
+            files_for_manifest: Vec::new(),
+            deleted_for_manifest: Vec::new(),
+            current_hashes: HashMap::new(),
+        }
+    }
+}
+
+struct SnapshotDecision {
+    trigger: String,
+    message: String,
+}
+
 /// Create a snapshot for a project. Returns the snapshot ID if one was created.
 pub fn create_snapshot(
     uhoh_dir: &Path,
@@ -46,800 +73,847 @@ pub fn create_snapshot(
         changed_paths,
     } = request;
     let blob_root = uhoh_dir.join("blobs");
-
-    // Load previous snapshot for comparison
     let prev_files = load_previous_snapshot_files(database, project_hash)?;
+    let scan = collect_snapshot_scan(
+        database,
+        config,
+        project_path,
+        changed_paths,
+        &prev_files,
+        &blob_root,
+    )?;
 
-    // Determine changes
-    let mut new_files = Vec::new();
-    let mut files_for_manifest: Vec<crate::db::SnapFileEntry> = Vec::new();
-    let mut deleted_for_manifest: Vec<(String, String, u64, bool, cas::StorageMethod)> = Vec::new();
-    let mut has_changes = false;
-
-    // Track current path -> (hash, stored) for diff building
-    let mut current_hashes: HashMap<String, (String, bool)> = HashMap::new();
-
-    if let Some(paths) = changed_paths {
-        // If any changed path is a directory, equals project root, or is a
-        // non-existent non-file (deleted directory), fall back to full scan.
-        let mut requires_full = false;
-        for p in paths {
-            if p == project_path || p.is_dir() {
-                requires_full = true;
-                break;
-            }
-            // If path doesn't exist, check if any previous file was under this
-            // path (meaning it was a directory). Fall back to full scan to
-            // detect child deletions.
-            if !p.exists() {
-                if let Ok(rel) = p.strip_prefix(project_path) {
-                    let prefix = cas::encode_relpath(rel);
-                    let prefix_with_sep = format!("{}/", prefix);
-                    if prev_files.keys().any(|k| k.starts_with(&prefix_with_sep)) {
-                        requires_full = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if requires_full {
-            return create_snapshot(
-                uhoh_dir,
-                database,
-                config,
-                CreateSnapshotRequest {
-                    project_hash,
-                    project_path,
-                    trigger,
-                    message,
-                    changed_paths: None,
-                },
-            );
-        }
-
-        // Build a gitignore matcher for filtering changed_paths without a full tree walk.
-        // This is O(changed_paths) instead of O(total_project_files).
-        let gitignore = {
-            let mut builder = ignore::gitignore::GitignoreBuilder::new(project_path);
-            // Add .gitignore if it exists
-            let gitignore_path = project_path.join(".gitignore");
-            if gitignore_path.exists() {
-                builder.add(&gitignore_path);
-            }
-            // Add .uhohignore if it exists
-            for name in &[".uhohignore", ".git/.uhohignore"] {
-                let p = project_path.join(name);
-                if p.exists() {
-                    builder.add(&p);
-                }
-            }
-            builder.build().unwrap_or_else(|_| {
-                ignore::gitignore::GitignoreBuilder::new(project_path)
-                    .build()
-                    .unwrap()
-            })
-        };
-        let mut rel_changed: HashSet<String> = HashSet::new();
-        for p in paths {
-            if !p.starts_with(project_path) {
-                continue;
-            }
-            // Skip .git internals and .uhoh directory
-            if let Ok(rel) = p.strip_prefix(project_path) {
-                let rel_str = rel.to_string_lossy();
-                if rel_str.starts_with(".git/")
-                    || rel_str.starts_with(".git\\")
-                    || rel_str == ".git"
-                    || rel_str == ".uhoh"
-                {
-                    continue;
-                }
-            }
-            // For existing files, check ignore rules.
-            // For deleted files, include them (they need deletion detection).
-            if p.exists() {
-                let is_dir = p.is_dir();
-                let matched = gitignore.matched_path_or_any_parents(p, is_dir);
-                if matched.is_ignore() {
-                    continue;
-                }
-            }
-            if let Ok(rel) = p.strip_prefix(project_path) {
-                let rel_s = cas::encode_relpath(rel);
-                rel_changed.insert(rel_s);
-            }
-        }
-
-        let mut inserted: HashSet<String> = HashSet::new();
-        // Process only changed files
-        for rel_path in rel_changed.iter() {
-            let abs_path = project_path.join(cas::decode_relpath_to_os(rel_path));
-            // Skip marker file
-            if abs_path.file_name().is_some_and(|n| n == ".uhoh") {
-                continue;
-            }
-
-            match std::fs::symlink_metadata(&abs_path) {
-                Ok(meta) => {
-                    let ft = meta.file_type();
-                    if !ft.is_file() && !ft.is_symlink() {
-                        continue;
-                    }
-                    let size = meta.len();
-                    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                    let executable = cas::is_executable(&abs_path);
-                    let is_symlink = meta.file_type().is_symlink();
-                    if let Some(cached) = prev_files.get(rel_path) {
-                        let fs_mtime_ms = mtime_to_millis(mtime);
-                        let cached_mtime_ms = mtime_to_millis(cached.mtime);
-                        if cached.size == size
-                            && cached_mtime_ms == fs_mtime_ms
-                            && cached.executable == executable
-                        {
-                            files_for_manifest.push(crate::db::SnapFileEntry {
-                                path: rel_path.clone(),
-                                hash: cached.hash.clone(),
-                                size: cached.size,
-                                stored: cached.stored,
-                                executable: cached.executable,
-                                mtime: Some(cached_mtime_ms),
-                                storage_method: cached.storage_method,
-                                is_symlink: cached.is_symlink,
-                            });
-                            inserted.insert(rel_path.clone());
-                            continue;
-                        }
-                    }
-
-                    if is_symlink {
-                        match cas::store_symlink_target(&blob_root, &abs_path) {
-                            Ok((hash, size, bytes_written)) => {
-                                let is_new_or_changed = prev_files
-                                    .get(rel_path)
-                                    .map_or(true, |prev| prev.hash != hash || !prev.is_symlink);
-                                if is_new_or_changed {
-                                    has_changes = true;
-                                    new_files.push(rel_path.clone());
-                                }
-                                let mtime_i = mtime_to_millis(mtime);
-                                files_for_manifest.push(crate::db::SnapFileEntry {
-                                    path: rel_path.clone(),
-                                    hash: hash.clone(),
-                                    size,
-                                    stored: true,
-                                    executable: false,
-                                    mtime: Some(mtime_i),
-                                    storage_method: cas::StorageMethod::Copy,
-                                    is_symlink: true,
-                                });
-                                current_hashes.insert(rel_path.clone(), (hash, true));
-                                inserted.insert(rel_path.clone());
-                                if bytes_written > 0 {
-                                    let _ = database.add_blob_bytes(bytes_written as i64);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to store symlink for {}: {}", rel_path, e);
-                                let is_new_or_changed = prev_files
-                                    .get(rel_path)
-                                    .map_or(true, |prev| prev.stored || !prev.is_symlink);
-                                if is_new_or_changed {
-                                    has_changes = true;
-                                    new_files.push(rel_path.clone());
-                                }
-                                files_for_manifest.push(crate::db::SnapFileEntry {
-                                    path: rel_path.clone(),
-                                    hash: String::new(),
-                                    size,
-                                    stored: false,
-                                    executable: false,
-                                    mtime: Some(mtime_to_millis(mtime)),
-                                    storage_method: cas::StorageMethod::None,
-                                    is_symlink: true,
-                                });
-                                current_hashes.insert(rel_path.clone(), (String::new(), false));
-                                inserted.insert(rel_path.clone());
-                            }
-                        }
-                    } else {
-                        match cas::store_blob_from_file(
-                            &blob_root,
-                            &abs_path,
-                            config.storage.max_copy_blob_bytes,
-                            config.storage.max_binary_blob_bytes,
-                            config.storage.max_text_blob_bytes,
-                            cfg!(feature = "compression") && config.storage.compress,
-                            config.storage.compress_level,
-                        ) {
-                            Ok((hash, size, method, bytes_written)) => {
-                                let is_new_or_changed = prev_files
-                                    .get(rel_path)
-                                    .map_or(true, |prev| prev.hash != hash);
-                                if is_new_or_changed {
-                                    has_changes = true;
-                                    new_files.push(rel_path.clone());
-                                }
-                                let mtime_i = mtime_to_millis(mtime);
-                                let stored = method.is_recoverable();
-                                files_for_manifest.push(crate::db::SnapFileEntry {
-                                    path: rel_path.clone(),
-                                    hash: hash.clone(),
-                                    size,
-                                    stored,
-                                    executable,
-                                    mtime: Some(mtime_i),
-                                    storage_method: method,
-                                    is_symlink: false,
-                                });
-                                current_hashes.insert(rel_path.clone(), (hash, stored));
-                                inserted.insert(rel_path.clone());
-                                if bytes_written > 0 {
-                                    let _ = database.add_blob_bytes(bytes_written as i64);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
-                                files_for_manifest.push(crate::db::SnapFileEntry {
-                                    path: rel_path.clone(),
-                                    hash: String::new(),
-                                    size,
-                                    stored: false,
-                                    executable,
-                                    mtime: Some(mtime_to_millis(mtime)),
-                                    storage_method: cas::StorageMethod::None,
-                                    is_symlink: false,
-                                });
-                                current_hashes.insert(rel_path.clone(), (String::new(), false));
-                                inserted.insert(rel_path.clone());
-                            }
-                        }
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Potential deletion
-                    if let Some(cached) = prev_files.get(rel_path) {
-                        has_changes = true;
-                        deleted_for_manifest.push((
-                            rel_path.clone(),
-                            cached.hash.clone(),
-                            cached.size,
-                            cached.stored,
-                            cached.storage_method,
-                        ));
-                        // Mark as inserted so carry-forward doesn't copy it back
-                        inserted.insert(rel_path.clone());
-                    } else {
-                        // Deleted path not found as direct file — check if it's a
-                        // directory prefix of prev_files entries (e.g., rm -rf src/).
-                        // After deletion, is_dir() returns false so the fast-path
-                        // check at the top doesn't catch this case. Fall back to
-                        // full scan to accurately capture all deletions.
-                        let dir_prefix = format!("{}/", rel_path);
-                        let has_children = prev_files.keys().any(|k| k.starts_with(&dir_prefix));
-                        if has_children {
-                            tracing::debug!(
-                                "Deleted path '{}' is a directory with children in prev snapshot; \
-                                 forcing full tree walk",
-                                rel_path
-                            );
-                            return create_snapshot(
-                                uhoh_dir,
-                                database,
-                                config,
-                                CreateSnapshotRequest {
-                                    project_hash,
-                                    project_path,
-                                    trigger,
-                                    message,
-                                    changed_paths: None,
-                                },
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Cannot stat {}: {}", abs_path.display(), e);
-                }
-            }
-        }
-
-        // Carry forward all other unchanged files from previous snapshot
-        for (path, cached) in &prev_files {
-            if inserted.contains(path) {
-                continue;
-            }
-            files_for_manifest.push(crate::db::SnapFileEntry {
-                path: path.clone(),
-                hash: cached.hash.clone(),
-                size: cached.size,
-                stored: cached.stored,
-                executable: cached.executable,
-                mtime: Some(mtime_to_millis(cached.mtime)),
-                storage_method: cached.storage_method,
-                is_symlink: cached.is_symlink,
-            });
-        }
-    } else {
-        // Full walk
-        // Walk directory respecting ignore rules
-        let walker = ignore_rules::build_walker(project_path);
-        let mut current_files: HashMap<String, (PathBuf, std::fs::Metadata)> = HashMap::new();
-
-        // Pre-count entries to optionally show a progress bar for large scans
-        let mut entries: Vec<ignore::DirEntry> = Vec::new();
-        for e in walker.flatten() {
-            entries.push(e);
-        }
-        let show_pb = entries.len() > 1000;
-        let pb = if show_pb {
-            let pb = ProgressBar::new(entries.len() as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] {bar:40} {pos}/{len} files")
-                    .unwrap(),
-            );
-            Some(pb)
-        } else {
-            None
-        };
-
-        for entry in entries {
-            let path = entry.path();
-            if path.file_name().is_some_and(|n| n == ".uhoh") {
-                if let Some(pb) = &pb {
-                    pb.inc(1);
-                }
-                continue;
-            }
-            match std::fs::symlink_metadata(path) {
-                Ok(meta) => {
-                    let ft = meta.file_type();
-                    if !ft.is_file() && !ft.is_symlink() {
-                        if let Some(pb) = &pb {
-                            pb.inc(1);
-                        }
-                        continue;
-                    }
-                    let rel_path = match path.strip_prefix(project_path) {
-                        Ok(r) => cas::encode_relpath(r),
-                        Err(_) => {
-                            if let Some(pb) = &pb {
-                                pb.inc(1);
-                            }
-                            continue;
-                        }
-                    };
-                    current_files.insert(rel_path, (path.to_path_buf(), meta));
-                }
-                Err(e) => {
-                    tracing::warn!("Cannot stat {}: {}", path.display(), e);
-                }
-            }
-            if let Some(pb) = &pb {
-                pb.inc(1);
-            }
-        }
-        if let Some(pb) = pb {
-            pb.finish_and_clear();
-        }
-
-        for (rel_path, (abs_path, meta)) in &current_files {
-            let size = meta.len();
-            let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let executable = cas::is_executable(abs_path);
-            let is_symlink = meta.file_type().is_symlink();
-            if let Some(cached) = prev_files.get(rel_path) {
-                let fs_mtime_ms = mtime_to_millis(mtime);
-                let cached_mtime_ms = mtime_to_millis(cached.mtime);
-                if cached.size == size
-                    && cached_mtime_ms == fs_mtime_ms
-                    && cached.executable == executable
-                {
-                    files_for_manifest.push(crate::db::SnapFileEntry {
-                        path: rel_path.clone(),
-                        hash: cached.hash.clone(),
-                        size: cached.size,
-                        stored: cached.stored,
-                        executable,
-                        mtime: Some(cached_mtime_ms),
-                        storage_method: cached.storage_method,
-                        is_symlink: cached.is_symlink,
-                    });
-                    continue;
-                }
-            }
-            if is_symlink {
-                match cas::store_symlink_target(&blob_root, abs_path) {
-                    Ok((hash, size, bytes_written)) => {
-                        let is_new_or_changed = prev_files
-                            .get(rel_path)
-                            .map_or(true, |prev| prev.hash != hash || !prev.is_symlink);
-                        if is_new_or_changed {
-                            has_changes = true;
-                            new_files.push(rel_path.clone());
-                        }
-                        let mtime_i = mtime_to_millis(mtime);
-                        files_for_manifest.push(crate::db::SnapFileEntry {
-                            path: rel_path.clone(),
-                            hash: hash.clone(),
-                            size,
-                            stored: true,
-                            executable: false,
-                            mtime: Some(mtime_i),
-                            storage_method: cas::StorageMethod::Copy,
-                            is_symlink: true,
-                        });
-                        current_hashes.insert(rel_path.clone(), (hash, true));
-                        if bytes_written > 0 {
-                            let _ = database.add_blob_bytes(bytes_written as i64);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to store symlink for {}: {}", rel_path, e);
-                        let is_new_or_changed = prev_files
-                            .get(rel_path)
-                            .map_or(true, |prev| prev.stored || !prev.is_symlink);
-                        if is_new_or_changed {
-                            has_changes = true;
-                            new_files.push(rel_path.clone());
-                        }
-                        files_for_manifest.push(crate::db::SnapFileEntry {
-                            path: rel_path.clone(),
-                            hash: String::new(),
-                            size,
-                            stored: false,
-                            executable: false,
-                            mtime: Some(mtime_to_millis(mtime)),
-                            storage_method: cas::StorageMethod::None,
-                            is_symlink: true,
-                        });
-                        current_hashes.insert(rel_path.clone(), (String::new(), false));
-                    }
-                }
-            } else {
-                match cas::store_blob_from_file(
-                    &blob_root,
-                    abs_path,
-                    config.storage.max_copy_blob_bytes,
-                    config.storage.max_binary_blob_bytes,
-                    config.storage.max_text_blob_bytes,
-                    cfg!(feature = "compression") && config.storage.compress,
-                    config.storage.compress_level,
-                ) {
-                    Ok((hash, size, method, bytes_written)) => {
-                        let is_new_or_changed = prev_files
-                            .get(rel_path)
-                            .map_or(true, |prev| prev.hash != hash);
-                        if is_new_or_changed {
-                            has_changes = true;
-                            new_files.push(rel_path.clone());
-                        }
-                        let mtime_i = mtime_to_millis(mtime);
-                        let stored = method.is_recoverable();
-                        files_for_manifest.push(crate::db::SnapFileEntry {
-                            path: rel_path.clone(),
-                            hash: hash.clone(),
-                            size,
-                            stored,
-                            executable,
-                            mtime: Some(mtime_i),
-                            storage_method: method,
-                            is_symlink: false,
-                        });
-                        current_hashes.insert(rel_path.clone(), (hash, stored));
-                        if bytes_written > 0 {
-                            let _ = database.add_blob_bytes(bytes_written as i64);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to store blob for {}: {}", rel_path, e);
-                        files_for_manifest.push(crate::db::SnapFileEntry {
-                            path: rel_path.clone(),
-                            hash: String::new(),
-                            size,
-                            stored: false,
-                            executable,
-                            mtime: Some(mtime_to_millis(mtime)),
-                            storage_method: cas::StorageMethod::None,
-                            is_symlink: false,
-                        });
-                        current_hashes.insert(rel_path.clone(), (String::new(), false));
-                    }
-                }
-            }
-        }
-        // Detect deleted files
-        let current_paths: HashSet<&String> = current_files.keys().collect();
-        for (path, cached) in &prev_files {
-            if !current_paths.contains(path) {
-                has_changes = true;
-                deleted_for_manifest.push((
-                    path.clone(),
-                    cached.hash.clone(),
-                    cached.size,
-                    cached.stored,
-                    cached.storage_method,
-                ));
-            }
-        }
-    }
-
-    // If no changes, skip creating a snapshot (unless manual/pre-commit)
-    if !has_changes && trigger == "auto" {
+    if !scan.has_changes && trigger == "auto" {
         return Ok(None);
     }
 
-    // Dynamic trigger upgrade: if trigger is "auto" and mass deletion is detected,
-    // upgrade to "emergency" as a safety net for cases the daemon-side detection missed
-    // (e.g., directory deletion on macOS FSEvents emitting a single event for rm -rf).
-    let actual_trigger = if trigger == "auto" {
-        let deleted_count = deleted_for_manifest.len();
-        let prev_count = prev_files.len() as u64;
-        if crate::emergency::exceeds_threshold(
+    let decision = derive_snapshot_decision(
+        trigger,
+        message,
+        scan.deleted_for_manifest.len(),
+        prev_files.len(),
+        config,
+    );
+    let (rowid, snapshot_id) = persist_snapshot(database, project_hash, &decision, &scan)?;
+    run_snapshot_post_commit(
+        uhoh_dir,
+        database,
+        config,
+        project_hash,
+        &prev_files,
+        rowid,
+        snapshot_id,
+        &decision,
+        &scan,
+    )?;
+
+    Ok(Some(snapshot_id))
+}
+
+fn collect_snapshot_scan(
+    database: &Database,
+    config: &Config,
+    project_path: &Path,
+    changed_paths: Option<&[PathBuf]>,
+    prev_files: &HashMap<String, CachedFileState>,
+    blob_root: &Path,
+) -> Result<SnapshotScanResult> {
+    if let Some(paths) = changed_paths {
+        if should_use_full_scan_for_changes(paths, project_path, prev_files) {
+            return Ok(collect_full_scan(
+                database,
+                config,
+                project_path,
+                prev_files,
+                blob_root,
+            ));
+        }
+        if let Some(scan) =
+            collect_incremental_scan(database, config, project_path, paths, prev_files, blob_root)?
+        {
+            return Ok(scan);
+        }
+    }
+
+    Ok(collect_full_scan(
+        database,
+        config,
+        project_path,
+        prev_files,
+        blob_root,
+    ))
+}
+
+fn should_use_full_scan_for_changes(
+    paths: &[PathBuf],
+    project_path: &Path,
+    prev_files: &HashMap<String, CachedFileState>,
+) -> bool {
+    for path in paths {
+        if path == project_path || path.is_dir() {
+            return true;
+        }
+        if !path.exists() {
+            if let Ok(rel) = path.strip_prefix(project_path) {
+                let prefix = cas::encode_relpath(rel);
+                let prefix_with_sep = format!("{prefix}/");
+                if prev_files
+                    .keys()
+                    .any(|candidate| candidate.starts_with(&prefix_with_sep))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn collect_incremental_scan(
+    database: &Database,
+    config: &Config,
+    project_path: &Path,
+    paths: &[PathBuf],
+    prev_files: &HashMap<String, CachedFileState>,
+    blob_root: &Path,
+) -> Result<Option<SnapshotScanResult>> {
+    let rel_changed = filter_incremental_paths(project_path, paths);
+    let mut scan = SnapshotScanResult::new();
+    let mut inserted = HashSet::new();
+
+    for rel_path in &rel_changed {
+        let abs_path = project_path.join(cas::decode_relpath_to_os(rel_path));
+        if abs_path.file_name().is_some_and(|name| name == ".uhoh") {
+            continue;
+        }
+
+        match std::fs::symlink_metadata(&abs_path) {
+            Ok(meta) => {
+                let file_type = meta.file_type();
+                if !file_type.is_file() && !file_type.is_symlink() {
+                    continue;
+                }
+                record_current_entry(
+                    database, config, blob_root, prev_files, rel_path, &abs_path, &meta, &mut scan,
+                );
+                inserted.insert(rel_path.clone());
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(cached) = prev_files.get(rel_path) {
+                    scan.has_changes = true;
+                    scan.deleted_for_manifest
+                        .push(deleted_manifest_entry(rel_path, cached));
+                    inserted.insert(rel_path.clone());
+                } else {
+                    let dir_prefix = format!("{rel_path}/");
+                    if prev_files
+                        .keys()
+                        .any(|candidate| candidate.starts_with(&dir_prefix))
+                    {
+                        tracing::debug!(
+                            "Deleted path '{}' is a directory with children in prev snapshot; \
+                             forcing full tree walk",
+                            rel_path
+                        );
+                        return Ok(None);
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!("Cannot stat {}: {}", abs_path.display(), err);
+            }
+        }
+    }
+
+    carry_forward_unchanged(prev_files, &inserted, &mut scan);
+    Ok(Some(scan))
+}
+
+fn filter_incremental_paths(project_path: &Path, paths: &[PathBuf]) -> HashSet<String> {
+    let gitignore = {
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(project_path);
+        let gitignore_path = project_path.join(".gitignore");
+        if gitignore_path.exists() {
+            builder.add(&gitignore_path);
+        }
+        for name in [".uhohignore", ".git/.uhohignore"] {
+            let path = project_path.join(name);
+            if path.exists() {
+                builder.add(&path);
+            }
+        }
+        builder.build().unwrap_or_else(|_| {
+            ignore::gitignore::GitignoreBuilder::new(project_path)
+                .build()
+                .unwrap()
+        })
+    };
+
+    let mut rel_changed = HashSet::new();
+    for path in paths {
+        if !path.starts_with(project_path) {
+            continue;
+        }
+
+        if let Ok(rel) = path.strip_prefix(project_path) {
+            let rel_str = rel.to_string_lossy();
+            if rel_str.starts_with(".git/")
+                || rel_str.starts_with(".git\\")
+                || rel_str == ".git"
+                || rel_str == ".uhoh"
+            {
+                continue;
+            }
+        }
+
+        if path.exists() {
+            let matched = gitignore.matched_path_or_any_parents(path, path.is_dir());
+            if matched.is_ignore() {
+                continue;
+            }
+        }
+
+        if let Ok(rel) = path.strip_prefix(project_path) {
+            rel_changed.insert(cas::encode_relpath(rel));
+        }
+    }
+
+    rel_changed
+}
+
+fn carry_forward_unchanged(
+    prev_files: &HashMap<String, CachedFileState>,
+    inserted: &HashSet<String>,
+    scan: &mut SnapshotScanResult,
+) {
+    for (path, cached) in prev_files {
+        if inserted.contains(path) {
+            continue;
+        }
+        scan.files_for_manifest
+            .push(cached_manifest_entry(path, cached));
+    }
+}
+
+fn collect_full_scan(
+    database: &Database,
+    config: &Config,
+    project_path: &Path,
+    prev_files: &HashMap<String, CachedFileState>,
+    blob_root: &Path,
+) -> SnapshotScanResult {
+    let current_files = collect_current_files(project_path);
+    let mut scan = SnapshotScanResult::new();
+
+    for (rel_path, (abs_path, meta)) in &current_files {
+        record_current_entry(
+            database, config, blob_root, prev_files, rel_path, abs_path, meta, &mut scan,
+        );
+    }
+
+    let current_paths: HashSet<&String> = current_files.keys().collect();
+    for (path, cached) in prev_files {
+        if !current_paths.contains(path) {
+            scan.has_changes = true;
+            scan.deleted_for_manifest
+                .push(deleted_manifest_entry(path, cached));
+        }
+    }
+
+    scan
+}
+
+fn collect_current_files(project_path: &Path) -> HashMap<String, (PathBuf, std::fs::Metadata)> {
+    let walker = ignore_rules::build_walker(project_path);
+    let mut current_files = HashMap::new();
+    let mut entries = Vec::new();
+    for entry in walker.flatten() {
+        entries.push(entry);
+    }
+
+    let show_pb = entries.len() > 1000;
+    let pb = if show_pb {
+        let pb = ProgressBar::new(entries.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40} {pos}/{len} files")
+                .unwrap(),
+        );
+        Some(pb)
+    } else {
+        None
+    };
+
+    for entry in entries {
+        let path = entry.path();
+        if path.file_name().is_some_and(|name| name == ".uhoh") {
+            if let Some(pb) = &pb {
+                pb.inc(1);
+            }
+            continue;
+        }
+
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) => {
+                let file_type = meta.file_type();
+                if file_type.is_file() || file_type.is_symlink() {
+                    if let Ok(rel_path) = path.strip_prefix(project_path) {
+                        current_files
+                            .insert(cas::encode_relpath(rel_path), (path.to_path_buf(), meta));
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!("Cannot stat {}: {}", path.display(), err);
+            }
+        }
+
+        if let Some(pb) = &pb {
+            pb.inc(1);
+        }
+    }
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
+
+    current_files
+}
+
+fn record_current_entry(
+    database: &Database,
+    config: &Config,
+    blob_root: &Path,
+    prev_files: &HashMap<String, CachedFileState>,
+    rel_path: &str,
+    abs_path: &Path,
+    meta: &std::fs::Metadata,
+    scan: &mut SnapshotScanResult,
+) {
+    let size = meta.len();
+    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let executable = cas::is_executable(abs_path);
+    if let Some(cached) = prev_files.get(rel_path) {
+        if cached_matches_metadata(cached, size, mtime, executable) {
+            scan.files_for_manifest
+                .push(cached_manifest_entry(rel_path, cached));
+            return;
+        }
+    }
+
+    if meta.file_type().is_symlink() {
+        record_symlink_entry(
+            database, blob_root, prev_files, rel_path, abs_path, size, mtime, scan,
+        );
+    } else {
+        record_file_entry(
+            database, config, blob_root, prev_files, rel_path, abs_path, size, mtime, executable,
+            scan,
+        );
+    }
+}
+
+fn cached_matches_metadata(
+    cached: &CachedFileState,
+    size: u64,
+    mtime: SystemTime,
+    executable: bool,
+) -> bool {
+    let fs_mtime_ms = mtime_to_millis(mtime);
+    let cached_mtime_ms = mtime_to_millis(cached.mtime);
+    cached.size == size && cached_mtime_ms == fs_mtime_ms && cached.executable == executable
+}
+
+fn cached_manifest_entry(path: &str, cached: &CachedFileState) -> crate::db::SnapFileEntry {
+    crate::db::SnapFileEntry {
+        path: path.to_string(),
+        hash: cached.hash.clone(),
+        size: cached.size,
+        stored: cached.stored,
+        executable: cached.executable,
+        mtime: Some(mtime_to_millis(cached.mtime)),
+        storage_method: cached.storage_method,
+        is_symlink: cached.is_symlink,
+    }
+}
+
+fn deleted_manifest_entry(path: &str, cached: &CachedFileState) -> DeletedManifestEntry {
+    (
+        path.to_string(),
+        cached.hash.clone(),
+        cached.size,
+        cached.stored,
+        cached.storage_method,
+    )
+}
+
+fn record_symlink_entry(
+    database: &Database,
+    blob_root: &Path,
+    prev_files: &HashMap<String, CachedFileState>,
+    rel_path: &str,
+    abs_path: &Path,
+    size: u64,
+    mtime: SystemTime,
+    scan: &mut SnapshotScanResult,
+) {
+    match cas::store_symlink_target(blob_root, abs_path) {
+        Ok((hash, symlink_size, bytes_written)) => {
+            let is_new_or_changed = prev_files
+                .get(rel_path)
+                .map_or(true, |prev| prev.hash != hash || !prev.is_symlink);
+            if is_new_or_changed {
+                scan.has_changes = true;
+                scan.new_files.push(rel_path.to_string());
+            }
+            let mtime_i = mtime_to_millis(mtime);
+            scan.files_for_manifest.push(crate::db::SnapFileEntry {
+                path: rel_path.to_string(),
+                hash: hash.clone(),
+                size: symlink_size,
+                stored: true,
+                executable: false,
+                mtime: Some(mtime_i),
+                storage_method: cas::StorageMethod::Copy,
+                is_symlink: true,
+            });
+            scan.current_hashes
+                .insert(rel_path.to_string(), (hash, true));
+            if bytes_written > 0 {
+                let _ = database.add_blob_bytes(bytes_written as i64);
+            }
+        }
+        Err(err) => {
+            tracing::warn!("Failed to store symlink for {}: {}", rel_path, err);
+            let is_new_or_changed = prev_files
+                .get(rel_path)
+                .map_or(true, |prev| prev.stored || !prev.is_symlink);
+            if is_new_or_changed {
+                scan.has_changes = true;
+                scan.new_files.push(rel_path.to_string());
+            }
+            scan.files_for_manifest.push(crate::db::SnapFileEntry {
+                path: rel_path.to_string(),
+                hash: String::new(),
+                size,
+                stored: false,
+                executable: false,
+                mtime: Some(mtime_to_millis(mtime)),
+                storage_method: cas::StorageMethod::None,
+                is_symlink: true,
+            });
+            scan.current_hashes
+                .insert(rel_path.to_string(), (String::new(), false));
+        }
+    }
+}
+
+fn record_file_entry(
+    database: &Database,
+    config: &Config,
+    blob_root: &Path,
+    prev_files: &HashMap<String, CachedFileState>,
+    rel_path: &str,
+    abs_path: &Path,
+    size: u64,
+    mtime: SystemTime,
+    executable: bool,
+    scan: &mut SnapshotScanResult,
+) {
+    match cas::store_blob_from_file(
+        blob_root,
+        abs_path,
+        config.storage.max_copy_blob_bytes,
+        config.storage.max_binary_blob_bytes,
+        config.storage.max_text_blob_bytes,
+        cfg!(feature = "compression") && config.storage.compress,
+        config.storage.compress_level,
+    ) {
+        Ok((hash, stored_size, method, bytes_written)) => {
+            let is_new_or_changed = prev_files
+                .get(rel_path)
+                .map_or(true, |prev| prev.hash != hash);
+            if is_new_or_changed {
+                scan.has_changes = true;
+                scan.new_files.push(rel_path.to_string());
+            }
+            let mtime_i = mtime_to_millis(mtime);
+            let stored = method.is_recoverable();
+            scan.files_for_manifest.push(crate::db::SnapFileEntry {
+                path: rel_path.to_string(),
+                hash: hash.clone(),
+                size: stored_size,
+                stored,
+                executable,
+                mtime: Some(mtime_i),
+                storage_method: method,
+                is_symlink: false,
+            });
+            scan.current_hashes
+                .insert(rel_path.to_string(), (hash, stored));
+            if bytes_written > 0 {
+                let _ = database.add_blob_bytes(bytes_written as i64);
+            }
+        }
+        Err(err) => {
+            tracing::warn!("Failed to store blob for {}: {}", rel_path, err);
+            scan.files_for_manifest.push(crate::db::SnapFileEntry {
+                path: rel_path.to_string(),
+                hash: String::new(),
+                size,
+                stored: false,
+                executable,
+                mtime: Some(mtime_to_millis(mtime)),
+                storage_method: cas::StorageMethod::None,
+                is_symlink: false,
+            });
+            scan.current_hashes
+                .insert(rel_path.to_string(), (String::new(), false));
+        }
+    }
+}
+
+fn derive_snapshot_decision(
+    trigger: &str,
+    message: Option<&str>,
+    deleted_count: usize,
+    prev_file_count: usize,
+    config: &Config,
+) -> SnapshotDecision {
+    let prev_count = prev_file_count as u64;
+    let trigger = if trigger == "auto"
+        && crate::emergency::exceeds_threshold(
             deleted_count,
             prev_count,
             config.watch.emergency_delete_threshold,
             config.watch.emergency_delete_min_files,
         ) {
-            let ratio = crate::emergency::deletion_ratio(deleted_count, prev_count);
-            tracing::warn!(
-                "Dynamic trigger upgrade: auto -> emergency \
-                 (deleted={}, baseline={}, ratio={:.3})",
-                deleted_count,
-                prev_count,
-                ratio
-            );
-            "emergency"
-        } else {
-            trigger
-        }
+        let ratio = crate::emergency::deletion_ratio(deleted_count, prev_count);
+        tracing::warn!(
+            "Dynamic trigger upgrade: auto -> emergency (deleted={}, baseline={}, ratio={:.3})",
+            deleted_count,
+            prev_count,
+            ratio
+        );
+        "emergency".to_string()
     } else {
-        trigger
+        trigger.to_string()
     };
 
-    // Override message for dynamically-upgraded emergency snapshots
-    let auto_msg: String;
-    let msg = if actual_trigger == "emergency" && message.is_none() {
-        let deleted_count = deleted_for_manifest.len();
-        let prev_count = prev_files.len() as u64;
+    let message = if trigger == "emergency" && message.is_none() {
         let ratio = crate::emergency::deletion_ratio(deleted_count, prev_count);
-        auto_msg = format!(
+        format!(
             "Mass delete detected: {}/{} files ({:.1}%)",
             deleted_count,
             prev_count,
             ratio * 100.0
-        );
-        auto_msg.as_str()
+        )
     } else {
-        message.unwrap_or("")
+        message.unwrap_or("").to_string()
     };
 
-    // Snapshot ID will be allocated inside the DB transaction
-    let snapshot_id: u64 = 0;
+    SnapshotDecision { trigger, message }
+}
+
+fn persist_snapshot(
+    database: &Database,
+    project_hash: &str,
+    decision: &SnapshotDecision,
+    scan: &SnapshotScanResult,
+) -> Result<(i64, u64)> {
     let timestamp = chrono::Utc::now().to_rfc3339();
-    let pinned = false;
-
-    let (rowid, snapshot_id) = database.create_snapshot(crate::db::CreateSnapshotRow {
+    database.create_snapshot(crate::db::CreateSnapshotRow {
         project_hash,
-        snapshot_id,
+        snapshot_id: 0,
         timestamp: &timestamp,
-        trigger: actual_trigger,
-        message: msg,
-        pinned,
-        files: &files_for_manifest,
-        deleted: &deleted_for_manifest,
-    })?;
+        trigger: &decision.trigger,
+        message: &decision.message,
+        pinned: false,
+        files: &scan.files_for_manifest,
+        deleted: &scan.deleted_for_manifest,
+    })
+}
 
-    let file_paths_str = files_for_manifest
-        .iter()
-        .map(|f| f.path.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let _ = database.index_snapshot_for_search(
+fn run_snapshot_post_commit(
+    uhoh_dir: &Path,
+    database: &Database,
+    config: &Config,
+    project_hash: &str,
+    prev_files: &HashMap<String, CachedFileState>,
+    rowid: i64,
+    snapshot_id: u64,
+    decision: &SnapshotDecision,
+    scan: &SnapshotScanResult,
+) -> Result<()> {
+    index_snapshot_for_search(
+        database,
         rowid,
         project_hash,
-        actual_trigger,
-        msg,
-        "",
-        &file_paths_str,
+        decision,
+        &scan.files_for_manifest,
     );
-
-    // If there is an active operation for this project and this was not a pre-restore snapshot,
-    // keep last_snapshot_id updated so undo has a clear end.
-    if actual_trigger != "pre-restore" {
-        if let Ok(Some(op)) = database.get_active_operation(project_hash) {
-            let _ = database.update_operation_last_snapshot(op.id, snapshot_id);
-        }
-    }
-
-    // AI summary: attempt now if allowed, else enqueue for later
-    if ai::should_run_ai(&config.ai) {
-        let uhoh_dir_cl = uhoh_dir.to_path_buf();
-        let db_handle = database.clone_handle();
-        let cfg_cloned = config.clone();
-        let files_added: Vec<String> = new_files
-            .iter()
-            .filter(|p| !prev_files.contains_key(*p))
-            .cloned()
-            .collect();
-        let files_modified: Vec<String> = new_files
-            .iter()
-            .filter(|p| prev_files.contains_key(*p))
-            .cloned()
-            .collect();
-        let files_deleted: Vec<String> = deleted_for_manifest
-            .iter()
-            .map(|(p, _, _, _, _)| p.clone())
-            .collect();
-        let db_rowid = rowid;
-
-        // Build compact diff text for modified files
-        let blob_root = uhoh_dir.join("blobs");
-        let mut diff_chunks = String::new();
-        const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024; // 512KB cap for AI diff
-        let max_diff_chars = cfg_cloned.ai.max_context_tokens.saturating_mul(4);
-        let mut diff_chars = 0usize;
-        let mut diff_truncated = false;
-        for path in files_modified.iter().take(10) {
-            if diff_chars >= max_diff_chars {
-                if !diff_truncated {
-                    diff_chunks.push_str("\n[Diff truncated]\n");
-                }
-                break;
-            }
-            if let (Some(prev), Some((curr_hash, curr_stored))) =
-                (prev_files.get(path), current_hashes.get(path))
-            {
-                if prev.stored && *curr_stored && !prev.hash.is_empty() && !curr_hash.is_empty() {
-                    // Enforce size cap and skip binary
-                    if prev.size > MAX_AI_DIFF_FILE_SIZE {
-                        let note = format!("--- {path}\n[File too large for AI diff]\n");
-                        crate::ai::summary::append_diff_chunk(
-                            &mut diff_chunks,
-                            &mut diff_chars,
-                            max_diff_chars,
-                            &mut diff_truncated,
-                            &note,
-                        );
-                        if diff_chars >= max_diff_chars {
-                            if !diff_truncated {
-                                diff_chunks.push_str("\n[Diff truncated]\n");
-                            }
-                            break;
-                        }
-                        continue;
-                    }
-                    let old = crate::cas::read_blob(&blob_root, &prev.hash).ok().flatten();
-                    let new = crate::cas::read_blob(&blob_root, curr_hash).ok().flatten();
-                    if let (Some(old), Some(new)) = (old, new) {
-                        let head_old = &old[..old.len().min(8192)];
-                        let head_new = &new[..new.len().min(8192)];
-                        if content_inspector::inspect(head_old).is_binary()
-                            || content_inspector::inspect(head_new).is_binary()
-                        {
-                            let note = format!("--- {path}\n[Binary file]\n");
-                            crate::ai::summary::append_diff_chunk(
-                                &mut diff_chunks,
-                                &mut diff_chars,
-                                max_diff_chars,
-                                &mut diff_truncated,
-                                &note,
-                            );
-                            if diff_chars >= max_diff_chars {
-                                if !diff_truncated {
-                                    diff_chunks.push_str("\n[Diff truncated]\n");
-                                }
-                                break;
-                            }
-                            continue;
-                        }
-                        if let (Ok(old_s), Ok(new_s)) =
-                            (String::from_utf8(old), String::from_utf8(new))
-                        {
-                            let d = similar::TextDiff::from_lines(&old_s, &new_s);
-                            let header = format!("--- a/{path}\n+++ b/{path}\n");
-                            crate::ai::summary::append_diff_chunk(
-                                &mut diff_chunks,
-                                &mut diff_chars,
-                                max_diff_chars,
-                                &mut diff_truncated,
-                                &header,
-                            );
-                            for hunk in d.unified_diff().context_radius(2).iter_hunks() {
-                                if diff_chars >= max_diff_chars {
-                                    if !diff_truncated {
-                                        diff_chunks.push_str("\n[Diff truncated]\n");
-                                        diff_truncated = true;
-                                    }
-                                    break;
-                                }
-                                let hunk_header = format!("{}\n", hunk.header());
-                                crate::ai::summary::append_diff_chunk(
-                                    &mut diff_chunks,
-                                    &mut diff_chars,
-                                    max_diff_chars,
-                                    &mut diff_truncated,
-                                    &hunk_header,
-                                );
-                                for change in hunk.iter_changes() {
-                                    if diff_chars >= max_diff_chars {
-                                        if !diff_truncated {
-                                            diff_chunks.push_str("\n[Diff truncated]\n");
-                                            diff_truncated = true;
-                                        }
-                                        break;
-                                    }
-                                    let sign = match change.tag() {
-                                        similar::ChangeTag::Delete => '-',
-                                        similar::ChangeTag::Insert => '+',
-                                        similar::ChangeTag::Equal => ' ',
-                                    };
-                                    let line = format!("{}{}", sign, change);
-                                    crate::ai::summary::append_diff_chunk(
-                                        &mut diff_chunks,
-                                        &mut diff_chars,
-                                        max_diff_chars,
-                                        &mut diff_truncated,
-                                        &line,
-                                    );
-                                }
-                                if diff_truncated {
-                                    break;
-                                }
-                            }
-                            if diff_truncated {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            if diff_truncated {
-                break;
-            }
-        }
-
-        std::thread::spawn(move || {
-            let cfg = cfg_cloned;
-            let files = crate::ai::summary::FileChangeSummary {
-                added: files_added,
-                deleted: files_deleted,
-                modified: files_modified,
-            };
-            match crate::ai::summary::generate_summary_blocking(
-                &uhoh_dir_cl,
-                &cfg,
-                &diff_chunks,
-                &files,
-            ) {
-                Ok(text) if !text.is_empty() => {
-                    let _ = db_handle.set_ai_summary(db_rowid, &text);
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!("AI summary generation failed: {}", e),
-            }
-        });
-    } else {
-        // Queue summary for later processing
-        let _ = database.enqueue_ai_summary(rowid, project_hash);
-    }
+    update_active_operation_snapshot(database, project_hash, &decision.trigger, snapshot_id);
+    schedule_ai_summary(
+        uhoh_dir,
+        database,
+        config,
+        project_hash,
+        prev_files,
+        rowid,
+        &scan.new_files,
+        &scan.deleted_for_manifest,
+        &scan.current_hashes,
+    );
 
     let id_str = cas::id_to_base58(snapshot_id);
     tracing::info!(
         "Snapshot {} created for {} ({} files, {} deleted, trigger={})",
         id_str,
         &project_hash[..project_hash.len().min(12)],
-        files_for_manifest.len(),
-        deleted_for_manifest.len(),
-        actual_trigger,
+        scan.files_for_manifest.len(),
+        scan.deleted_for_manifest.len(),
+        decision.trigger,
     );
 
-    // Enforce storage limits after snapshot
-    // Compute total project size from manifest entries
-    let total_project_size: u64 = files_for_manifest.iter().map(|f| f.size).sum();
-    enforce_storage_limit(database, total_project_size, project_hash, config)?;
+    let total_project_size: u64 = scan.files_for_manifest.iter().map(|file| file.size).sum();
+    enforce_storage_limit(database, total_project_size, project_hash, config)
+}
 
-    Ok(Some(snapshot_id))
+fn index_snapshot_for_search(
+    database: &Database,
+    rowid: i64,
+    project_hash: &str,
+    decision: &SnapshotDecision,
+    files_for_manifest: &[crate::db::SnapFileEntry],
+) {
+    let file_paths_str = files_for_manifest
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = database.index_snapshot_for_search(
+        rowid,
+        project_hash,
+        &decision.trigger,
+        &decision.message,
+        "",
+        &file_paths_str,
+    );
+}
+
+fn update_active_operation_snapshot(
+    database: &Database,
+    project_hash: &str,
+    trigger: &str,
+    snapshot_id: u64,
+) {
+    if trigger == "pre-restore" {
+        return;
+    }
+    if let Ok(Some(op)) = database.get_active_operation(project_hash) {
+        let _ = database.update_operation_last_snapshot(op.id, snapshot_id);
+    }
+}
+
+fn schedule_ai_summary(
+    uhoh_dir: &Path,
+    database: &Database,
+    config: &Config,
+    project_hash: &str,
+    prev_files: &HashMap<String, CachedFileState>,
+    rowid: i64,
+    new_files: &[String],
+    deleted_for_manifest: &[DeletedManifestEntry],
+    current_hashes: &HashMap<String, (String, bool)>,
+) {
+    if !ai::should_run_ai(&config.ai) {
+        let _ = database.enqueue_ai_summary(rowid, project_hash);
+        return;
+    }
+
+    let uhoh_dir_cl = uhoh_dir.to_path_buf();
+    let db_handle = database.clone_handle();
+    let cfg_cloned = config.clone();
+    let files_added: Vec<String> = new_files
+        .iter()
+        .filter(|path| !prev_files.contains_key(*path))
+        .cloned()
+        .collect();
+    let files_modified: Vec<String> = new_files
+        .iter()
+        .filter(|path| prev_files.contains_key(*path))
+        .cloned()
+        .collect();
+    let files_deleted: Vec<String> = deleted_for_manifest
+        .iter()
+        .map(|(path, _, _, _, _)| path.clone())
+        .collect();
+    let diff_chunks = build_ai_diff_chunks(
+        uhoh_dir,
+        &cfg_cloned,
+        prev_files,
+        current_hashes,
+        &files_modified,
+    );
+
+    std::thread::spawn(move || {
+        let files = crate::ai::summary::FileChangeSummary {
+            added: files_added,
+            deleted: files_deleted,
+            modified: files_modified,
+        };
+        match crate::ai::summary::generate_summary_blocking(
+            &uhoh_dir_cl,
+            &cfg_cloned,
+            &diff_chunks,
+            &files,
+        ) {
+            Ok(text) if !text.is_empty() => {
+                let _ = db_handle.set_ai_summary(rowid, &text);
+            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!("AI summary generation failed: {}", err),
+        }
+    });
+}
+
+fn build_ai_diff_chunks(
+    uhoh_dir: &Path,
+    config: &Config,
+    prev_files: &HashMap<String, CachedFileState>,
+    current_hashes: &HashMap<String, (String, bool)>,
+    files_modified: &[String],
+) -> String {
+    const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024;
+
+    let blob_root = uhoh_dir.join("blobs");
+    let max_diff_chars = config.ai.max_context_tokens.saturating_mul(4);
+    let mut diff_chunks = String::new();
+    let mut diff_chars = 0usize;
+    let mut diff_truncated = false;
+
+    for path in files_modified.iter().take(10) {
+        if diff_chars >= max_diff_chars {
+            append_diff_truncation_marker(&mut diff_chunks, &mut diff_truncated);
+            break;
+        }
+
+        let Some(prev) = prev_files.get(path) else {
+            continue;
+        };
+        let Some((curr_hash, curr_stored)) = current_hashes.get(path) else {
+            continue;
+        };
+        if !prev.stored || !curr_stored || prev.hash.is_empty() || curr_hash.is_empty() {
+            continue;
+        }
+
+        if prev.size > MAX_AI_DIFF_FILE_SIZE {
+            let note = format!("--- {path}\n[File too large for AI diff]\n");
+            crate::ai::summary::append_diff_chunk(
+                &mut diff_chunks,
+                &mut diff_chars,
+                max_diff_chars,
+                &mut diff_truncated,
+                &note,
+            );
+            if diff_chars >= max_diff_chars {
+                append_diff_truncation_marker(&mut diff_chunks, &mut diff_truncated);
+                break;
+            }
+            continue;
+        }
+
+        let old = crate::cas::read_blob(&blob_root, &prev.hash).ok().flatten();
+        let new = crate::cas::read_blob(&blob_root, curr_hash).ok().flatten();
+        let (Some(old), Some(new)) = (old, new) else {
+            continue;
+        };
+
+        let head_old = &old[..old.len().min(8192)];
+        let head_new = &new[..new.len().min(8192)];
+        if content_inspector::inspect(head_old).is_binary()
+            || content_inspector::inspect(head_new).is_binary()
+        {
+            let note = format!("--- {path}\n[Binary file]\n");
+            crate::ai::summary::append_diff_chunk(
+                &mut diff_chunks,
+                &mut diff_chars,
+                max_diff_chars,
+                &mut diff_truncated,
+                &note,
+            );
+            if diff_chars >= max_diff_chars {
+                append_diff_truncation_marker(&mut diff_chunks, &mut diff_truncated);
+                break;
+            }
+            continue;
+        }
+
+        let (Ok(old_s), Ok(new_s)) = (String::from_utf8(old), String::from_utf8(new)) else {
+            continue;
+        };
+        let diff = similar::TextDiff::from_lines(&old_s, &new_s);
+        let header = format!("--- a/{path}\n+++ b/{path}\n");
+        crate::ai::summary::append_diff_chunk(
+            &mut diff_chunks,
+            &mut diff_chars,
+            max_diff_chars,
+            &mut diff_truncated,
+            &header,
+        );
+
+        for hunk in diff.unified_diff().context_radius(2).iter_hunks() {
+            if diff_chars >= max_diff_chars {
+                append_diff_truncation_marker(&mut diff_chunks, &mut diff_truncated);
+                break;
+            }
+
+            let hunk_header = format!("{}\n", hunk.header());
+            crate::ai::summary::append_diff_chunk(
+                &mut diff_chunks,
+                &mut diff_chars,
+                max_diff_chars,
+                &mut diff_truncated,
+                &hunk_header,
+            );
+            for change in hunk.iter_changes() {
+                if diff_chars >= max_diff_chars {
+                    append_diff_truncation_marker(&mut diff_chunks, &mut diff_truncated);
+                    break;
+                }
+                let sign = match change.tag() {
+                    similar::ChangeTag::Delete => '-',
+                    similar::ChangeTag::Insert => '+',
+                    similar::ChangeTag::Equal => ' ',
+                };
+                let line = format!("{}{}", sign, change);
+                crate::ai::summary::append_diff_chunk(
+                    &mut diff_chunks,
+                    &mut diff_chars,
+                    max_diff_chars,
+                    &mut diff_truncated,
+                    &line,
+                );
+            }
+            if diff_truncated {
+                break;
+            }
+        }
+
+        if diff_truncated {
+            break;
+        }
+    }
+
+    diff_chunks
+}
+
+fn append_diff_truncation_marker(diff_chunks: &mut String, diff_truncated: &mut bool) {
+    if !*diff_truncated {
+        diff_chunks.push_str("\n[Diff truncated]\n");
+        *diff_truncated = true;
+    }
 }
 
 pub fn mtime_to_millis(t: SystemTime) -> i64 {

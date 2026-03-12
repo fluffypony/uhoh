@@ -2,6 +2,7 @@ pub mod llama;
 pub mod mlx;
 mod mlx_update;
 mod models;
+pub mod queue;
 pub mod sidecar;
 mod sidecar_update;
 pub mod summary;

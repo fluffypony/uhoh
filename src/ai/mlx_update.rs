@@ -1,14 +1,30 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use once_cell::sync::Lazy;
 
 use crate::config::{AiConfig, MlxConfig};
 use crate::server::events::ServerEvent;
 
-static LAST_CHECK: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+#[derive(Debug, Default)]
+pub struct MlxAutoUpdateState {
+    last_check_by_venv: HashMap<PathBuf, Instant>,
+}
+
+impl MlxAutoUpdateState {
+    fn should_run(&mut self, venv_dir: &std::path::Path, interval_hours: u64) -> bool {
+        let interval_secs = interval_hours.saturating_mul(3600);
+        if let Some(last) = self.last_check_by_venv.get(venv_dir) {
+            if last.elapsed().as_secs() < interval_secs {
+                return false;
+            }
+        }
+        self.last_check_by_venv
+            .insert(venv_dir.to_path_buf(), Instant::now());
+        true
+    }
+}
 
 #[derive(Debug, serde::Deserialize)]
 struct PypiInfoResponse {
@@ -27,13 +43,14 @@ struct MlxState {
 }
 
 pub async fn maybe_run_mlx_auto_update(
+    state: &mut MlxAutoUpdateState,
     config: &AiConfig,
     uhoh_dir: &std::path::Path,
     event_tx: Option<&tokio::sync::broadcast::Sender<ServerEvent>>,
 ) -> Result<()> {
     // MLX only works on Apple Silicon macOS
     if cfg!(not(all(target_os = "macos", target_arch = "aarch64"))) {
-        let _ = (config, uhoh_dir, event_tx);
+        let _ = (state, config, uhoh_dir, event_tx);
         return Ok(());
     }
 
@@ -45,23 +62,10 @@ pub async fn maybe_run_mlx_auto_update(
         return Ok(());
     }
 
-    {
-        let mut guard = match LAST_CHECK.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                tracing::warn!("MLX update check mutex poisoned, recovering state");
-                poisoned.into_inner()
-            }
-        };
-        if let Some(last) = *guard {
-            if last.elapsed().as_secs() < config.mlx.check_interval_hours.saturating_mul(3600) {
-                return Ok(());
-            }
-        }
-        *guard = Some(Instant::now());
-    }
-
     let venv_dir = resolve_venv_path(&config.mlx, uhoh_dir);
+    if !state.should_run(&venv_dir, config.mlx.check_interval_hours) {
+        return Ok(());
+    }
     ensure_venv(&venv_dir, &config.mlx).await?;
 
     if crate::ai::sidecar::sidecar_running() {
