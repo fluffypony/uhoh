@@ -19,13 +19,15 @@ pub async fn websocket_handler(
     // Validate Origin header to prevent cross-site WebSocket hijacking.
     // Shared middleware also validates Origin; keep this handler check to
     // preserve behavior when ws route wiring changes.
-    if !super::auth::validate_origin(&headers) {
+    if !state.transport_policy.validate_origin(&headers) {
         return Err(StatusCode::FORBIDDEN);
     }
 
     // If HTTP auth is enabled, require the same bearer token for /ws via
     // Authorization or Sec-WebSocket-Protocol, since /ws is auth-middleware exempt.
-    if state.require_auth && !websocket_auth_ok(&headers, state.cached_token.as_deref()) {
+    if state.transport_policy.requires_websocket_auth()
+        && !websocket_auth_ok(&headers, state.cached_token.as_deref())
+    {
         return Err(StatusCode::UNAUTHORIZED);
     }
 

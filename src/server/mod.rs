@@ -20,28 +20,32 @@ use tokio::sync::Mutex;
 use crate::config::ServerConfig;
 use crate::db::Database;
 use crate::events::ServerEvent;
+use crate::runtime_bundle::{RuntimeBundle, RuntimeBundleConfig};
 use crate::subsystem::{SubsystemHealth, SubsystemManager};
-use auth::{auth_middleware, host_validation_middleware, AuthConfig, AuthToken};
+use crate::transport_security::TransportSecurityPolicy;
+use auth::{auth_middleware, host_validation_middleware, AuthToken};
 
-#[derive(Clone)]
-pub struct AppState {
+pub struct ServerBootstrap {
+    pub config: ServerConfig,
+    pub full_config: crate::config::Config,
     pub database: Arc<Database>,
     pub uhoh_dir: PathBuf,
-    pub config: crate::config::Config,
     pub event_tx: broadcast::Sender<ServerEvent>,
     pub restore_coordinator: crate::restore_runtime::RestoreCoordinator,
     pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
-    /// Cached server auth token, read once at startup.
-    pub cached_token: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    pub api: ApiState,
+    pub health: HealthState,
+    pub mcp: crate::mcp::McpHttpState,
+    pub ws: WsState,
 }
 
 #[derive(Clone)]
 pub struct ApiState {
-    pub database: Arc<Database>,
-    pub uhoh_dir: PathBuf,
-    pub config: crate::config::Config,
-    pub event_tx: broadcast::Sender<ServerEvent>,
-    pub restore_runtime: crate::restore_runtime::RestoreRuntime,
+    pub runtime: RuntimeBundle,
 }
 
 #[derive(Clone)]
@@ -50,78 +54,46 @@ pub struct HealthState {
 }
 
 #[derive(Clone)]
-pub struct McpState {
-    pub port: u16,
-    pub application: crate::mcp::McpApplication,
-}
-
-#[derive(Clone)]
 pub struct WsState {
     pub event_tx: broadcast::Sender<ServerEvent>,
-    pub require_auth: bool,
+    pub transport_policy: TransportSecurityPolicy,
     pub cached_token: Option<String>,
 }
 
 impl FromRef<AppState> for ApiState {
     fn from_ref(input: &AppState) -> Self {
-        Self {
-            database: input.database.clone(),
-            uhoh_dir: input.uhoh_dir.clone(),
-            config: input.config.clone(),
-            event_tx: input.event_tx.clone(),
-            restore_runtime: crate::restore_runtime::RestoreRuntime::new(
-                input.database.clone(),
-                input.uhoh_dir.clone(),
-            )
-            .with_event_tx(input.event_tx.clone())
-            .with_coordinator(input.restore_coordinator.clone()),
-        }
+        input.api.clone()
     }
 }
 
 impl FromRef<AppState> for HealthState {
     fn from_ref(input: &AppState) -> Self {
-        Self {
-            subsystem_manager: input.subsystem_manager.clone(),
-        }
+        input.health.clone()
     }
 }
 
-impl FromRef<AppState> for McpState {
+impl FromRef<AppState> for crate::mcp::McpHttpState {
     fn from_ref(input: &AppState) -> Self {
-        Self {
-            port: input.config.server.port,
-            application: crate::mcp::build_application(
-                input.database.clone(),
-                input.uhoh_dir.clone(),
-                input.config.clone(),
-                Some(input.event_tx.clone()),
-                Some(input.restore_coordinator.clone()),
-                crate::mcp::McpExecutor::SpawnBlocking,
-            ),
-        }
+        input.mcp.clone()
     }
 }
 
 impl FromRef<AppState> for WsState {
     fn from_ref(input: &AppState) -> Self {
-        Self {
-            event_tx: input.event_tx.clone(),
-            require_auth: input.config.server.require_auth,
-            cached_token: input.cached_token.clone(),
-        }
+        input.ws.clone()
     }
 }
 
-pub async fn start_server(
-    config: &ServerConfig,
-    full_config: crate::config::Config,
-    database: Arc<Database>,
-    uhoh_dir: PathBuf,
-    event_tx: broadcast::Sender<ServerEvent>,
-    restore_coordinator: crate::restore_runtime::RestoreCoordinator,
-    subsystem_manager: Arc<Mutex<SubsystemManager>>,
-) -> Result<tokio::task::JoinHandle<()>> {
+pub async fn start_server(bootstrap: ServerBootstrap) -> Result<tokio::task::JoinHandle<()>> {
+    let ServerBootstrap {
+        config,
+        full_config,
+        database,
+        uhoh_dir,
+        event_tx,
+        restore_coordinator,
+        subsystem_manager,
+    } = bootstrap;
     // Reuse existing token if present, only generate on first run
     let token_path = uhoh_dir.join("server.token");
     let auth_token = if token_path.exists() {
@@ -140,17 +112,33 @@ pub async fn start_server(
         new_token
     };
 
-    let state = AppState {
+    let transport_policy = TransportSecurityPolicy::from_server_config(&config);
+    let runtime = RuntimeBundle::new(RuntimeBundleConfig {
         database,
         uhoh_dir: uhoh_dir.clone(),
         config: full_config,
-        event_tx,
-        restore_coordinator,
-        subsystem_manager,
-        cached_token: Some(auth_token.clone()),
+        event_tx: Some(event_tx.clone()),
+        restore_coordinator: Some(restore_coordinator),
+    });
+    let state = AppState {
+        api: ApiState {
+            runtime: runtime.clone(),
+        },
+        health: HealthState {
+            subsystem_manager: subsystem_manager.clone(),
+        },
+        mcp: crate::mcp::McpHttpState {
+            application: crate::mcp::build_application(runtime.clone()),
+            transport_policy,
+        },
+        ws: WsState {
+            event_tx,
+            transport_policy,
+            cached_token: Some(auth_token.clone()),
+        },
     };
 
-    let app = build_app(state.clone(), config, &auth_token);
+    let app = build_app(state.clone(), &config, &auth_token, transport_policy);
 
     let bind_addr = format!("{}:{}", config.bind_address, config.port);
     let addr: SocketAddr = bind_addr
@@ -163,7 +151,7 @@ pub async fn start_server(
     let handle = tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
-                let _ = auth::write_port_file(&state.uhoh_dir, addr.port());
+                let _ = auth::write_port_file(state.api.runtime.uhoh_dir(), addr.port());
                 listener
             }
             Err(e) => {
@@ -180,7 +168,12 @@ pub async fn start_server(
     Ok(handle)
 }
 
-fn build_app(state: AppState, config: &ServerConfig, auth_token: &str) -> Router {
+fn build_app(
+    state: AppState,
+    config: &ServerConfig,
+    auth_token: &str,
+    transport_policy: TransportSecurityPolicy,
+) -> Router {
     let mut app = Router::new();
     if config.mcp_enabled {
         app = app
@@ -229,21 +222,21 @@ fn build_app(state: AppState, config: &ServerConfig, auth_token: &str) -> Router
     }
 
     app = app.route_layer(middleware::from_fn_with_state(
-        config.port,
+        transport_policy,
         host_validation_middleware,
     ));
 
     // Apply Origin validation to HTTP API and MCP surfaces for browser-originated
     // requests. Requests without Origin remain allowed for local CLI/agent clients.
-    app = app.route_layer(middleware::from_fn(origin_validation_middleware));
+    app = app.route_layer(middleware::from_fn_with_state(
+        transport_policy,
+        origin_validation_middleware,
+    ));
 
     if config.require_auth || config.mcp_require_auth {
         app = app
             .route_layer(middleware::from_fn_with_state(
-                AuthConfig {
-                    require_auth: config.require_auth,
-                    mcp_require_auth: config.mcp_require_auth,
-                },
+                transport_policy,
                 auth_middleware,
             ))
             .layer(Extension(AuthToken(auth_token.to_string())));
@@ -303,6 +296,7 @@ fn audit_source_label(source: &crate::subsystem::AuditSource) -> &'static str {
 }
 
 async fn origin_validation_middleware(
+    State(transport_policy): State<TransportSecurityPolicy>,
     headers: axum::http::HeaderMap,
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -312,7 +306,7 @@ async fn origin_validation_middleware(
     let should_validate =
         path.starts_with("/api/") || path == "/mcp" || (path == "/ws" && *method == Method::GET);
 
-    if should_validate && !auth::validate_origin(&headers) {
+    if should_validate && !transport_policy.validate_origin(&headers) {
         return (
             axum::http::StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({ "error": "Invalid Origin header" })),
@@ -325,7 +319,7 @@ async fn origin_validation_middleware(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_app, AppState};
+    use super::{build_app, ApiState, AppState, HealthState, WsState};
     use axum::body::{to_bytes, Body};
     use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
     use axum::http::HeaderValue;
@@ -338,26 +332,44 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::db::Database;
+    use crate::runtime_bundle::{RuntimeBundle, RuntimeBundleConfig};
     use crate::subsystem::SubsystemManager;
+    use crate::transport_security::TransportSecurityPolicy;
 
     fn test_app() -> (TempDir, crate::config::Config, axum::Router) {
         let temp = tempfile::tempdir().expect("tempdir");
         let database = Arc::new(Database::open(&temp.path().join("uhoh.db")).expect("open db"));
         let (event_tx, _) = broadcast::channel(8);
         let config = crate::config::Config::default();
-        let state = AppState {
+        let transport_policy = TransportSecurityPolicy::from_server_config(&config.server);
+        let runtime = RuntimeBundle::new(RuntimeBundleConfig {
             database,
             uhoh_dir: temp.path().to_path_buf(),
             config: config.clone(),
-            event_tx,
-            restore_coordinator: crate::restore_runtime::RestoreCoordinator::new(),
-            subsystem_manager: Arc::new(Mutex::new(SubsystemManager::new(
-                3,
-                Duration::from_secs(60),
-            ))),
-            cached_token: Some("test-token".to_string()),
+            event_tx: Some(event_tx.clone()),
+            restore_coordinator: Some(crate::restore_runtime::RestoreCoordinator::new()),
+        });
+        let state = AppState {
+            api: ApiState {
+                runtime: runtime.clone(),
+            },
+            health: HealthState {
+                subsystem_manager: Arc::new(Mutex::new(SubsystemManager::new(
+                    3,
+                    Duration::from_secs(60),
+                ))),
+            },
+            mcp: crate::mcp::McpHttpState {
+                application: crate::mcp::build_application(runtime.clone()),
+                transport_policy,
+            },
+            ws: WsState {
+                event_tx,
+                transport_policy,
+                cached_token: Some("test-token".to_string()),
+            },
         };
-        let app = build_app(state, &config.server, "test-token");
+        let app = build_app(state, &config.server, "test-token", transport_policy);
         (temp, config, app)
     }
 

@@ -271,15 +271,15 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
 
     let server_handle = if config.server.enabled {
         Some(
-            crate::server::start_server(
-                &config.server,
-                config.clone(),
-                database.clone(),
-                uhoh_dir.clone(),
-                server_event_tx.clone(),
-                restore_coordinator.clone(),
-                subsystem_manager.clone(),
-            )
+            crate::server::start_server(crate::server::ServerBootstrap {
+                config: config.server.clone(),
+                full_config: config.clone(),
+                database: database.clone(),
+                uhoh_dir: uhoh_dir.clone(),
+                event_tx: server_event_tx.clone(),
+                restore_coordinator: restore_coordinator.clone(),
+                subsystem_manager: subsystem_manager.clone(),
+            })
             .await?,
         )
     } else {

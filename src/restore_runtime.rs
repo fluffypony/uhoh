@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use crate::db::{Database, ProjectEntry};
 use crate::events::{publish_event, ServerEvent};
 use crate::restore::{RestoreOutcome, RestoreRequest, RESTORE_IN_PROGRESS_FILE};
-use crate::restore_guards::{RestoreFlagGuard, RestoreLockGuard};
+use crate::restore_guards::{RestoreBusyError, RestoreFlagGuard, RestoreLockGuard};
 
 #[derive(Clone, Default)]
 pub struct RestoreCoordinator {
@@ -89,20 +89,31 @@ impl RestoreMarkerGuard {
         let start_ticks = crate::platform::read_process_start_ticks(pid).unwrap_or(0);
         let payload =
             format!("project_hash={project_hash}\npid={pid}\nstart_ticks={start_ticks}\n");
-        std::fs::OpenOptions::new()
+        let mut file = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
-            .and_then(|mut file| {
-                use std::io::Write;
-                file.write_all(payload.as_bytes())
-            })
-            .with_context(|| {
-                format!(
-                    "Failed to create restore marker (another restore may be in progress): {}",
-                    path.display()
-                )
-            })?;
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(RestoreBusyError::new("Another restore is already in progress").into());
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "Failed to create restore marker (another restore may be in progress): {}",
+                        path.display()
+                    )
+                });
+            }
+        };
+        use std::io::Write;
+        file.write_all(payload.as_bytes()).with_context(|| {
+            format!(
+                "Failed to create restore marker (another restore may be in progress): {}",
+                path.display()
+            )
+        })?;
         Ok(Self { path })
     }
 }

@@ -7,27 +7,24 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// Result of emergency evaluation.
 #[derive(Debug, Clone)]
 pub enum EmergencyEvaluation {
-    /// No emergency detected.
     NoEmergency,
-    /// Emergency thresholds exceeded.
     Triggered {
         verified_deleted_count: usize,
         baseline_count: u64,
         ratio: f64,
         deleted_paths_sample: Vec<String>,
     },
-    /// Threshold exceeded but cooldown is active.
     CooldownSuppressed {
         verified_deleted_count: usize,
         baseline_count: u64,
         ratio: f64,
         cooldown_remaining_secs: u64,
     },
-    /// Skipped: no prior snapshot / restore in progress / overflow.
-    Skipped { reason: &'static str },
+    Skipped {
+        reason: &'static str,
+    },
 }
 
 pub struct EmergencyEvalInput<'a> {
@@ -43,11 +40,6 @@ pub struct EmergencyEvalInput<'a> {
     pub cached_manifest: Option<&'a BTreeSet<String>>,
 }
 
-/// Pure threshold math. Returns true if both conditions are met:
-/// 1. `deleted_count >= min_files`
-/// 2. `deleted_count / baseline_count >= threshold`
-///
-/// Returns false when `baseline_count == 0` (no prior snapshot).
 pub fn exceeds_threshold(
     deleted_count: usize,
     baseline_count: u64,
@@ -64,7 +56,6 @@ pub fn exceeds_threshold(
     ratio >= threshold
 }
 
-/// Compute the deletion ratio. Returns 0.0 if baseline is 0.
 pub fn deletion_ratio(deleted_count: usize, baseline_count: u64) -> f64 {
     if baseline_count == 0 {
         return 0.0;
@@ -72,13 +63,6 @@ pub fn deletion_ratio(deleted_count: usize, baseline_count: u64) -> f64 {
     deleted_count as f64 / baseline_count as f64
 }
 
-/// Expand directory deletions against the cached manifest.
-///
-/// When a `FileDeleted` event arrives for a path that is NOT directly in
-/// the manifest but IS a prefix of manifest entries (i.e., a directory
-/// was deleted), return all manifest paths under that directory.
-///
-/// Uses BTreeSet range queries for O(log n + k) performance.
 pub fn expand_directory_deletion(
     deleted_path_rel: &str,
     manifest: &BTreeSet<String>,
@@ -98,12 +82,6 @@ pub fn expand_directory_deletion(
         .collect()
 }
 
-/// Verify which manifest paths are truly deleted by stat-checking the filesystem.
-///
-/// Only counts a file as deleted if `symlink_metadata(abs_path)` returns NotFound.
-/// This eliminates false positives from ephemeral files and platform-specific
-/// watcher quirks. Note: renames are counted as deletions of the old path
-/// (which is correct — the file at that path no longer exists).
 pub fn verify_deletions_against_manifest(
     project_root: &Path,
     manifest_paths: &BTreeSet<String>,
@@ -121,9 +99,6 @@ pub fn verify_deletions_against_manifest(
         .collect()
 }
 
-/// Full emergency evaluation combining all checks.
-///
-/// This is the main entry point called from the daemon's debounce processor.
 pub fn evaluate_emergency(input: EmergencyEvalInput<'_>) -> EmergencyEvaluation {
     let EmergencyEvalInput {
         deleted_paths_hint_count,
@@ -205,7 +180,6 @@ pub fn evaluate_emergency(input: EmergencyEvalInput<'_>) -> EmergencyEvaluation 
     }
 }
 
-/// Determine severity based on deletion ratio.
 pub fn severity_for_ratio(ratio: f64) -> &'static str {
     if ratio >= 0.5 {
         "critical"

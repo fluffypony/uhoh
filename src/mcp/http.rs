@@ -1,9 +1,18 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
 
-use crate::server::McpState;
+use crate::transport_security::TransportSecurityPolicy;
 
-use super::protocol::{JsonRpcRequest, JsonRpcResponse};
+use super::{
+    protocol::{JsonRpcRequest, JsonRpcResponse},
+    McpApplication,
+};
+
+#[derive(Clone)]
+pub struct McpHttpState {
+    pub application: McpApplication,
+    pub transport_policy: TransportSecurityPolicy,
+}
 
 pub async fn get_not_supported() -> impl IntoResponse {
     (
@@ -26,11 +35,11 @@ pub async fn delete_not_supported() -> impl IntoResponse {
 }
 
 pub async fn handle_http_request(
-    State(state): State<McpState>,
+    State(state): State<McpHttpState>,
     headers: axum::http::HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> axum::response::Response {
-    if !crate::server::auth::validate_host(&headers, state.port) {
+    if !state.transport_policy.validate_host(&headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(JsonRpcResponse::error(
@@ -42,7 +51,7 @@ pub async fn handle_http_request(
             .into_response();
     }
 
-    if !crate::server::auth::validate_origin(&headers) {
+    if !state.transport_policy.validate_origin(&headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(JsonRpcResponse::error(

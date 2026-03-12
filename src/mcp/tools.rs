@@ -1,14 +1,12 @@
 use std::path::Path;
-use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::config::Config;
-use crate::db::Database;
 use crate::event_ledger::{new_event, EventLedger};
-use crate::events::{publish_event, ServerEvent};
+use crate::events::publish_event;
+use crate::project_service::RestoreProjectError;
 use crate::resolve;
-use tokio::sync::broadcast;
+use crate::runtime_bundle::RuntimeBundle;
 
 use super::protocol::JsonRpcResponse;
 
@@ -53,15 +51,6 @@ impl McpToolError {
             data: Some(json!({ "category": "backend" })),
         }
     }
-}
-
-#[derive(Clone)]
-pub struct McpToolContext {
-    pub database: Arc<Database>,
-    pub uhoh_dir: std::path::PathBuf,
-    pub config: Config,
-    pub event_tx: Option<broadcast::Sender<ServerEvent>>,
-    pub restore_runtime: crate::restore_runtime::RestoreRuntime,
 }
 
 /// Shared MCP tool definitions used by both HTTP and STDIO transports.
@@ -150,7 +139,7 @@ pub fn parse_mcp_tool_call(params: Option<Value>) -> Result<(String, Value), Mcp
 }
 
 pub fn dispatch_mcp_tool_call(
-    context: &McpToolContext,
+    context: &RuntimeBundle,
     tool_name: &str,
     args: Value,
 ) -> Result<Value, McpToolError> {
@@ -170,7 +159,7 @@ pub fn mcp_tools_list_response(id: Option<Value>) -> JsonRpcResponse {
 }
 
 pub fn mcp_tool_call_response(
-    context: &McpToolContext,
+    context: &RuntimeBundle,
     id: Option<Value>,
     params: Option<Value>,
 ) -> JsonRpcResponse {
@@ -185,17 +174,18 @@ pub fn mcp_tool_call_response(
     }
 }
 
-fn tool_create_snapshot(context: &McpToolContext, args: Value) -> Result<Value, McpToolError> {
+fn tool_create_snapshot(context: &RuntimeBundle, args: Value) -> Result<Value, McpToolError> {
     let path = args.get("path").and_then(|v| v.as_str());
     let hash = args.get("project_hash").and_then(|v| v.as_str());
     let message = args.get("message").and_then(|v| v.as_str());
 
-    let project = resolve::resolve_project(&context.database, path.or(hash), None)
+    let database = context.database();
+    let project = resolve::resolve_project(database.as_ref(), path.or(hash), None)
         .map_err(classify_lookup_error)?;
     let result = crate::project_service::create_project_snapshot(
-        &context.uhoh_dir,
-        &context.database,
-        &context.config,
+        context.uhoh_dir(),
+        database.as_ref(),
+        context.config(),
         &project,
         "mcp",
         message,
@@ -203,8 +193,8 @@ fn tool_create_snapshot(context: &McpToolContext, args: Value) -> Result<Value, 
     .map_err(|e| McpToolError::internal(e.to_string()))?;
 
     if let Some(snapshot_id) = result.snapshot_id {
-        if let (Some(tx), Some(event)) = (&context.event_tx, result.snapshot_event) {
-            publish_event(tx, event);
+        if let (Some(tx), Some(event)) = (context.event_tx(), result.snapshot_event) {
+            publish_event(&tx, event);
         }
         Ok(json!({
             "content": [{"type": "text", "text": format!("Snapshot created: {}", crate::cas::id_to_base58(snapshot_id))}],
@@ -217,16 +207,16 @@ fn tool_create_snapshot(context: &McpToolContext, args: Value) -> Result<Value, 
     }
 }
 
-fn tool_list_snapshots(context: &McpToolContext, args: Value) -> Result<Value, McpToolError> {
+fn tool_list_snapshots(context: &RuntimeBundle, args: Value) -> Result<Value, McpToolError> {
     let path = args.get("path").and_then(|v| v.as_str());
     let hash = args.get("project_hash").and_then(|v| v.as_str());
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-    let project = resolve::resolve_project(&context.database, path.or(hash), None)
+    let database = context.database();
+    let project = resolve::resolve_project(database.as_ref(), path.or(hash), None)
         .map_err(classify_lookup_error)?;
-    let snapshots = context
-        .database
+    let snapshots = database
         .list_snapshots_paginated(&project.hash, limit, offset)
         .map_err(|e| McpToolError::internal(e.to_string()))?;
 
@@ -253,7 +243,7 @@ fn tool_list_snapshots(context: &McpToolContext, args: Value) -> Result<Value, M
     }))
 }
 
-fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value, McpToolError> {
+fn tool_restore_snapshot(context: &RuntimeBundle, args: Value) -> Result<Value, McpToolError> {
     let snapshot_id = args
         .get("snapshot_id")
         .and_then(|v| v.as_str())
@@ -277,7 +267,8 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
     let hash = args.get("project_hash").and_then(|v| v.as_str());
     let target_path = args.get("target_path").and_then(|v| v.as_str());
 
-    let project = resolve::resolve_project(&context.database, path.or(hash), None)
+    let database = context.database();
+    let project = resolve::resolve_project(database.as_ref(), path.or(hash), None)
         .map_err(classify_lookup_error)?;
 
     if let Some(tp) = target_path {
@@ -286,8 +277,8 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
     }
 
     let outcome = crate::project_service::restore_project_snapshot(
-        &context.restore_runtime,
-        &context.config,
+        &context.restore_runtime(),
+        context.config(),
         &project,
         &snapshot_id,
         dry_run,
@@ -313,7 +304,7 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
 }
 
 fn handle_pre_notify_tool_call(
-    context: &McpToolContext,
+    context: &RuntimeBundle,
     args: Value,
 ) -> Result<Value, McpToolError> {
     let agent = required_string_field(&args, "agent")?.to_string();
@@ -328,10 +319,11 @@ fn handle_pre_notify_tool_call(
     event.path = path;
     event.detail = Some(format!("action={action}"));
 
-    let ledger = if let Some(tx) = &context.event_tx {
-        EventLedger::new(context.database.clone()).with_event_publisher(tx.clone())
+    let database = context.database();
+    let ledger = if let Some(tx) = context.event_tx() {
+        EventLedger::new(database.clone()).with_event_publisher(tx)
     } else {
-        EventLedger::new(context.database.clone())
+        EventLedger::new(database)
     };
     let event_id = ledger
         .append(event)
@@ -362,16 +354,11 @@ fn classify_lookup_error(err: anyhow::Error) -> McpToolError {
     }
 }
 
-fn classify_restore_error(err: anyhow::Error) -> McpToolError {
-    let message = err.to_string();
-    let lowered = message.to_ascii_lowercase();
-    if lowered.contains("not found") {
-        McpToolError::not_found(message)
-    } else if lowered.contains("already in progress") {
-        McpToolError::conflict(message)
-    } else if lowered.contains("invalid") || lowered.contains("requires confirm") {
-        McpToolError::invalid_params(message)
-    } else {
-        McpToolError::internal(message)
+fn classify_restore_error(err: RestoreProjectError) -> McpToolError {
+    match err {
+        RestoreProjectError::NotFound(message) => McpToolError::not_found(message),
+        RestoreProjectError::Conflict(message) => McpToolError::conflict(message),
+        RestoreProjectError::InvalidInput(message) => McpToolError::invalid_params(message),
+        RestoreProjectError::Internal(err) => McpToolError::internal(err.to_string()),
     }
 }

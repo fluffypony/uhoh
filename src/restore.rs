@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
+use std::fmt;
 use std::path::Path;
 
 use crate::cas;
@@ -33,6 +34,31 @@ pub struct RestoreRequest<'a> {
     pub pre_restore_snapshot: Option<PreRestoreSnapshot<'a>>,
     pub confirm_large_delete: Option<&'a dyn Fn(usize) -> Result<bool>>,
 }
+
+#[derive(Debug)]
+pub enum RestoreApplyError {
+    SnapshotNotFound,
+    TargetPathNotFound { path: String, snapshot_id: String },
+    ConfirmationRequired { delete_count: usize },
+}
+
+impl fmt::Display for RestoreApplyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SnapshotNotFound => f.write_str("Snapshot not found"),
+            Self::TargetPathNotFound { path, snapshot_id } => {
+                write!(f, "File '{path}' was not found in snapshot {snapshot_id}")
+            }
+            Self::ConfirmationRequired { delete_count } => write!(
+                f,
+                "Refusing to delete {} tracked files without confirmation. Re-run with force or confirm the restore from the caller.",
+                delete_count
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RestoreApplyError {}
 
 pub fn restore_project(
     uhoh_dir: &Path,
@@ -197,7 +223,7 @@ pub(crate) fn apply_restore(
 
     let snap = database
         .find_snapshot_by_base58(&project.hash, id_str)?
-        .context("Snapshot not found")?;
+        .ok_or(RestoreApplyError::SnapshotNotFound)?;
     let snap_id_str = cas::id_to_base58(snap.snapshot_id);
 
     let project_path = Path::new(&project.current_path);
@@ -218,11 +244,11 @@ pub(crate) fn apply_restore(
     if let Some(filter) = target_filter.as_ref() {
         target_files.retain(|file| file.path == *filter);
         if target_files.is_empty() {
-            anyhow::bail!(
-                "File '{}' was not found in snapshot {}",
-                target_path.unwrap_or_default(),
-                snap_id_str
-            );
+            return Err(RestoreApplyError::TargetPathNotFound {
+                path: target_path.unwrap_or_default().to_string(),
+                snapshot_id: snap_id_str.clone(),
+            }
+            .into());
         }
     }
 
@@ -336,10 +362,10 @@ pub(crate) fn apply_restore(
                 None => false,
             };
             if !confirmed {
-                anyhow::bail!(
-                    "Refusing to delete {} tracked files without confirmation. Re-run with force or confirm the restore from the caller.",
-                    to_delete.len()
-                );
+                return Err(RestoreApplyError::ConfirmationRequired {
+                    delete_count: to_delete.len(),
+                }
+                .into());
             }
         }
 

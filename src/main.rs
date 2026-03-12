@@ -4,7 +4,6 @@ use clap::Parser;
 #[cfg(all(unix, target_os = "linux"))]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use tracing::warn;
 
 use uhoh::cas;
 use uhoh::cli::{Cli, Commands, LedgerAction};
@@ -14,8 +13,6 @@ use uhoh::commands::{
 };
 use uhoh::config;
 use uhoh::db;
-use uhoh::marker;
-use uhoh::snapshot;
 
 // Deduplicated: use library function for ~/.uhoh
 fn uhoh_dir() -> PathBuf {
@@ -59,7 +56,7 @@ async fn main() -> Result<()> {
     // - If current folder is not registered: register and create an initial snapshot
     // - If it is registered: create a quick snapshot and revert to the previous snapshot
     if std::env::args().len() == 1 {
-        return run_zero_verb().await;
+        return run_zero_verb();
     }
 
     let cli = Cli::parse();
@@ -96,7 +93,7 @@ async fn main() -> Result<()> {
         Commands::Diff { id1, id2 } => project_commands::diff(&uhoh, &database, id1, id2)?,
         Commands::Cat { path, id } => project_commands::cat(&uhoh, &database, &path, &id)?,
         Commands::Log { path } => project_commands::log(&database, &path)?,
-        Commands::Mcp => runtime_commands::run_mcp(&uhoh)?,
+        Commands::Mcp => uhoh::mcp::run_stdio_server(&uhoh)?,
         Commands::Start { service } => runtime_commands::start(&uhoh, &database, service).await?,
         Commands::Stop => runtime_commands::stop(&uhoh)?,
         Commands::Restart => runtime_commands::restart(&uhoh)?,
@@ -268,7 +265,8 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-async fn run_zero_verb() -> Result<()> {
+
+fn run_zero_verb() -> Result<()> {
     let uhoh = ensure_uhoh_dir()?;
     let database = db::Database::open(&uhoh.join("uhoh.db"))?;
     let cwd = dunce::canonicalize(std::env::current_dir()?)?;
@@ -294,62 +292,7 @@ async fn run_zero_verb() -> Result<()> {
         return Ok(());
     }
 
-    // Not registered: behave like `uhoh add` for this directory
-    // Guard against watching the uhoh data directory itself (inception loop)
-    let uhoh_home = uhoh.clone();
-    if uhoh_home.starts_with(&cwd) {
-        anyhow::bail!(
-            "Refusing to watch parent directory of uhoh data directory. \
-             Please run uhoh from a project subdirectory."
-        );
-    }
-
-    command_shared::maybe_start_daemon(&uhoh)?;
-    let project_path = cwd;
-
-    if let Some(existing_hash) = marker::read_marker(&project_path)? {
-        if let Some(existing) = database.get_project(&existing_hash)? {
-            let canonical = dunce::canonicalize(&project_path)?;
-            if existing.current_path != canonical.to_string_lossy().as_ref() {
-                database.update_project_path(&existing_hash, &canonical.to_string_lossy())?;
-                println!("Updated project path: {}", canonical.display());
-            } else {
-                println!("Already registered: {}", canonical.display());
-            }
-            return Ok(());
-        }
-    }
-
-    let git_dir = project_path.join(".git");
-    if !git_dir.exists() {
-        warn!(
-            "Not a git repo. Marker at {0}/.uhoh — add to your ignore file.",
-            project_path.display()
-        );
-        eprintln!("⚠ Warning: Not a git repo. Add `.uhoh` to your ignore file.");
-    }
-
-    let project_hash = marker::create_marker(&project_path)?;
-    let canonical = dunce::canonicalize(&project_path)?;
-    database.add_project(&project_hash, &canonical.to_string_lossy())?;
-    println!("Registered: {}", canonical.display());
-
-    let cfg = config::Config::load(&uhoh.join("config.toml"))?;
-    snapshot::create_snapshot(
-        &uhoh,
-        &database,
-        &cfg,
-        snapshot::CreateSnapshotRequest {
-            project_hash: &project_hash,
-            project_path: &canonical,
-            trigger: "manual",
-            message: Some("Initial snapshot"),
-            changed_paths: None,
-        },
-    )?;
-    println!("Initial snapshot created.");
-
-    Ok(())
+    project_commands::add(&uhoh, &database, Some(cwd.to_string_lossy().into_owned()))
 }
 
 async fn run_doctor(

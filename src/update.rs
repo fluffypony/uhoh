@@ -138,7 +138,7 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
     }
 
     // Apply update
-    apply_update(uhoh_dir, &binary).await?;
+    apply_update(uhoh_dir, &binary)?;
     println!(
         "Updated to {}. Restart the daemon with `uhoh restart`.",
         latest.tag_name
@@ -200,7 +200,7 @@ async fn dns_verify_hash_inner(version: &str, asset: &str) -> Result<String> {
     Ok(txt.to_string())
 }
 
-async fn apply_update(uhoh_dir: &Path, binary: &[u8]) -> Result<()> {
+fn apply_update(uhoh_dir: &Path, binary: &[u8]) -> Result<()> {
     let exe_path = std::env::current_exe()?;
 
     // Keep backup for rollback

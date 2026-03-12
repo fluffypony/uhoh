@@ -14,12 +14,6 @@ use crate::update;
 
 use super::shared::is_daemon_running;
 
-pub fn run_mcp(uhoh: &Path) -> Result<()> {
-    let config_path = uhoh.join("config.toml");
-    let config = config::Config::load(&config_path)?;
-    crate::mcp::run_stdio_server(&config)
-}
-
 pub async fn start(uhoh: &Path, database: &db::Database, service: bool) -> Result<()> {
     if service {
         daemon::run_foreground(uhoh, Arc::new(database.clone_handle())).await?;

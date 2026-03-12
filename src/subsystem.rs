@@ -110,7 +110,7 @@ pub struct SubsystemManager {
     runners: Vec<SubsystemRunner>,
     shutdown: CancellationToken,
     max_restarts: u32,
-    _restart_window: Duration,
+    restart_window: Duration,
 }
 
 impl SubsystemManager {
@@ -119,7 +119,7 @@ impl SubsystemManager {
             runners: Vec::new(),
             shutdown: CancellationToken::new(),
             max_restarts,
-            _restart_window: restart_window,
+            restart_window,
         }
     }
 
@@ -179,14 +179,14 @@ impl SubsystemManager {
             let now = std::time::Instant::now();
             runner
                 .restart_times
-                .retain(|t| now.duration_since(*t) <= self._restart_window);
+                .retain(|t| now.duration_since(*t) <= self.restart_window);
             runner.restart_times.push(now);
             if runner.restart_times.len() as u32 > self.max_restarts {
                 tracing::error!(
                     "Subsystem '{}' exceeded restart threshold ({} in {:?}), leaving disabled",
                     runner.name,
                     self.max_restarts,
-                    self._restart_window
+                    self.restart_window
                 );
                 continue;
             }

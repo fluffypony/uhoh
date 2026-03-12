@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 use super::ApiState;
+use crate::project_service::RestoreProjectError;
 use crate::resolve;
 
 #[derive(Deserialize)]
@@ -34,6 +35,36 @@ pub struct DiffParams {
 pub struct TimelineParams {
     pub from: Option<String>,
     pub to: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateSnapshotBody {
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetSnapshotPinBody {
+    pinned: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RestoreSnapshotBody {
+    dry_run: bool,
+    confirm: bool,
+    target_path: Option<String>,
+}
+
+impl Default for RestoreSnapshotBody {
+    fn default() -> Self {
+        Self {
+            dry_run: true,
+            confirm: false,
+            target_path: None,
+        }
+    }
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -90,6 +121,17 @@ impl From<serde_json::Error> for ApiError {
     }
 }
 
+impl From<RestoreProjectError> for ApiError {
+    fn from(err: RestoreProjectError) -> Self {
+        match err {
+            RestoreProjectError::NotFound(message) => ApiError::not_found(message),
+            RestoreProjectError::Conflict(message) => ApiError::conflict(message),
+            RestoreProjectError::InvalidInput(message) => ApiError::invalid_input(message),
+            RestoreProjectError::Internal(err) => ApiError::internal(err),
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         (
@@ -113,8 +155,8 @@ fn bad_request_response(error: impl ToString) -> axum::response::Response {
     ApiError::invalid_input(error).into_response()
 }
 
-pub async fn list_projects(State(state): State<ApiState>) -> impl IntoResponse {
-    let db = state.database.clone();
+pub(crate) async fn list_projects(State(state): State<ApiState>) -> impl IntoResponse {
+    let db = state.runtime.database();
     let result = tokio::task::spawn_blocking(move || db.list_projects()).await;
     match result {
         Ok(Ok(projects)) => {
@@ -139,12 +181,12 @@ pub async fn list_projects(State(state): State<ApiState>) -> impl IntoResponse {
     }
 }
 
-pub async fn list_snapshots(
+pub(crate) async fn list_snapshots(
     State(state): State<ApiState>,
     Path(hash): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> impl IntoResponse {
-    let db = state.database.clone();
+    let db = state.runtime.database();
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
     let result =
@@ -174,11 +216,11 @@ pub async fn list_snapshots(
     }
 }
 
-pub async fn get_snapshot(
+pub(crate) async fn get_snapshot(
     State(state): State<ApiState>,
     Path((hash, snap_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let db = state.database.clone();
+    let db = state.runtime.database();
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
@@ -204,11 +246,11 @@ pub async fn get_snapshot(
     }
 }
 
-pub async fn get_snapshot_files(
+pub(crate) async fn get_snapshot_files(
     State(state): State<ApiState>,
     Path((hash, snap_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let db = state.database.clone();
+    let db = state.runtime.database();
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let id = crate::cas::base58_to_id(&snap_id)
             .ok_or_else(|| ApiError::invalid_input("Invalid snapshot ID"))
@@ -335,13 +377,13 @@ fn insert_into_tree(
     }
 }
 
-pub async fn get_diff(
+pub(crate) async fn get_diff(
     State(state): State<ApiState>,
     Path((hash, snap_id)): Path<(String, String)>,
     Query(params): Query<DiffParams>,
 ) -> impl IntoResponse {
-    let db = state.database.clone();
-    let uhoh_dir = state.uhoh_dir.clone();
+    let db = state.runtime.database();
+    let uhoh_dir = state.runtime.uhoh_dir_buf();
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
@@ -363,7 +405,7 @@ pub async fn get_diff(
         // When no previous snapshot exists (first snapshot), use empty base
         // so all files show as additions instead of "no diff"
         let base_files = match base_rowid {
-            Some(rowid) => db.get_snapshot_files(rowid).unwrap_or_default(),
+            Some(rowid) => db.get_snapshot_files(rowid)?,
             None => Vec::new(),
         };
 
@@ -435,12 +477,12 @@ pub async fn get_diff(
     }
 }
 
-pub async fn get_file_content(
+pub(crate) async fn get_file_content(
     State(state): State<ApiState>,
     Path((hash, snap_id, file_path)): Path<(String, String, String)>,
 ) -> impl IntoResponse {
-    let db = state.database.clone();
-    let uhoh_dir = state.uhoh_dir.clone();
+    let db = state.runtime.database();
+    let uhoh_dir = state.runtime.uhoh_dir_buf();
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Vec<u8>> {
         let project =
             resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::not_found)?;
@@ -487,19 +529,16 @@ pub async fn get_file_content(
     }
 }
 
-pub async fn create_snapshot(
+pub(crate) async fn create_snapshot(
     State(state): State<ApiState>,
     Path(hash): Path<String>,
-    Json(body): Json<Value>,
+    Json(body): Json<CreateSnapshotBody>,
 ) -> impl IntoResponse {
-    let db = state.database.clone();
-    let cfg = state.config.clone();
-    let uhoh_dir = state.uhoh_dir.clone();
-    let message = body
-        .get("message")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let event_tx = state.event_tx.clone();
+    let db = state.runtime.database();
+    let cfg = state.runtime.config_owned();
+    let uhoh_dir = state.runtime.uhoh_dir_buf();
+    let message = body.message;
+    let event_tx = state.runtime.event_tx();
 
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let project =
@@ -514,8 +553,8 @@ pub async fn create_snapshot(
         )
         .map_err(ApiError::invalid_input)?;
         if let Some(id) = result.snapshot_id {
-            if let Some(event) = result.snapshot_event {
-                crate::events::publish_event(&event_tx, event);
+            if let (Some(tx), Some(event)) = (event_tx.as_ref(), result.snapshot_event) {
+                crate::events::publish_event(tx, event);
             }
             Ok(json!({ "snapshot_id": crate::cas::id_to_base58(id) }))
         } else {
@@ -530,17 +569,14 @@ pub async fn create_snapshot(
     }
 }
 
-pub async fn set_snapshot_pin(
+pub(crate) async fn set_snapshot_pin(
     State(state): State<ApiState>,
     Path((hash, snap_id)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    Json(body): Json<SetSnapshotPinBody>,
 ) -> impl IntoResponse {
-    let pinned = body
-        .get("pinned")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let pinned = body.pinned;
 
-    let db = state.database.clone();
+    let db = state.runtime.database();
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
@@ -561,36 +597,44 @@ pub async fn set_snapshot_pin(
     }
 }
 
-pub async fn restore_snapshot(
+pub(crate) async fn restore_snapshot(
     State(state): State<ApiState>,
     Path((hash, snap_id)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    Json(body): Json<RestoreSnapshotBody>,
 ) -> impl IntoResponse {
-    let dry_run = body
-        .get("dry_run")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let confirm = body
-        .get("confirm")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let target_path = body
-        .get("target_path")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let dry_run = body.dry_run;
+    let confirm = body.confirm;
+    let target_path = body.target_path;
     if !dry_run && !confirm {
         return bad_request_response("Non-dry-run restore requires 'confirm': true");
     }
 
-    let db = state.database.clone();
-    let cfg = state.config.clone();
-    let restore_runtime = state.restore_runtime.clone();
+    let db = state.runtime.database();
+    let cfg = state.runtime.config_owned();
+    let restore_runtime = state.runtime.restore_runtime();
+    let target_path_for_validation = target_path.clone();
     let target_path_for_task = target_path.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-        let project = resolve::resolve_project(&db, Some(&hash), None)?;
-        if let Some(tp) = target_path_for_task.as_deref() {
-            resolve::validate_path_within_project(std::path::Path::new(&project.current_path), tp)?;
+    let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
+        let project =
+            resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::not_found)?;
+        let snapshot = db
+            .find_snapshot_by_base58(&hash, &snap_id)?
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
+            .map_err(|err| err)?;
+        if let Some(tp) = target_path_for_validation.as_deref() {
+            resolve::validate_path_within_project(std::path::Path::new(&project.current_path), tp)
+                .map_err(ApiError::invalid_input)?;
+            let encoded_target = crate::cas::encode_relpath(std::path::Path::new(tp));
+            let target_exists = db
+                .get_snapshot_files(snapshot.rowid)?
+                .into_iter()
+                .any(|file| file.path == encoded_target);
+            if !target_exists {
+                return Err(ApiError::not_found(format!(
+                    "File '{tp}' was not found in snapshot {snap_id}"
+                )));
+            }
         }
 
         let outcome = crate::project_service::restore_project_snapshot(
@@ -616,37 +660,16 @@ pub async fn restore_snapshot(
 
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => classify_restore_api_error(e).into_response(),
+        Ok(Err(err)) => err.into_response(),
         Err(e) => internal_error_response(e),
     }
 }
 
-fn classify_restore_api_error(err: anyhow::Error) -> ApiError {
-    let message = err.to_string();
-    let lowered = message.to_ascii_lowercase();
-    if lowered.contains("not registered")
-        || lowered.contains("no project matching")
-        || lowered.contains("snapshot not found")
-        || lowered.contains("not found")
-    {
-        ApiError::not_found(message)
-    } else if lowered.contains("already in progress") {
-        ApiError::conflict(message)
-    } else if lowered.contains("invalid")
-        || lowered.contains("requires 'confirm'")
-        || lowered.contains("requires confirm")
-    {
-        ApiError::invalid_input(message)
-    } else {
-        ApiError::internal(message)
-    }
-}
-
-pub async fn search(
+pub(crate) async fn search(
     State(state): State<ApiState>,
     Query(params): Query<SearchParams>,
 ) -> impl IntoResponse {
-    let db = state.database.clone();
+    let db = state.runtime.database();
     let q = params.q.clone();
     let project = params.project.clone();
     let limit = params.limit.unwrap_or(50);
@@ -675,12 +698,12 @@ pub async fn search(
     }
 }
 
-pub async fn get_timeline(
+pub(crate) async fn get_timeline(
     State(state): State<ApiState>,
     Path(hash): Path<String>,
     Query(params): Query<TimelineParams>,
 ) -> impl IntoResponse {
-    let db = state.database.clone();
+    let db = state.runtime.database();
     let hash_for_response = hash.clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let summaries =

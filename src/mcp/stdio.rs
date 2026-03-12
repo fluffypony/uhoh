@@ -1,28 +1,29 @@
 use anyhow::Result;
 use serde_json::json;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::sync::Arc;
 
-use crate::config::Config;
 use crate::db::Database;
+use crate::runtime_bundle::{RuntimeBundle, RuntimeBundleConfig};
 
-use super::{JsonRpcRequest, McpExecutor, McpTransportResponse};
+use super::{JsonRpcRequest, McpTransportResponse};
 
-pub fn run_stdio_server(config: &Config) -> Result<()> {
-    let uhoh_dir = crate::uhoh_dir();
+pub fn run_stdio_server(uhoh_dir: &Path) -> Result<()> {
+    let config = crate::config::Config::load(&uhoh_dir.join("config.toml"))?;
     let database = Database::open(&uhoh_dir.join("uhoh.db"))?;
     let database_handle = Arc::new(database.clone_handle());
     let runtime_handle = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let application = super::build_application(
-        database_handle,
-        uhoh_dir.clone(),
-        config.clone(),
-        None,
-        None,
-        McpExecutor::Inline,
-    );
+    let runtime = RuntimeBundle::new(RuntimeBundleConfig {
+        database: database_handle,
+        uhoh_dir: uhoh_dir.to_path_buf(),
+        config,
+        event_tx: None,
+        restore_coordinator: None,
+    });
+    let application = super::build_application(runtime);
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
 

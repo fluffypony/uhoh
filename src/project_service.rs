@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::Path;
 
 use anyhow::Result;
@@ -10,6 +11,45 @@ use crate::restore_runtime::RestoreRuntime;
 pub struct SnapshotCreateResult {
     pub snapshot_id: Option<u64>,
     pub snapshot_event: Option<ServerEvent>,
+}
+
+#[derive(Debug)]
+pub enum RestoreProjectError {
+    NotFound(String),
+    Conflict(String),
+    InvalidInput(String),
+    Internal(anyhow::Error),
+}
+
+impl RestoreProjectError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::NotFound(message) | Self::Conflict(message) | Self::InvalidInput(message) => {
+                message.clone()
+            }
+            Self::Internal(err) => err.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for RestoreProjectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(message) | Self::Conflict(message) | Self::InvalidInput(message) => {
+                f.write_str(message)
+            }
+            Self::Internal(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for RestoreProjectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Internal(err) => Some(err.root_cause()),
+            _ => None,
+        }
+    }
 }
 
 pub fn create_project_snapshot(
@@ -49,7 +89,7 @@ pub fn restore_project_snapshot(
     snapshot_id: &str,
     dry_run: bool,
     target_path: Option<&str>,
-) -> Result<crate::restore::RestoreOutcome> {
+) -> std::result::Result<crate::restore::RestoreOutcome, RestoreProjectError> {
     crate::restore_runtime::restore_project(
         restore_runtime,
         project,
@@ -66,6 +106,7 @@ pub fn restore_project_snapshot(
             confirm_large_delete: None,
         },
     )
+    .map_err(classify_restore_error)
 }
 
 fn build_snapshot_created_event(
@@ -85,4 +126,24 @@ fn build_snapshot_created_event(
         file_count: row.file_count as usize,
         message: message.map(str::to_string),
     })
+}
+
+fn classify_restore_error(err: anyhow::Error) -> RestoreProjectError {
+    if let Some(typed) = err.downcast_ref::<crate::restore::RestoreApplyError>() {
+        return match typed {
+            crate::restore::RestoreApplyError::SnapshotNotFound
+            | crate::restore::RestoreApplyError::TargetPathNotFound { .. } => {
+                RestoreProjectError::NotFound(typed.to_string())
+            }
+            crate::restore::RestoreApplyError::ConfirmationRequired { .. } => {
+                RestoreProjectError::InvalidInput(typed.to_string())
+            }
+        };
+    }
+
+    if let Some(typed) = err.downcast_ref::<crate::restore_guards::RestoreBusyError>() {
+        return RestoreProjectError::Conflict(typed.to_string());
+    }
+
+    RestoreProjectError::Internal(err)
 }

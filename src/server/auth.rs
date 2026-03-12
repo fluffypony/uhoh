@@ -10,14 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use subtle::ConstantTimeEq;
 
+use crate::transport_security::TransportSecurityPolicy;
+
 #[derive(Clone)]
 pub struct AuthToken(pub String);
-
-#[derive(Clone, Copy)]
-pub struct AuthConfig {
-    pub require_auth: bool,
-    pub mcp_require_auth: bool,
-}
 
 pub fn generate_token() -> String {
     let mut rng = rand::thread_rng();
@@ -49,7 +45,7 @@ pub fn write_port_file(uhoh_dir: &Path, port: u16) -> anyhow::Result<()> {
 }
 
 pub async fn auth_middleware(
-    State(auth_config): State<AuthConfig>,
+    State(auth_policy): State<TransportSecurityPolicy>,
     headers: HeaderMap,
     request: Request,
     next: Next,
@@ -67,12 +63,12 @@ pub async fn auth_middleware(
     }
 
     if path == "/mcp" {
-        if !auth_config.mcp_require_auth {
+        if !auth_policy.requires_mcp_auth() {
             return next.run(request).await;
         }
     } else if path == "/ws" {
         return next.run(request).await;
-    } else if !auth_config.require_auth {
+    } else if !auth_policy.requires_http_auth() {
         return next.run(request).await;
     } else if matches!(method, Method::GET | Method::HEAD) {
         return next.run(request).await;
@@ -107,12 +103,12 @@ fn token_matches(provided: &str, expected: &str) -> bool {
 }
 
 pub async fn host_validation_middleware(
-    State(expected_port): State<u16>,
+    State(transport_policy): State<TransportSecurityPolicy>,
     headers: HeaderMap,
     request: Request,
     next: Next,
 ) -> Response {
-    if !validate_host(&headers, expected_port) {
+    if !transport_policy.validate_host(&headers) {
         return (
             StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({
@@ -123,44 +119,4 @@ pub async fn host_validation_middleware(
     }
 
     next.run(request).await
-}
-
-pub fn validate_host(headers: &HeaderMap, expected_port: u16) -> bool {
-    if let Some(host) = headers.get("host") {
-        if let Ok(host_s) = host.to_str() {
-            let allowed = [
-                format!("127.0.0.1:{expected_port}"),
-                format!("localhost:{expected_port}"),
-                format!("[::1]:{expected_port}"),
-                "127.0.0.1".to_string(),
-                "localhost".to_string(),
-                "[::1]".to_string(),
-            ];
-            return allowed.iter().any(|h| h == host_s);
-        }
-    }
-    true
-}
-
-/// Validate the Origin header to defend against DNS rebinding attacks.
-/// If an Origin header is present, it must be a loopback address.
-/// Requests without an Origin header are allowed (non-browser clients).
-pub fn validate_origin(headers: &HeaderMap) -> bool {
-    if let Some(origin) = headers.get("origin") {
-        if let Ok(origin_s) = origin.to_str() {
-            // Parse the URL and check the host component exactly,
-            // not with starts_with (which would accept localhost.evil.com).
-            if let Ok(parsed) = url::Url::parse(origin_s) {
-                if let Some(host) = parsed.host_str() {
-                    return host == "127.0.0.1"
-                        || host == "localhost"
-                        || host == "::1"
-                        || host == "[::1]";
-                }
-            }
-            return false;
-        }
-        return false;
-    }
-    true // No Origin header (non-browser client) — allow
 }

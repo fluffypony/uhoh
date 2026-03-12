@@ -1,4 +1,26 @@
 use std::collections::HashSet;
+use std::fmt;
+
+#[derive(Debug)]
+pub struct RestoreBusyError {
+    message: String,
+}
+
+impl RestoreBusyError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for RestoreBusyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RestoreBusyError {}
 
 pub struct RestoreLockGuard {
     locks: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
@@ -15,7 +37,9 @@ impl RestoreLockGuard {
             Err(poisoned) => poisoned.into_inner(),
         };
         if guard.contains(&key) {
-            anyhow::bail!("Restore already in progress for this project");
+            return Err(
+                RestoreBusyError::new("Restore already in progress for this project").into(),
+            );
         }
         guard.insert(key.clone());
         drop(guard);
@@ -38,7 +62,7 @@ pub struct RestoreFlagGuard {
 impl RestoreFlagGuard {
     pub fn acquire(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> anyhow::Result<Self> {
         if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!("Another restore is already in progress");
+            return Err(RestoreBusyError::new("Another restore is already in progress").into());
         }
         Ok(Self { flag })
     }
