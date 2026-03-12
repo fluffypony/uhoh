@@ -70,9 +70,23 @@ pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) ->
             "Undoing operation \"{}\": restoring to snapshot {id_str}",
             completed.label
         );
-        crate::restore::cmd_restore(
-            uhoh_dir, database, project, &id_str, None, false,
-            true, // force (since this is an undo, we're intentional)
+        let cfg = crate::config::Config::load(&uhoh_dir.join("config.toml"))?;
+        crate::restore::restore_project(
+            uhoh_dir,
+            database,
+            project,
+            crate::restore::RestoreRequest {
+                snapshot_id: &id_str,
+                target_path: None,
+                dry_run: false,
+                force: true,
+                pre_restore_snapshot: Some(crate::restore::PreRestoreSnapshot {
+                    trigger: "pre-restore",
+                    message: Some(format!("Before restore to {id_str}")),
+                    config: &cfg,
+                }),
+                confirm_large_delete: None,
+            },
         )?;
     } else {
         println!(

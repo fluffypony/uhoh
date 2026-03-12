@@ -1,8 +1,8 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::AppState;
-use crate::mcp_protocol::{dispatch_protocol_request, JsonRpcRequest, JsonRpcResponse, ProtocolAction};
+use crate::mcp_protocol::{JsonRpcRequest, JsonRpcResponse};
 
 pub async fn mcp_get_not_supported() -> impl IntoResponse {
     (
@@ -53,44 +53,24 @@ pub async fn handle_mcp(
             .into_response();
     }
 
-    match dispatch_protocol_request(request) {
-        ProtocolAction::Notification => StatusCode::ACCEPTED.into_response(),
-        ProtocolAction::Response(response) => (StatusCode::OK, Json(response)).into_response(),
-        ProtocolAction::ToolsList { id } => {
-            let response = crate::mcp_tools::tools_list_response(id);
-            (StatusCode::OK, Json(response)).into_response()
-        }
-        ProtocolAction::ToolsCall { id, params } => {
-            let response = handle_tools_call(state, id, params).await;
-            (StatusCode::OK, Json(response)).into_response()
-        }
-    }
-}
-
-async fn handle_tools_call(
-    state: AppState,
-    id: Option<Value>,
-    params: Option<Value>,
-) -> JsonRpcResponse {
-    let request_id = id.clone();
-    let tool_context = crate::mcp_tools::McpToolContext {
-        database: state.database.clone(),
-        uhoh_dir: state.uhoh_dir.clone(),
-        config: state.config.clone(),
-        event_tx: Some(state.event_tx.clone()),
-        restore_in_progress: Some(crate::mcp_tools::RestoreInProgressFlag::Shared(
-            state.restore_in_progress.clone(),
-        )),
-        restore_locks: Some(state.restore_locks.clone()),
+    let runtime = crate::mcp_tools::McpRuntime {
+        tools: crate::mcp_tools::McpToolContext {
+            database: state.database.clone(),
+            uhoh_dir: state.uhoh_dir.clone(),
+            config: state.config.clone(),
+            event_tx: Some(state.event_tx.clone()),
+            restore_in_progress: Some(crate::mcp_tools::RestoreInProgressFlag::Shared(
+                state.restore_in_progress.clone(),
+            )),
+            restore_locks: Some(state.restore_locks.clone()),
+        },
+        executor: crate::mcp_tools::McpToolExecutor::SpawnBlocking,
     };
 
-    let result = tokio::task::spawn_blocking(move || {
-        crate::mcp_tools::tools_call_response(&tool_context, id, params)
-    })
-    .await;
-
-    match result {
-        Ok(response) => response,
-        Err(err) => JsonRpcResponse::error(request_id, -32000, format!("Internal error: {err}")),
+    match crate::mcp_tools::handle_json_rpc_request(runtime, request).await {
+        crate::mcp_tools::McpTransportResponse::Notification => StatusCode::ACCEPTED.into_response(),
+        crate::mcp_tools::McpTransportResponse::Response(response) => {
+            (StatusCode::OK, Json(response)).into_response()
+        }
     }
 }

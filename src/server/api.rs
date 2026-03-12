@@ -36,20 +36,89 @@ pub struct TimelineParams {
     pub to: Option<String>,
 }
 
+type ApiResult<T> = Result<T, ApiError>;
+
+struct ApiError {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+}
+
+impl ApiError {
+    fn invalid_input(message: impl ToString) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: message.to_string(),
+        }
+    }
+
+    fn not_found(message: impl ToString) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: message.to_string(),
+        }
+    }
+
+    fn conflict(message: impl ToString) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "conflict",
+            message: message.to_string(),
+        }
+    }
+
+    fn internal(message: impl ToString) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "internal",
+            message: message.to_string(),
+        }
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(err: anyhow::Error) -> Self {
+        ApiError::internal(err)
+    }
+}
+
+impl From<serde_json::Error> for ApiError {
+    fn from(err: serde_json::Error) -> Self {
+        ApiError::internal(err)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            self.status,
+            Json(json!({
+                "error": {
+                    "code": self.code,
+                    "message": self.message,
+                }
+            })),
+        )
+            .into_response()
+    }
+}
+
 fn internal_error_response(error: impl ToString) -> axum::response::Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "error": error.to_string() })),
-    )
-        .into_response()
+    ApiError::internal(error).into_response()
 }
 
 fn bad_request_response(error: impl ToString) -> axum::response::Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({ "error": error.to_string() })),
-    )
-        .into_response()
+    ApiError::invalid_input(error).into_response()
+}
+
+fn not_found_response(error: impl ToString) -> axum::response::Response {
+    ApiError::not_found(error).into_response()
+}
+
+fn conflict_response(error: impl ToString) -> axum::response::Response {
+    ApiError::conflict(error).into_response()
 }
 
 pub async fn list_projects(State(state): State<AppState>) -> impl IntoResponse {
@@ -118,10 +187,11 @@ pub async fn get_snapshot(
     Path((hash, snap_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let db = state.database.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+    let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
-            .ok_or_else(|| anyhow::anyhow!("Snapshot not found"))?;
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
+            .map_err(|err| err)?;
         Ok(json!({
             "id": crate::cas::id_to_base58(snap.snapshot_id),
             "rowid": snap.rowid,
@@ -137,11 +207,7 @@ pub async fn get_snapshot(
 
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(Err(err)) => err.into_response(),
         Err(e) => internal_error_response(e),
     }
 }
@@ -151,17 +217,23 @@ pub async fn get_snapshot_files(
     Path((hash, snap_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let db = state.database.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+    let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let id = crate::cas::base58_to_id(&snap_id)
-            .ok_or_else(|| anyhow::anyhow!("Invalid snapshot ID"))?;
+            .ok_or_else(|| ApiError::invalid_input("Invalid snapshot ID"))
+            .map_err(|err| err)?;
         if id == 0 {
-            anyhow::bail!("Snapshot ID '1' maps to reserved value 0; valid IDs start from '2'");
+            return Err(ApiError::invalid_input(
+                "Snapshot ID '1' maps to reserved value 0; valid IDs start from '2'",
+            ));
         }
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
-            .ok_or_else(|| anyhow::anyhow!("Snapshot not found"))?;
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
+            .map_err(|err| err)?;
         if snap.snapshot_id != id {
-            anyhow::bail!("Snapshot does not belong to requested project");
+            return Err(ApiError::invalid_input(
+                "Snapshot does not belong to requested project",
+            ));
         }
         let files = db.get_snapshot_files(snap.rowid)?;
         let tree = build_file_tree(&files);
@@ -184,11 +256,7 @@ pub async fn get_snapshot_files(
     .await;
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(Err(err)) => err.into_response(),
         Err(e) => internal_error_response(e),
     }
 }
@@ -264,16 +332,18 @@ pub async fn get_diff(
 ) -> impl IntoResponse {
     let db = state.database.clone();
     let uhoh_dir = state.uhoh_dir.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+    let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
-            .ok_or_else(|| anyhow::anyhow!("Snapshot not found"))?;
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
+            .map_err(|err| err)?;
         let files = db.get_snapshot_files(snap.rowid)?;
 
         let base_rowid = if let Some(base_id) = params.against.as_ref() {
             Some(
                 db.find_snapshot_by_base58(&hash, base_id)?
-                    .ok_or_else(|| anyhow::anyhow!("Base snapshot not found"))?
+                    .ok_or_else(|| ApiError::not_found("Base snapshot not found"))
+                    .map_err(|err| err)?
                     .rowid,
             )
         } else {
@@ -350,11 +420,7 @@ pub async fn get_diff(
     .await;
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(Err(err)) => err.into_response(),
         Err(e) => internal_error_response(e),
     }
 }
@@ -365,23 +431,26 @@ pub async fn get_file_content(
 ) -> impl IntoResponse {
     let db = state.database.clone();
     let uhoh_dir = state.uhoh_dir.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
-        let project = resolve::resolve_project(&db, Some(&hash), None)?;
+    let result = tokio::task::spawn_blocking(move || -> ApiResult<Vec<u8>> {
+        let project =
+            resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::not_found)?;
         let clean_path = file_path.trim_start_matches('/').replace('\\', "/");
-        resolve::validate_path_within_project(
-            std::path::Path::new(&project.current_path),
-            &clean_path,
-        )?;
+        resolve::validate_path_within_project(std::path::Path::new(&project.current_path), &clean_path)
+            .map_err(ApiError::invalid_input)?;
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
-            .ok_or_else(|| anyhow::anyhow!("Snapshot not found"))?;
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
+            .map_err(|err| err)?;
         let file = db
             .get_snapshot_files(snap.rowid)?
             .into_iter()
             .find(|f| f.path == clean_path)
-            .ok_or_else(|| anyhow::anyhow!("File not found in snapshot"))?;
+            .ok_or_else(|| ApiError::not_found("File not found in snapshot"))
+            .map_err(|err| err)?;
         if !file.stored {
-            anyhow::bail!("File content is not stored for this snapshot entry");
+            return Err(ApiError::invalid_input(
+                "File content is not stored for this snapshot entry",
+            ));
         }
         Ok(crate::cas::read_blob(&uhoh_dir.join("blobs"), &file.hash)?.unwrap_or_default())
     })
@@ -400,11 +469,7 @@ pub async fn get_file_content(
             )
                 .into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(Err(err)) => err.into_response(),
         Err(e) => internal_error_response(e),
     }
 }
@@ -423,18 +488,22 @@ pub async fn create_snapshot(
         .map(str::to_string);
     let event_tx = state.event_tx.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-        let project = resolve::resolve_project(&db, Some(&hash), None)?;
+    let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
+        let project =
+            resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::not_found)?;
         let info = crate::snapshot::create_snapshot(
             &uhoh_dir,
             &db,
-            &project.hash,
-            std::path::Path::new(&project.current_path),
-            "api",
-            message.as_deref(),
             &cfg,
-            None,
-        )?;
+            crate::snapshot::CreateSnapshotRequest {
+                project_hash: &project.hash,
+                project_path: std::path::Path::new(&project.current_path),
+                trigger: "api",
+                message: message.as_deref(),
+                changed_paths: None,
+            },
+        )
+        .map_err(ApiError::invalid_input)?;
         if let Some(id) = info {
             if let Some(rowid) = db.latest_snapshot_rowid(&project.hash)? {
                 if let Some(row) = db.get_snapshot_by_rowid(rowid)? {
@@ -456,11 +525,7 @@ pub async fn create_snapshot(
     .await;
     match result {
         Ok(Ok(value)) => (StatusCode::CREATED, Json(value)).into_response(),
-        Ok(Err(e)) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(Err(err)) => err.into_response(),
         Err(e) => internal_error_response(e),
     }
 }
@@ -476,10 +541,11 @@ pub async fn set_snapshot_pin(
         .unwrap_or(false);
 
     let db = state.database.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+    let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
-            .ok_or_else(|| anyhow::anyhow!("Snapshot not found"))?;
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
+            .map_err(|err| err)?;
         db.pin_snapshot(snap.rowid, pinned)?;
         Ok(json!({
             "id": crate::cas::id_to_base58(snap.snapshot_id),
@@ -490,11 +556,7 @@ pub async fn set_snapshot_pin(
 
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(Err(err)) => err.into_response(),
         Err(e) => internal_error_response(e),
     }
 }
@@ -517,11 +579,7 @@ pub async fn restore_snapshot(
         .and_then(|v| v.as_str())
         .map(str::to_string);
     if !dry_run && !confirm {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Non-dry-run restore requires 'confirm': true"})),
-        )
-            .into_response();
+        return bad_request_response("Non-dry-run restore requires 'confirm': true");
     }
 
     let db = state.database.clone();
@@ -529,6 +587,7 @@ pub async fn restore_snapshot(
     let restore_in_progress = state.restore_in_progress.clone();
     let restore_locks = state.restore_locks.clone();
     let event_tx = state.event_tx.clone();
+    let cfg = state.config.clone();
     let target_path_for_task = target_path.clone();
 
     let restore_key = if !dry_run {
@@ -541,25 +600,22 @@ pub async fn restore_snapshot(
         .await
         {
             Ok(Ok(key)) => Some(key),
-            Ok(Err(e)) => return bad_request_response(e),
+            Ok(Err(e)) => return not_found_response(e),
             Err(e) => return internal_error_response(format!("Internal error: {e}")),
         }
     } else {
         None
     };
 
-    let mut lock_guard: Option<super::restore_guards::RestoreLockGuard> = None;
+    let mut lock_guard: Option<crate::restore_guards::RestoreLockGuard> = None;
     if let Some(restore_key) = restore_key {
-        match super::restore_guards::RestoreLockGuard::acquire(restore_locks.clone(), restore_key) {
+        match crate::restore_guards::RestoreLockGuard::acquire(restore_locks.clone(), restore_key)
+        {
             Ok(guard) => {
                 lock_guard = Some(guard);
             }
             Err(e) => {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(json!({ "error": e.to_string() })),
-                )
-                    .into_response()
+                return conflict_response(e)
             }
         }
     }
@@ -571,21 +627,29 @@ pub async fn restore_snapshot(
         }
 
         let _restore_guard = if !dry_run {
-            Some(super::restore_guards::RestoreFlagGuard::acquire(
+            Some(crate::restore_guards::RestoreFlagGuard::acquire(
                 restore_in_progress.clone(),
             )?)
         } else {
             None
         };
 
-        let outcome = crate::restore::cmd_restore(
+        let outcome = crate::restore::restore_project(
             &uhoh_dir,
             &db,
             &project,
-            &snap_id,
-            target_path_for_task.as_deref(),
-            dry_run,
-            true,
+            crate::restore::RestoreRequest {
+                snapshot_id: &snap_id,
+                target_path: target_path_for_task.as_deref(),
+                dry_run,
+                force: true,
+                pre_restore_snapshot: Some(crate::restore::PreRestoreSnapshot {
+                    trigger: "pre-restore",
+                    message: Some(format!("Before restore to {snap_id}")),
+                    config: &cfg,
+                }),
+                confirm_large_delete: None,
+            },
         )?;
 
         if !dry_run && outcome.applied {

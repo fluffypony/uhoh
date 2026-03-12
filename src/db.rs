@@ -85,6 +85,17 @@ pub struct SearchResult {
     pub match_context: String,
 }
 
+pub struct CreateSnapshotRow<'a> {
+    pub project_hash: &'a str,
+    pub snapshot_id: u64,
+    pub timestamp: &'a str,
+    pub trigger: &'a str,
+    pub message: &'a str,
+    pub pinned: bool,
+    pub files: &'a [SnapFileEntry],
+    pub deleted: &'a [DeletedFile],
+}
+
 #[derive(Debug, Clone)]
 pub struct EventLedgerEntry {
     pub id: i64,
@@ -614,18 +625,17 @@ impl Database {
     // === Snapshots ===
 
     /// Create a snapshot in a single transaction (atomic).
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_snapshot(
-        &self,
-        project_hash: &str,
-        snapshot_id: u64,
-        timestamp: &str,
-        trigger: &str,
-        message: &str,
-        pinned: bool,
-        files: &[SnapFileEntry],
-        deleted: &[DeletedFile],
-    ) -> Result<(i64, u64)> {
+    pub fn create_snapshot(&self, request: CreateSnapshotRow<'_>) -> Result<(i64, u64)> {
+        let CreateSnapshotRow {
+            project_hash,
+            snapshot_id,
+            timestamp,
+            trigger,
+            message,
+            pinned,
+            files,
+            deleted,
+        } = request;
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 

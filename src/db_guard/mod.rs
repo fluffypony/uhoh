@@ -61,6 +61,66 @@ pub fn quote_pg_ident(input: &str) -> Result<String> {
 
 const GUARD_TICK_INTERVAL_SECS: i64 = 30;
 
+trait DbGuardEngine {
+    fn tick(
+        &self,
+        subsystem: &mut DbGuardSubsystem,
+        ctx: &SubsystemContext,
+        guard: &DbGuardEntry,
+    ) -> Result<()>;
+}
+
+struct SqliteEngine;
+struct PostgresEngine;
+struct MysqlEngine;
+
+impl DbGuardEngine for SqliteEngine {
+    fn tick(
+        &self,
+        subsystem: &mut DbGuardSubsystem,
+        ctx: &SubsystemContext,
+        guard: &DbGuardEntry,
+    ) -> Result<()> {
+        sqlite_guard::tick_sqlite_guard(ctx, guard, &mut subsystem.sqlite_versions)
+    }
+}
+
+impl DbGuardEngine for PostgresEngine {
+    fn tick(
+        &self,
+        _subsystem: &mut DbGuardSubsystem,
+        ctx: &SubsystemContext,
+        guard: &DbGuardEntry,
+    ) -> Result<()> {
+        postgres::tick_postgres_guard(ctx, guard, GUARD_TICK_INTERVAL_SECS)
+    }
+}
+
+impl DbGuardEngine for MysqlEngine {
+    fn tick(
+        &self,
+        subsystem: &mut DbGuardSubsystem,
+        ctx: &SubsystemContext,
+        guard: &DbGuardEntry,
+    ) -> Result<()> {
+        let state = subsystem.mysql_states.entry(guard.name.clone()).or_default();
+        mysql::tick_mysql_guard(ctx, guard, state)
+    }
+}
+
+static SQLITE_ENGINE: SqliteEngine = SqliteEngine;
+static POSTGRES_ENGINE: PostgresEngine = PostgresEngine;
+static MYSQL_ENGINE: MysqlEngine = MysqlEngine;
+
+fn resolve_guard_engine(engine: &str) -> Option<&'static dyn DbGuardEngine> {
+    match engine {
+        "sqlite" => Some(&SQLITE_ENGINE),
+        "postgres" => Some(&POSTGRES_ENGINE),
+        "mysql" => Some(&MYSQL_ENGINE),
+        _ => None,
+    }
+}
+
 pub struct DbGuardSubsystem {
     healthy: bool,
     last_failure: Option<String>,
@@ -269,19 +329,15 @@ impl DbGuardSubsystem {
 
     fn tick_guard_engine(&mut self, ctx: &SubsystemContext, guard: &DbGuardEntry) -> Result<()> {
         tracing::trace!("db_guard tick via {} engine", guard.engine);
-        match guard.engine.as_str() {
-            "sqlite" => sqlite_guard::tick_sqlite_guard(ctx, guard, &mut self.sqlite_versions),
-            "postgres" => postgres::tick_postgres_guard(ctx, guard, GUARD_TICK_INTERVAL_SECS),
-            "mysql" => {
-                let state = self.mysql_states.entry(guard.name.clone()).or_default();
-                mysql::tick_mysql_guard(ctx, guard, state)
-            }
-            _ => anyhow::bail!(
-                "unsupported db guard engine '{}' for guard {}",
-                guard.engine,
-                guard.name
-            ),
-        }
+        resolve_guard_engine(guard.engine.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unsupported db guard engine '{}' for guard {}",
+                    guard.engine,
+                    guard.name
+                )
+            })?
+            .tick(self, ctx, guard)
     }
 
     fn record_guard_tick_failure(

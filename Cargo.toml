@@ -51,15 +51,12 @@ base64 = "0.22"
 syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
 
 # HTTP client (for AI sidecar + updates)
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 tokio-postgres-rustls = "0.13.0"
 rustls = "0.23"
 rustls-native-certs = "0.8.3"
 axum = { version = "0.8", features = ["json", "ws"] }
-tower = "0.5"
-tower-http = "0.6"
-http = "1"
 futures-util = "0.3"
 
 # DNS resolution (supplementary update verification)

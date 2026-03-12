@@ -6,10 +6,12 @@ use serde_json::{json, Value};
 use crate::config::Config;
 use crate::db::Database;
 use crate::event_ledger::{new_event, EventLedger};
-use crate::mcp_protocol::JsonRpcResponse;
+use crate::mcp_protocol::{
+    dispatch_protocol_request, JsonRpcRequest, JsonRpcResponse, ProtocolAction,
+};
 use crate::resolve;
+use crate::restore_guards::{RestoreFlagGuard, RestoreLockGuard, StaticRestoreFlagGuard};
 use crate::server::events::ServerEvent;
-use crate::server::restore_guards::{RestoreFlagGuard, RestoreLockGuard, StaticRestoreFlagGuard};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone)]
@@ -48,6 +50,23 @@ pub struct McpToolContext {
 pub enum RestoreInProgressFlag {
     Shared(Arc<std::sync::atomic::AtomicBool>),
     Global(&'static std::sync::atomic::AtomicBool),
+}
+
+#[derive(Clone, Copy)]
+pub enum McpToolExecutor {
+    Inline,
+    SpawnBlocking,
+}
+
+#[derive(Clone)]
+pub struct McpRuntime {
+    pub tools: McpToolContext,
+    pub executor: McpToolExecutor,
+}
+
+pub enum McpTransportResponse {
+    Notification,
+    Response(JsonRpcResponse),
 }
 
 /// Shared MCP tool definitions used by both HTTP and STDIO transports.
@@ -172,6 +191,46 @@ pub fn tools_call_response(
     }
 }
 
+pub async fn handle_json_rpc_request(
+    runtime: McpRuntime,
+    request: JsonRpcRequest,
+) -> McpTransportResponse {
+    match dispatch_protocol_request(request) {
+        ProtocolAction::Notification => McpTransportResponse::Notification,
+        ProtocolAction::Response(response) => McpTransportResponse::Response(response),
+        ProtocolAction::ToolsList { id } => {
+            McpTransportResponse::Response(tools_list_response(id))
+        }
+        ProtocolAction::ToolsCall { id, params } => {
+            let response = handle_tools_call(runtime, id, params).await;
+            McpTransportResponse::Response(response)
+        }
+    }
+}
+
+async fn handle_tools_call(
+    runtime: McpRuntime,
+    id: Option<Value>,
+    params: Option<Value>,
+) -> JsonRpcResponse {
+    match runtime.executor {
+        McpToolExecutor::Inline => tools_call_response(&runtime.tools, id, params),
+        McpToolExecutor::SpawnBlocking => {
+            let request_id = id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                tools_call_response(&runtime.tools, id, params)
+            })
+            .await;
+            match result {
+                Ok(response) => response,
+                Err(err) => {
+                    JsonRpcResponse::error(request_id, -32000, format!("Internal error: {err}"))
+                }
+            }
+        }
+    }
+}
+
 fn tool_create_snapshot(context: &McpToolContext, args: Value) -> Result<Value, McpToolError> {
     let path = args.get("path").and_then(|v| v.as_str());
     let hash = args.get("project_hash").and_then(|v| v.as_str());
@@ -184,12 +243,14 @@ fn tool_create_snapshot(context: &McpToolContext, args: Value) -> Result<Value, 
     let info = crate::snapshot::create_snapshot(
         &context.uhoh_dir,
         &context.database,
-        &project.hash,
-        project_path,
-        "mcp",
-        message,
         &context.config,
-        None,
+        crate::snapshot::CreateSnapshotRequest {
+            project_hash: &project.hash,
+            project_path,
+            trigger: "mcp",
+            message,
+            changed_paths: None,
+        },
     )
     .map_err(|e| McpToolError::internal(e.to_string()))?;
 
@@ -327,14 +388,22 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
         None
     };
 
-    let outcome = crate::restore::cmd_restore(
+    let outcome = crate::restore::restore_project(
         &context.uhoh_dir,
         &context.database,
         &project,
-        &snapshot_id,
-        target_path,
-        dry_run,
-        true,
+        crate::restore::RestoreRequest {
+            snapshot_id: &snapshot_id,
+            target_path,
+            dry_run,
+            force: true,
+            pre_restore_snapshot: Some(crate::restore::PreRestoreSnapshot {
+                trigger: "pre-restore",
+                message: Some(format!("Before restore to {snapshot_id}")),
+                config: &context.config,
+            }),
+            confirm_large_delete: None,
+        },
     )
     .map_err(|e| McpToolError::internal(e.to_string()))?;
 
@@ -367,16 +436,8 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
 }
 
 fn tool_pre_notify(context: &McpToolContext, args: Value) -> Result<Value, McpToolError> {
-    let agent = args
-        .get("agent")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown-agent")
-        .to_string();
-    let action = args
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown-action")
-        .to_string();
+    let agent = required_string_field(&args, "agent")?.to_string();
+    let action = required_string_field(&args, "action")?.to_string();
     let path = args
         .get("path")
         .and_then(|v| v.as_str())
@@ -400,4 +461,11 @@ fn tool_pre_notify(context: &McpToolContext, args: Value) -> Result<Value, McpTo
         "content": [{"type": "text", "text": "pre-notify accepted"}],
         "event_id": event_id,
     }))
+}
+
+fn required_string_field<'a>(args: &'a Value, field: &str) -> Result<&'a str, McpToolError> {
+    args.get(field)
+        .ok_or_else(|| McpToolError::invalid_params(format!("Missing {field}")))?
+        .as_str()
+        .ok_or_else(|| McpToolError::invalid_params(format!("{field} must be a string")))
 }

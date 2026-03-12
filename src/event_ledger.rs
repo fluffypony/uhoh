@@ -3,10 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::broadcast;
 
-use crate::db::{
-    Database, EventLedgerEntry, EventLedgerTraceResult, LedgerSeverity, LedgerSource,
-    NewEventLedgerEntry,
-};
+use crate::db::{Database, LedgerSeverity, LedgerSource, NewEventLedgerEntry};
 use crate::server::events::ServerEvent;
 
 #[derive(Clone)]
@@ -43,25 +40,6 @@ impl EventLedger {
         Ok(id)
     }
 
-    pub fn recent(
-        &self,
-        source: Option<&str>,
-        guard_name: Option<&str>,
-        agent_name: Option<&str>,
-        session: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<EventLedgerEntry>> {
-        self.db
-            .event_ledger_recent(source, guard_name, agent_name, session, limit)
-    }
-
-    pub fn trace(&self, id: i64) -> Result<EventLedgerTraceResult> {
-        self.db.event_ledger_trace(id)
-    }
-
-    pub fn mark_resolved(&self, id: i64) -> Result<()> {
-        self.db.event_ledger_mark_resolved(id)
-    }
 }
 
 /// Map a persisted event ledger entry to a `ServerEvent` for real-time broadcast.

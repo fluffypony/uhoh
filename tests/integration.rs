@@ -79,16 +79,16 @@ fn test_snapshot_creation_and_query() {
     ];
 
     let (rowid, _sid) = db
-        .create_snapshot(
-            "proj1",
-            snap_id,
-            "2025-01-01T00:00:00Z",
-            "manual",
-            "test",
-            false,
-            &files,
-            &[],
-        )
+        .create_snapshot(uhoh::db::CreateSnapshotRow {
+            project_hash: "proj1",
+            snapshot_id: snap_id,
+            timestamp: "2025-01-01T00:00:00Z",
+            trigger: "manual",
+            message: "test",
+            pinned: false,
+            files: &files,
+            deleted: &[],
+        })
         .unwrap();
 
     let snap_files = db.get_snapshot_files(rowid).unwrap();

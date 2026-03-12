@@ -126,13 +126,13 @@ fn event_ledger_trace_and_resolve_roundtrip() {
         .map(|e| e.id)
         .unwrap();
 
-    let trace = ledger.trace(child).unwrap();
+    let trace = db.event_ledger_trace(child).unwrap();
     assert_eq!(trace.entries.len(), 2);
     assert!(!trace.truncated);
     assert_eq!(trace.entries[0].id, child);
     assert_eq!(trace.entries[1].id, root);
 
-    ledger.mark_resolved(child).unwrap();
+    db.event_ledger_mark_resolved(child).unwrap();
     let updated = db.event_ledger_get(child).unwrap().unwrap();
     assert!(updated.resolved);
 }
@@ -314,8 +314,8 @@ fn mcp_proxy_auth_requires_jsonrpc_handshake_only() {
 fn mcp_transports_share_tool_definitions_module() {
     let stdio = std::fs::read_to_string("src/mcp_stdio.rs").expect("read stdio mcp");
     let http = std::fs::read_to_string("src/server/mcp.rs").expect("read http mcp");
-    assert!(stdio.contains("crate::mcp_tools::tool_definitions()"));
-    assert!(http.contains("crate::mcp_tools::tool_definitions()"));
+    assert!(stdio.contains("handle_json_rpc_request"));
+    assert!(http.contains("handle_json_rpc_request"));
 }
 
 #[test]

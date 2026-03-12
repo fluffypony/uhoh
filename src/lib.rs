@@ -22,6 +22,7 @@ pub mod operations;
 pub mod platform;
 pub mod resolve;
 pub mod restore;
+pub mod restore_guards;
 pub mod server;
 pub mod snapshot;
 pub mod subsystem;

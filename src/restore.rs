@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use crate::cas;
@@ -55,6 +54,21 @@ pub struct RestoreOutcome {
     pub files_deleted: usize,
     pub files_to_restore: Vec<String>,
     pub files_to_delete: Vec<String>,
+}
+
+pub struct PreRestoreSnapshot<'a> {
+    pub trigger: &'a str,
+    pub message: Option<String>,
+    pub config: &'a crate::config::Config,
+}
+
+pub struct RestoreRequest<'a> {
+    pub snapshot_id: &'a str,
+    pub target_path: Option<&'a str>,
+    pub dry_run: bool,
+    pub force: bool,
+    pub pre_restore_snapshot: Option<PreRestoreSnapshot<'a>>,
+    pub confirm_large_delete: Option<&'a dyn Fn(usize) -> Result<bool>>,
 }
 
 pub fn restore_symlink_target(content: &[u8], full_path: &Path) -> Result<()> {
@@ -190,15 +204,21 @@ fn quick_hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-pub fn cmd_restore(
+pub fn restore_project(
     uhoh_dir: &Path,
     database: &Database,
     project: &ProjectEntry,
-    id_str: &str,
-    target_path: Option<&str>,
-    dry_run: bool,
-    force: bool,
+    request: RestoreRequest<'_>,
 ) -> Result<RestoreOutcome> {
+    let RestoreRequest {
+        snapshot_id: id_str,
+        target_path,
+        dry_run,
+        force,
+        pre_restore_snapshot,
+        confirm_large_delete,
+    } = request;
+
     let snap = database
         .find_snapshot_by_base58(&project.hash, id_str)?
         .context("Snapshot not found")?;
@@ -318,15 +338,6 @@ pub fn cmd_restore(
         }
 
         if dry_run {
-            println!("Dry run — changes that would be applied:");
-            for path in &to_delete {
-                let decoded = cas::decode_relpath_to_os(path);
-                let display = std::path::Path::new(&decoded).display();
-                println!("  DELETE {display}");
-            }
-            for (path, _, _, _) in &to_restore {
-                println!("  RESTORE {}", path.display());
-            }
             return Ok(RestoreOutcome {
                 snapshot_id: snap_id_str.clone(),
                 dry_run: true,
@@ -349,46 +360,34 @@ pub fn cmd_restore(
         }
 
         if to_delete.len() > 10 && !force {
-            if !std::io::stdin().is_terminal() {
+            let confirmed = match confirm_large_delete {
+                Some(confirm) => confirm(to_delete.len())?,
+                None => false,
+            };
+            if !confirmed {
                 anyhow::bail!(
-                    "Refusing to delete {} files without confirmation. Use --force or run in an interactive terminal.",
+                    "Refusing to delete {} tracked files without confirmation. Re-run with force or confirm the restore from the caller.",
                     to_delete.len()
                 );
             }
-            eprintln!(
-                "⚠ This will delete {} tracked files. Use --force to skip this prompt.",
-                to_delete.len()
-            );
-            eprint!("Continue? [y/N] ");
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            if !input.trim().eq_ignore_ascii_case("y") {
-                println!("Aborted.");
-                return Ok(RestoreOutcome {
-                    snapshot_id: snap_id_str.clone(),
-                    dry_run: false,
-                    applied: false,
-                    files_restored: 0,
-                    files_deleted: 0,
-                    files_to_restore: Vec::new(),
-                    files_to_delete: Vec::new(),
-                });
-            }
         }
 
-        tracing::info!("Creating pre-restore snapshot...");
-        let cfg = crate::config::Config::load(&uhoh_dir.join("config.toml"))?;
-        snapshot::create_snapshot(
-            uhoh_dir,
-            database,
-            &project.hash,
-            project_path,
-            "pre-restore",
-            Some(&format!("Before restore to {id_str}")),
-            &cfg,
-            None,
-        )
-        .context("Pre-restore snapshot failed; aborting restore")?;
+        if let Some(pre_restore) = pre_restore_snapshot {
+            tracing::info!("Creating pre-restore snapshot...");
+            snapshot::create_snapshot(
+                uhoh_dir,
+                database,
+                pre_restore.config,
+                snapshot::CreateSnapshotRequest {
+                    project_hash: &project.hash,
+                    project_path,
+                    trigger: pre_restore.trigger,
+                    message: pre_restore.message.as_deref(),
+                    changed_paths: None,
+                },
+            )
+            .context("Pre-restore snapshot failed; aborting restore")?;
+        }
 
         let mut missing_blobs = Vec::new();
         let mut unstored = Vec::new();
@@ -402,23 +401,12 @@ pub fn cmd_restore(
             }
         }
         if !unstored.is_empty() {
-            eprintln!("⚠ {} file(s) in target snapshot were not stored (likely too large) and will be skipped.", unstored.len());
-            for p in unstored.iter().take(10) {
-                eprintln!("  - {p}");
-            }
-            if unstored.len() > 10 {
-                eprintln!("  ... and {} more", unstored.len() - 10);
-            }
+            tracing::warn!(
+                "{} file(s) in target snapshot were not stored and will be skipped during restore",
+                unstored.len()
+            );
         }
         if !missing_blobs.is_empty() {
-            eprintln!(
-                "ERROR: {} blob(s) missing; aborting restore.",
-                missing_blobs.len()
-            );
-            for (p, h) in missing_blobs.iter().take(10) {
-                let short = &h[..h.len().min(12)];
-                eprintln!("  - {p} ({short}...)");
-            }
             anyhow::bail!("Cannot restore: required blobs missing");
         }
 
@@ -432,13 +420,6 @@ pub fn cmd_restore(
         let restore_tmp = project_path.join(format!(".uhoh-restore-tmp-{unique_suffix}"));
         std::fs::create_dir_all(&restore_tmp)?;
         cleanup_staging = Some(restore_tmp.clone());
-
-        let bar = indicatif::ProgressBar::new(to_restore.len() as u64);
-        bar.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40}] {pos}/{len} files")
-                .unwrap(),
-        );
 
         for (path, hash, executable, is_symlink) in &to_restore {
             if path.is_absolute()
@@ -485,10 +466,7 @@ pub fn cmd_restore(
                     std::fs::set_permissions(&full_path, perms)?;
                 }
             }
-
-            bar.inc(1);
         }
-        bar.finish_and_clear();
 
         for path in &to_delete {
             crate::resolve::validate_path_within_project(project_path, path)?;
@@ -575,15 +553,7 @@ pub fn cmd_restore(
         let _ = std::fs::remove_dir_all(staging);
     }
 
-    let outcome = result?;
-    if outcome.applied {
-        println!(
-            "Restored to snapshot {} ({} files restored, {} deleted)",
-            outcome.snapshot_id, outcome.files_restored, outcome.files_deleted
-        );
-    }
-
-    Ok(outcome)
+    result
 }
 
 #[cfg(test)]

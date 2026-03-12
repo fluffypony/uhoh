@@ -113,6 +113,25 @@ fn resolve_target_project(
     }
 }
 
+fn confirm_restore_delete(count: usize) -> Result<bool> {
+    use std::io::{self, IsTerminal, Write};
+
+    if !io::stdin().is_terminal() {
+        anyhow::bail!(
+            "Refusing to delete {} files without confirmation. Use --force or run in an interactive terminal.",
+            count
+        );
+    }
+
+    eprintln!("⚠ This will delete {} tracked files. Use --force to skip this prompt.", count);
+    eprint!("Continue? [y/N] ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().eq_ignore_ascii_case("y"))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -189,12 +208,14 @@ async fn main() -> Result<()> {
             snapshot::create_snapshot(
                 &uhoh,
                 &database,
-                &project_hash,
-                &canonical,
-                "manual",
-                Some("Initial snapshot"),
                 &cfg,
-                None,
+                snapshot::CreateSnapshotRequest {
+                    project_hash: &project_hash,
+                    project_path: &canonical,
+                    trigger: "manual",
+                    message: Some("Initial snapshot"),
+                    changed_paths: None,
+                },
             )?;
             println!("Initial snapshot created.");
         }
@@ -308,12 +329,14 @@ async fn main() -> Result<()> {
             snapshot::create_snapshot(
                 &uhoh,
                 &database,
-                &project.hash,
-                &project_path,
-                &trigger_str,
-                message.as_deref(),
                 &cfg,
-                None,
+                snapshot::CreateSnapshotRequest {
+                    project_hash: &project.hash,
+                    project_path: &project_path,
+                    trigger: &trigger_str,
+                    message: message.as_deref(),
+                    changed_paths: None,
+                },
             )?;
             println!("Snapshot created.");
         }
@@ -325,7 +348,40 @@ async fn main() -> Result<()> {
             force,
         } => {
             let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
-            let _ = restore::cmd_restore(&uhoh, &database, &project, &id, None, dry_run, force)?;
+            let cfg = config::Config::load(&uhoh.join("config.toml"))?;
+            let pre_restore_message = format!("Before restore to {id}");
+            let confirm_large_delete = |count| confirm_restore_delete(count);
+            let outcome = restore::restore_project(
+                &uhoh,
+                &database,
+                &project,
+                restore::RestoreRequest {
+                    snapshot_id: &id,
+                    target_path: None,
+                    dry_run,
+                    force,
+                    pre_restore_snapshot: Some(restore::PreRestoreSnapshot {
+                        trigger: "pre-restore",
+                        message: Some(pre_restore_message),
+                        config: &cfg,
+                    }),
+                    confirm_large_delete: Some(&confirm_large_delete),
+                },
+            )?;
+            if outcome.dry_run {
+                println!("Dry run — changes that would be applied:");
+                for path in &outcome.files_to_delete {
+                    println!("  DELETE {}", std::path::Path::new(path).display());
+                }
+                for path in &outcome.files_to_restore {
+                    println!("  RESTORE {}", std::path::Path::new(path).display());
+                }
+            } else if outcome.applied {
+                println!(
+                    "Restored to snapshot {} ({} files restored, {} deleted)",
+                    outcome.snapshot_id, outcome.files_restored, outcome.files_deleted
+                );
+            }
         }
 
         Commands::Gitstash { id, target } => {
@@ -2116,12 +2172,14 @@ async fn run_zero_verb() -> Result<()> {
     snapshot::create_snapshot(
         &uhoh,
         &database,
-        &project_hash,
-        &canonical,
-        "manual",
-        Some("Initial snapshot"),
         &cfg,
-        None,
+        snapshot::CreateSnapshotRequest {
+            project_hash: &project_hash,
+            project_path: &canonical,
+            trigger: "manual",
+            message: Some("Initial snapshot"),
+            changed_paths: None,
+        },
     )?;
     println!("Initial snapshot created.");
 

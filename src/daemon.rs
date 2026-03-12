@@ -1631,12 +1631,14 @@ async fn process_pending_snapshots(ctx: SnapshotProcessCtx<'_>) {
                     match snapshot::create_snapshot(
                         &uhoh_dir_buf,
                         &db_for_task,
-                        &project_hash,
-                        &proj_path,
-                        "auto",
-                        None,
                         &cfg,
-                        Some(&changed),
+                        snapshot::CreateSnapshotRequest {
+                            project_hash: &project_hash,
+                            project_path: &proj_path,
+                            trigger: "auto",
+                            message: None,
+                            changed_paths: Some(&changed),
+                        },
                     ) {
                         Ok(Some(id)) => Ok(Some(SnapshotResult::Created(id))),
                         Ok(None) => Ok(Some(SnapshotResult::NoChanges)),
@@ -1684,12 +1686,14 @@ async fn process_pending_snapshots(ctx: SnapshotProcessCtx<'_>) {
                 match snapshot::create_snapshot(
                     &uhoh_dir_buf,
                     &db_for_task,
-                    &project_hash,
-                    &proj_path,
-                    "emergency",
-                    Some(&msg),
                     &cfg,
-                    None, // Full scan for emergency
+                    snapshot::CreateSnapshotRequest {
+                        project_hash: &project_hash,
+                        project_path: &proj_path,
+                        trigger: "emergency",
+                        message: Some(&msg),
+                        changed_paths: None,
+                    },
                 ) {
                     Ok(Some(id)) => Ok(Some(SnapshotResult::Created(id))),
                     Ok(None) => Ok(Some(SnapshotResult::NoChanges)),

@@ -307,16 +307,16 @@ fn test_compaction_preserves_pinned() {
         let message = if i == 0 { "keep" } else { "" };
         let pinned = i == 0;
         let (rowid, _) = database
-            .create_snapshot(
-                "proj",
-                i + 1,
-                &ts.to_rfc3339(),
+            .create_snapshot(uhoh::db::CreateSnapshotRow {
+                project_hash: "proj",
+                snapshot_id: i + 1,
+                timestamp: &ts.to_rfc3339(),
                 trigger,
                 message,
                 pinned,
-                &files,
-                &[],
-            )
+                files: &files,
+                deleted: &[],
+            })
             .unwrap();
         if pinned {
             pin_rowid = Some(rowid);
@@ -356,12 +356,14 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
     let snap1 = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        "emrg1",
-        &project_dir,
-        "auto",
-        None,
         &cfg,
-        None,
+        uhoh::snapshot::CreateSnapshotRequest {
+            project_hash: "emrg1",
+            project_path: &project_dir,
+            trigger: "auto",
+            message: None,
+            changed_paths: None,
+        },
     )
     .unwrap();
     assert!(snap1.is_some());
@@ -375,12 +377,14 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
     let snap2 = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        "emrg1",
-        &project_dir,
-        "auto",
-        None,
         &cfg,
-        None,
+        uhoh::snapshot::CreateSnapshotRequest {
+            project_hash: "emrg1",
+            project_path: &project_dir,
+            trigger: "auto",
+            message: None,
+            changed_paths: None,
+        },
     )
     .unwrap();
     assert!(snap2.is_some());
@@ -420,12 +424,14 @@ fn test_sub_threshold_no_emergency_upgrade() {
     let _ = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        "emrg2",
-        &project_dir,
-        "auto",
-        None,
         &cfg,
-        None,
+        uhoh::snapshot::CreateSnapshotRequest {
+            project_hash: "emrg2",
+            project_path: &project_dir,
+            trigger: "auto",
+            message: None,
+            changed_paths: None,
+        },
     )
     .unwrap();
 
@@ -436,12 +442,14 @@ fn test_sub_threshold_no_emergency_upgrade() {
     let snap2 = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        "emrg2",
-        &project_dir,
-        "auto",
-        None,
         &cfg,
-        None,
+        uhoh::snapshot::CreateSnapshotRequest {
+            project_hash: "emrg2",
+            project_path: &project_dir,
+            trigger: "auto",
+            message: None,
+            changed_paths: None,
+        },
     )
     .unwrap();
     assert!(snap2.is_some());
@@ -466,16 +474,16 @@ fn test_emergency_snapshot_retained_within_window() {
     let deleted: Vec<(String, String, u64, bool, uhoh::cas::StorageMethod)> = Vec::new();
 
     let (rowid, _) = db
-        .create_snapshot(
-            "emrg3",
-            0,
-            &ts_recent,
-            "emergency",
-            "mass delete",
-            false,
-            &files,
-            &deleted,
-        )
+        .create_snapshot(uhoh::db::CreateSnapshotRow {
+            project_hash: "emrg3",
+            snapshot_id: 0,
+            timestamp: &ts_recent,
+            trigger: "emergency",
+            message: "mass delete",
+            pinned: false,
+            files: &files,
+            deleted: &deleted,
+        })
         .unwrap();
 
     let cfg = uhoh::config::CompactionConfig::default();
@@ -501,22 +509,31 @@ fn test_emergency_snapshot_pruned_after_window() {
     let deleted: Vec<(String, String, u64, bool, uhoh::cas::StorageMethod)> = Vec::new();
 
     let (old_rowid, _) = db
-        .create_snapshot(
-            "emrg4",
-            0,
-            &old_ts,
-            "emergency",
-            "old mass delete",
-            false,
-            &files,
-            &deleted,
-        )
+        .create_snapshot(uhoh::db::CreateSnapshotRow {
+            project_hash: "emrg4",
+            snapshot_id: 0,
+            timestamp: &old_ts,
+            trigger: "emergency",
+            message: "old mass delete",
+            pinned: false,
+            files: &files,
+            deleted: &deleted,
+        })
         .unwrap();
 
     // Create a recent snapshot so the old one can be dominated in buckets
     let recent_ts = chrono::Utc::now().to_rfc3339();
     let (_, _) = db
-        .create_snapshot("emrg4", 0, &recent_ts, "auto", "", false, &files, &deleted)
+        .create_snapshot(uhoh::db::CreateSnapshotRow {
+            project_hash: "emrg4",
+            snapshot_id: 0,
+            timestamp: &recent_ts,
+            trigger: "auto",
+            message: "",
+            pinned: false,
+            files: &files,
+            deleted: &deleted,
+        })
         .unwrap();
 
     let cfg = uhoh::config::CompactionConfig {
@@ -549,22 +566,31 @@ fn test_predecessor_protection_in_compaction() {
     // Create predecessor snapshot (old but not emergency)
     let pred_ts = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
     let (pred_rowid, _) = db
-        .create_snapshot("emrg5", 0, &pred_ts, "auto", "", false, &files, &deleted)
+        .create_snapshot(uhoh::db::CreateSnapshotRow {
+            project_hash: "emrg5",
+            snapshot_id: 0,
+            timestamp: &pred_ts,
+            trigger: "auto",
+            message: "",
+            pinned: false,
+            files: &files,
+            deleted: &deleted,
+        })
         .unwrap();
 
     // Create emergency snapshot (recent, within retention)
     let emrg_ts = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
     let (emrg_rowid, _) = db
-        .create_snapshot(
-            "emrg5",
-            0,
-            &emrg_ts,
-            "emergency",
-            "mass delete",
-            false,
-            &files,
-            &deleted,
-        )
+        .create_snapshot(uhoh::db::CreateSnapshotRow {
+            project_hash: "emrg5",
+            snapshot_id: 0,
+            timestamp: &emrg_ts,
+            trigger: "emergency",
+            message: "mass delete",
+            pinned: false,
+            files: &files,
+            deleted: &deleted,
+        })
         .unwrap();
 
     // Aggressive compaction config that would normally prune old snapshots
@@ -612,12 +638,14 @@ fn test_fast_path_directory_deletion_fallback() {
     let _ = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        "dirtest",
-        &project_dir,
-        "auto",
-        None,
         &cfg,
-        None,
+        uhoh::snapshot::CreateSnapshotRequest {
+            project_hash: "dirtest",
+            project_path: &project_dir,
+            trigger: "auto",
+            message: None,
+            changed_paths: None,
+        },
     )
     .unwrap();
 
@@ -629,12 +657,14 @@ fn test_fast_path_directory_deletion_fallback() {
     let snap2 = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        "dirtest",
-        &project_dir,
-        "auto",
-        None,
         &cfg,
-        Some(&changed),
+        uhoh::snapshot::CreateSnapshotRequest {
+            project_hash: "dirtest",
+            project_path: &project_dir,
+            trigger: "auto",
+            message: None,
+            changed_paths: Some(&changed),
+        },
     )
     .unwrap();
     assert!(
@@ -674,12 +704,14 @@ fn test_restore_sets_and_clears_restore_marker_file() {
     let snap = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        "restmark",
-        &project_dir,
-        "manual",
-        Some("baseline"),
         &cfg,
-        None,
+        uhoh::snapshot::CreateSnapshotRequest {
+            project_hash: "restmark",
+            project_path: &project_dir,
+            trigger: "manual",
+            message: Some("baseline"),
+            changed_paths: None,
+        },
     )
     .unwrap()
     .unwrap();
@@ -688,8 +720,24 @@ fn test_restore_sets_and_clears_restore_marker_file() {
     // Modify file then restore
     std::fs::write(project_dir.join("keep.txt"), "v2").unwrap();
     let project = uhoh::resolve::resolve_project(&db, Some("restmark"), None).unwrap();
-    let outcome =
-        uhoh::restore::cmd_restore(&uhoh_dir, &db, &project, &snap_id, None, false, true).unwrap();
+    let outcome = uhoh::restore::restore_project(
+        &uhoh_dir,
+        &db,
+        &project,
+        uhoh::restore::RestoreRequest {
+            snapshot_id: &snap_id,
+            target_path: None,
+            dry_run: false,
+            force: true,
+            pre_restore_snapshot: Some(uhoh::restore::PreRestoreSnapshot {
+                trigger: "pre-restore",
+                message: Some(format!("Before restore to {snap_id}")),
+                config: &cfg,
+            }),
+            confirm_large_delete: None,
+        },
+    )
+    .unwrap();
     assert!(outcome.applied);
 
     let marker = uhoh_dir.join(".restore-in-progress");

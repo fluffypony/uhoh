@@ -2,7 +2,6 @@ pub mod api;
 pub mod auth;
 pub mod events;
 pub mod mcp;
-pub(crate) mod restore_guards;
 pub mod ws;
 
 use anyhow::Result;

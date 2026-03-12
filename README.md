@@ -184,7 +184,7 @@ When enabled, the daemon starts a unified localhost server (default `127.0.0.1:2
 
 WebSocket events: `snapshot_created`, `snapshot_restored`, `ai_summary_completed`, `sidecar_updated`, `mlx_update_status`, `mlx_update_failed`, `db_guard_alert`, `agent_alert`, `project_added`, `project_removed`.
 
-By default, `/api/*` mutating requests and `/mcp` require a bearer token, while read-only `GET` API routes stay open for local UI browsing. `/health`, `/api/v1/health`, and `/ws` are exempt from bearer auth. The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery. The server validates `Host` headers on all requests. `Origin` headers are validated on `/api/*`, `/mcp`, and `/ws` to prevent DNS rebinding.
+By default, write requests under `/api/*` and all `/mcp` requests require a bearer token, while read-only `GET` and `HEAD` API routes stay open for local UI browsing. `/health` and `/api/v1/health` are exempt from bearer auth. `/ws` keeps its own bearer-token check when `server.require_auth = true`. The daemon writes the token to `~/.uhoh/server.token` and the bound port to `~/.uhoh/server.port` for local tooling discovery. The server validates `Host` headers on all requests. `Origin` headers are validated on `/api/*`, `/mcp`, and `/ws` to prevent DNS rebinding.
 
 ## MCP tools
 
@@ -364,7 +364,7 @@ Optional subsystems are feature-gated to keep default builds lean: `audit-trail`
 - `server.bind_address` (default `127.0.0.1`): bind address. Keep loopback-only for security.
 - `server.ui_enabled` (default true): serve Time Machine UI at `/`.
 - `server.mcp_enabled` (default true): serve MCP HTTP endpoint at `/mcp`.
-- `server.require_auth` (default true): require bearer auth for mutating `/api/*` requests (`GET` routes remain open), with `/health`, `/api/v1/health`, and `/ws` exempt.
+- `server.require_auth` (default true): require bearer auth for write requests under `/api/*` (`GET` and `HEAD` routes remain open), with `/health` and `/api/v1/health` exempt. `/ws` still requires a bearer token when this is enabled.
 - `server.mcp_require_auth` (default true): require bearer auth for `/mcp`.
 
 ### Sidecar update settings

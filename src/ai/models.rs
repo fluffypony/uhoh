@@ -53,7 +53,7 @@ pub fn select_model_with_sys(
     })
 }
 
-/// Ensure the model file is present under ~/.uhoh/sidecar and return its path.
+/// Ensure the model file is present under `~/.uhoh/models` and return its path.
 pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Result<PathBuf> {
     let target_dir = uhoh_dir.join("models");
     std::fs::create_dir_all(&target_dir)?;

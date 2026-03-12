@@ -6,8 +6,10 @@ mod mcp_proxy;
 mod profiles;
 mod sandbox;
 mod undo;
-use std::path::Path;
 
+pub use mcp_proxy::{
+    auth_handshake_line as proxy_auth_handshake_line, build_approval_response, ensure_proxy_token,
+};
 pub use profiles::{load_agent_profile, resolve_session_log_path};
 pub use sandbox::{apply_landlock, sandbox_supported};
 pub use undo::resolve_event;
@@ -64,18 +66,6 @@ impl Default for AgentSubsystem {
     fn default() -> Self {
         Self::new()
     }
-}
-
-pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
-    mcp_proxy::ensure_proxy_token(uhoh_dir)
-}
-
-pub fn build_approval_response(token: &str, approval_id: &str, challenge: &str) -> String {
-    mcp_proxy::build_approval_response(token, approval_id, challenge)
-}
-
-pub fn proxy_auth_handshake_line(token: &str) -> String {
-    mcp_proxy::auth_handshake_line(token)
 }
 
 #[async_trait]

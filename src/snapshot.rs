@@ -23,18 +23,28 @@ pub struct CachedFileState {
     pub is_symlink: bool,
 }
 
+pub struct CreateSnapshotRequest<'a> {
+    pub project_hash: &'a str,
+    pub project_path: &'a Path,
+    pub trigger: &'a str,
+    pub message: Option<&'a str>,
+    pub changed_paths: Option<&'a [PathBuf]>,
+}
+
 /// Create a snapshot for a project. Returns the snapshot ID if one was created.
-#[allow(clippy::too_many_arguments)]
 pub fn create_snapshot(
     uhoh_dir: &Path,
     database: &Database,
-    project_hash: &str,
-    project_path: &Path,
-    trigger: &str,
-    message: Option<&str>,
     config: &Config,
-    changed_paths: Option<&[PathBuf]>,
+    request: CreateSnapshotRequest<'_>,
 ) -> Result<Option<u64>> {
+    let CreateSnapshotRequest {
+        project_hash,
+        project_path,
+        trigger,
+        message,
+        changed_paths,
+    } = request;
     let blob_root = uhoh_dir.join("blobs");
 
     // Load previous snapshot for comparison
@@ -76,12 +86,14 @@ pub fn create_snapshot(
             return create_snapshot(
                 uhoh_dir,
                 database,
-                project_hash,
-                project_path,
-                trigger,
-                message,
                 config,
-                None,
+                CreateSnapshotRequest {
+                    project_hash,
+                    project_path,
+                    trigger,
+                    message,
+                    changed_paths: None,
+                },
             );
         }
 
@@ -313,12 +325,14 @@ pub fn create_snapshot(
                             return create_snapshot(
                                 uhoh_dir,
                                 database,
-                                project_hash,
-                                project_path,
-                                trigger,
-                                message,
                                 config,
-                                None,
+                                CreateSnapshotRequest {
+                                    project_hash,
+                                    project_path,
+                                    trigger,
+                                    message,
+                                    changed_paths: None,
+                                },
                             );
                         }
                     }
@@ -605,16 +619,16 @@ pub fn create_snapshot(
     let timestamp = chrono::Utc::now().to_rfc3339();
     let pinned = false;
 
-    let (rowid, snapshot_id) = database.create_snapshot(
+    let (rowid, snapshot_id) = database.create_snapshot(crate::db::CreateSnapshotRow {
         project_hash,
         snapshot_id,
-        &timestamp,
-        actual_trigger,
-        msg,
+        timestamp: &timestamp,
+        trigger: actual_trigger,
+        message: msg,
         pinned,
-        &files_for_manifest,
-        &deleted_for_manifest,
-    )?;
+        files: &files_for_manifest,
+        deleted: &deleted_for_manifest,
+    })?;
 
     let file_paths_str = files_for_manifest
         .iter()

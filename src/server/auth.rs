@@ -1,7 +1,7 @@
 use axum::{
     extract::Request,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -55,13 +55,13 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_string();
+    let method = request.method().clone();
 
     // Exempt health, WebSocket, and UI HTML routes from auth.
     // The UI page must load before the JS auth flow can prompt for a token.
     if path == "/health"
         || path == "/api/v1/health"
-        || path == "/ws"
-        || (!path.starts_with("/api/") && path != "/mcp")
+        || (!path.starts_with("/api/") && path != "/mcp" && path != "/ws")
     {
         return next.run(request).await;
     }
@@ -70,7 +70,11 @@ pub async fn auth_middleware(
         if !auth_config.mcp_require_auth {
             return next.run(request).await;
         }
+    } else if path == "/ws" {
+        return next.run(request).await;
     } else if !auth_config.require_auth {
+        return next.run(request).await;
+    } else if matches!(method, Method::GET | Method::HEAD) {
         return next.run(request).await;
     }
 
@@ -89,7 +93,7 @@ pub async fn auth_middleware(
         return (
             StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({
-                "error": "Bearer token required for mutating operations. Token is in your uhoh data directory (server.token)."
+                "error": "Bearer token required for write operations. Token is in your uhoh data directory (server.token)."
             })),
         )
             .into_response();
