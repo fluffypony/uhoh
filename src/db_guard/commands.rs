@@ -78,7 +78,8 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
                     )
                 })?;
                 if engine == "postgres" {
-                    let outcome = super::store_postgres_credentials_cli(&connection_ref, creds)?;
+                    let outcome =
+                        super::store_postgres_credentials_with_keyring(&connection_ref, creds)?;
                     if outcome.keyring_status.is_degraded() {
                         eprintln!(
                             "Warning: stored credentials for '{}' in the encrypted file backend, but the keyring mirror is unavailable ({})",
@@ -248,7 +249,8 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
                     )?;
                 }
                 "postgres" => {
-                    let creds = super::resolve_postgres_credentials_cli(&guard.connection_ref)?;
+                    let creds =
+                        super::resolve_postgres_credentials_with_keyring(&guard.connection_ref)?;
                     if creds.keyring_status.is_degraded() {
                         eprintln!(
                             "Warning: using {} credentials for '{}'; keyring status is {}",

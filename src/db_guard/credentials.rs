@@ -172,7 +172,9 @@ pub fn resolve_postgres_credentials(connection_ref: &str) -> Result<CredentialMa
     })
 }
 
-pub fn resolve_postgres_credentials_cli(connection_ref: &str) -> Result<CliCredentialResolution> {
+pub fn resolve_postgres_credentials_with_keyring(
+    connection_ref: &str,
+) -> Result<CliCredentialResolution> {
     if let Some(material) = resolve_env_credentials("PG") {
         return Ok(CliCredentialResolution {
             material,
@@ -266,7 +268,7 @@ pub fn store_encrypted_credential(connection_ref: &str, cred: &CredentialMateria
     Ok(())
 }
 
-pub fn store_postgres_credentials_cli(
+pub fn store_postgres_credentials_with_keyring(
     connection_ref: &str,
     cred: &CredentialMaterial,
 ) -> Result<CredentialStoreOutcome> {

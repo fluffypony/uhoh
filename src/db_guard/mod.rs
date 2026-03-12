@@ -5,6 +5,7 @@ mod postgres;
 mod recovery;
 mod sqlite;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -17,12 +18,12 @@ use crate::subsystem::{DbGuardContext, Subsystem, SubsystemContext, SubsystemHea
 pub use commands::handle_cli_action;
 pub use credentials::ensure_guard_dir;
 pub use credentials::resolve_postgres_credentials;
-pub use credentials::resolve_postgres_credentials_cli;
+pub use credentials::resolve_postgres_credentials_with_keyring;
 pub use credentials::resolve_stored_credentials;
 pub use credentials::scrub_dsn;
 pub use credentials::scrub_error_message;
 pub use credentials::store_encrypted_credential;
-pub use credentials::store_postgres_credentials_cli;
+pub use credentials::store_postgres_credentials_with_keyring;
 pub use credentials::CliCredentialResolution;
 pub use credentials::CredentialMaterial;
 pub use credentials::CredentialSource;
@@ -75,6 +76,7 @@ pub struct DbGuardSubsystem {
     last_failure: Option<String>,
     sqlite_versions: HashMap<String, i64>,
     mysql_states: HashMap<String, mysql::MysqlGuardState>,
+    postgres_runtime: Arc<postgres::PostgresGuardRuntime>,
     shutdown: Option<CancellationToken>,
 }
 
@@ -85,6 +87,7 @@ impl DbGuardSubsystem {
             last_failure: None,
             sqlite_versions: HashMap::new(),
             mysql_states: HashMap::new(),
+            postgres_runtime: Arc::new(postgres::PostgresGuardRuntime::new()),
             shutdown: None,
         }
     }
@@ -143,6 +146,7 @@ impl Subsystem for DbGuardSubsystem {
                     let guards_cl = guards.clone();
                     let sqlite_versions = std::mem::take(&mut self.sqlite_versions);
                     let mysql_states = std::mem::take(&mut self.mysql_states);
+                    let postgres_runtime = Arc::clone(&self.postgres_runtime);
                     let shutdown = self.shutdown.clone();
                     let tick_result = tokio::task::spawn_blocking(move || {
                         let mut worker = DbGuardSubsystem {
@@ -150,6 +154,7 @@ impl Subsystem for DbGuardSubsystem {
                             last_failure: None,
                             sqlite_versions,
                             mysql_states,
+                            postgres_runtime,
                             shutdown,
                         };
                         let result = worker.tick_guards(&ctx_cl, &guards_cl);
@@ -187,12 +192,12 @@ impl Subsystem for DbGuardSubsystem {
                 }
             }
         }
-        postgres::shutdown_all_listen_workers();
+        self.postgres_runtime.shutdown_all_listen_workers();
         Ok(())
     }
 
     async fn shutdown(&mut self) -> Result<()> {
-        postgres::shutdown_all_listen_workers();
+        self.postgres_runtime.shutdown_all_listen_workers();
         Ok(())
     }
 
@@ -214,7 +219,7 @@ impl DbGuardSubsystem {
         self.healthy = true;
         self.last_failure = None;
         if let Some(token) = self.shutdown.as_ref() {
-            postgres::reconcile_listen_workers(guards, token)?;
+            postgres::reconcile_listen_workers(&self.postgres_runtime, guards, token)?;
         }
 
         for guard in guards {
@@ -281,7 +286,12 @@ impl DbGuardSubsystem {
         tracing::trace!("db_guard tick via {} engine", guard.engine);
         match guard.engine.as_str() {
             "sqlite" => sqlite::tick_sqlite_guard(ctx, guard, &mut self.sqlite_versions),
-            "postgres" => postgres::tick_postgres_guard(ctx, guard, GUARD_TICK_INTERVAL_SECS),
+            "postgres" => postgres::tick_postgres_guard(
+                &self.postgres_runtime,
+                ctx,
+                guard,
+                GUARD_TICK_INTERVAL_SECS,
+            ),
             "mysql" => {
                 let state = self.mysql_states.entry(guard.name.clone()).or_default();
                 mysql::tick_mysql_guard(ctx, guard, state)

@@ -3,7 +3,6 @@ use rustls::RootCertStore;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use once_cell::sync::Lazy;
 use tokio_postgres::NoTls;
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tokio_util::sync::CancellationToken;
@@ -56,20 +55,56 @@ pub fn build_connect_dsn(connection_ref: &str) -> Result<String> {
     Ok(parts.join(" "))
 }
 
-static PG_DDL_CURSOR: Lazy<Mutex<HashMap<String, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-static PG_RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build postgres task runtime")
-});
+pub(crate) struct PostgresGuardRuntime {
+    task_runtime: Mutex<tokio::runtime::Runtime>,
+    ddl_cursor: Arc<Mutex<HashMap<String, i64>>>,
+    ddl_poll_workers: Mutex<HashMap<String, DdlPollWorker>>,
+}
+
 struct DdlPollWorker {
     queue: std::sync::Arc<Mutex<Vec<String>>>,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
-static PG_DDL_POLL_WORKERS: Lazy<Mutex<HashMap<String, DdlPollWorker>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+
+impl PostgresGuardRuntime {
+    pub(crate) fn new() -> Self {
+        Self {
+            task_runtime: Mutex::new(
+                build_postgres_task_runtime().expect("failed to build postgres task runtime"),
+            ),
+            ddl_cursor: Arc::new(Mutex::new(HashMap::new())),
+            ddl_poll_workers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn shutdown_all_listen_workers(&self) {
+        if let Ok(mut workers) = self.ddl_poll_workers.lock() {
+            for (_, worker) in workers.drain() {
+                worker.cancel.cancel();
+                worker.task.abort();
+            }
+        }
+    }
+
+    fn run_task<T, F>(&self, fut: F) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        let runtime = self
+            .task_runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Postgres task runtime lock poisoned"))?;
+        runtime.block_on(fut)
+    }
+}
+
+fn build_postgres_task_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| anyhow::anyhow!("failed to build postgres task runtime: {err}"))
+}
 
 fn emit_recovery_event(
     ctx: &DbGuardContext,
@@ -102,7 +137,8 @@ fn emit_degraded_event(ctx: &DbGuardContext, guard_name: &str, step: &str, err: 
     }
 }
 
-pub fn tick_postgres_guard(
+pub(crate) fn tick_postgres_guard(
+    runtime: &PostgresGuardRuntime,
     ctx: &DbGuardContext,
     guard: &DbGuardEntry,
     tick_interval_secs: i64,
@@ -111,7 +147,7 @@ pub fn tick_postgres_guard(
         build_connect_dsn(&guard.connection_ref).unwrap_or_else(|_| guard.connection_ref.clone());
 
     if guard.tables_csv.trim() == "*" {
-        if let Err(err) = reconcile_wildcard_delete_triggers(ctx, guard, &poll_dsn) {
+        if let Err(err) = reconcile_wildcard_delete_triggers(runtime, ctx, guard, &poll_dsn) {
             tracing::warn!(
                 "postgres wildcard trigger reconcile failed for {}: {}",
                 guard.name,
@@ -189,9 +225,9 @@ pub fn tick_postgres_guard(
 
     // Lightweight delete-counter polling (use resolved credentials).
     let poll_window_secs = tick_interval_secs.saturating_mul(2).max(1);
-    match poll_delete_count(&poll_dsn, poll_window_secs, &guard.tables_csv) {
+    match poll_delete_count(runtime, &poll_dsn, poll_window_secs, &guard.tables_csv) {
         Ok(deleted_rows) => {
-            let total_rows = match poll_total_row_count(&poll_dsn) {
+            let total_rows = match poll_total_row_count(runtime, &poll_dsn) {
                 Ok(total) => Some(total),
                 Err(err) => {
                     tracing::warn!(
@@ -283,8 +319,8 @@ pub fn tick_postgres_guard(
         }
     }
 
-    let listen_payloads = drain_listen_payloads(&poll_dsn)?;
-    let ddl_payloads = match poll_ddl_events(&poll_dsn, 64) {
+    let listen_payloads = drain_listen_payloads(runtime, &poll_dsn)?;
+    let ddl_payloads = match poll_ddl_events(runtime, &poll_dsn, 64) {
         Ok(payloads) => payloads,
         Err(err) => {
             emit_degraded_event(ctx, &guard.name, "ddl_event_poll", &err);
@@ -343,11 +379,12 @@ pub fn tick_postgres_guard(
 }
 
 fn reconcile_wildcard_delete_triggers(
+    runtime: &PostgresGuardRuntime,
     ctx: &DbGuardContext,
     guard: &DbGuardEntry,
     poll_dsn: &str,
 ) -> Result<()> {
-    let current = fetch_current_schema_tables(poll_dsn)?;
+    let current = fetch_current_schema_tables(runtime, poll_dsn)?;
     if current.is_empty() {
         return Ok(());
     }
@@ -374,7 +411,7 @@ fn reconcile_wildcard_delete_triggers(
     }
 
     if !added.is_empty() {
-        install_delete_counter_triggers_for_tables(poll_dsn, &added)?;
+        install_delete_counter_triggers_for_tables(runtime, poll_dsn, &added)?;
         let mut event = new_event("db_guard", "postgres_wildcard_trigger_reconciled", "info");
         event.guard_name = Some(guard.name.clone());
         event.detail = Some(
@@ -403,9 +440,12 @@ fn reconcile_wildcard_delete_triggers(
     Ok(())
 }
 
-fn fetch_current_schema_tables(connection_ref: &str) -> Result<Vec<String>> {
+fn fetch_current_schema_tables(
+    runtime: &PostgresGuardRuntime,
+    connection_ref: &str,
+) -> Result<Vec<String>> {
     let connection_ref = connection_ref.to_string();
-    run_postgres_task(async move {
+    runtime.run_task(async move {
         let client = pg_connect_spawn(&connection_ref).await?;
         let rows = client
             .query(
@@ -422,6 +462,7 @@ fn fetch_current_schema_tables(connection_ref: &str) -> Result<Vec<String>> {
 }
 
 fn install_delete_counter_triggers_for_tables(
+    runtime: &PostgresGuardRuntime,
     connection_ref: &str,
     tables: &[String],
 ) -> Result<()> {
@@ -430,7 +471,7 @@ fn install_delete_counter_triggers_for_tables(
     }
     let connection_ref = connection_ref.to_string();
     let tables = tables.to_vec();
-    run_postgres_task(async move {
+    runtime.run_task(async move {
         let client = pg_connect_spawn(&connection_ref).await?;
         for table in tables {
             install_delete_counter_trigger_sql(&client, &table).await?;
@@ -724,6 +765,7 @@ pub fn execute_sql(connection_ref: &str, sql: &str) -> Result<()> {
 }
 
 pub(crate) fn reconcile_listen_workers(
+    runtime: &PostgresGuardRuntime,
     guards: &[DbGuardEntry],
     shutdown: &CancellationToken,
 ) -> Result<()> {
@@ -733,7 +775,8 @@ pub(crate) fn reconcile_listen_workers(
         .map(|g| build_connect_dsn(&g.connection_ref).unwrap_or_else(|_| g.connection_ref.clone()))
         .collect();
 
-    let mut workers = PG_DDL_POLL_WORKERS
+    let mut workers = runtime
+        .ddl_poll_workers
         .lock()
         .map_err(|_| anyhow::anyhow!("Postgres DDL poll worker map lock poisoned"))?;
 
@@ -758,8 +801,9 @@ pub(crate) fn reconcile_listen_workers(
         let queue_cl = queue.clone();
         let dsn_cl = dsn.clone();
         let cancel_cl = cancel.clone();
+        let ddl_cursor = Arc::clone(&runtime.ddl_cursor);
         let task = tokio::spawn(async move {
-            run_listen_worker(dsn_cl, queue_cl, cancel_cl).await;
+            run_listen_worker(dsn_cl, queue_cl, cancel_cl, ddl_cursor).await;
         });
         workers.insert(
             dsn,
@@ -774,19 +818,15 @@ pub(crate) fn reconcile_listen_workers(
     Ok(())
 }
 
-pub(crate) fn shutdown_all_listen_workers() {
-    if let Ok(mut workers) = PG_DDL_POLL_WORKERS.lock() {
-        for (_, worker) in workers.drain() {
-            worker.cancel.cancel();
-            worker.task.abort();
-        }
-    }
-}
-
-fn poll_delete_count(connection_ref: &str, window_seconds: i64, tables_csv: &str) -> Result<i64> {
+fn poll_delete_count(
+    runtime: &PostgresGuardRuntime,
+    connection_ref: &str,
+    window_seconds: i64,
+    tables_csv: &str,
+) -> Result<i64> {
     let tables_csv = tables_csv.to_string();
     let connection_ref = connection_ref.to_string();
-    run_postgres_task(async move {
+    runtime.run_task(async move {
         let client = pg_connect_spawn(&connection_ref).await?;
         // Keep helper tables bounded to avoid unbounded growth in monitored DBs.
         let _ = client
@@ -847,8 +887,8 @@ fn poll_delete_count(connection_ref: &str, window_seconds: i64, tables_csv: &str
     })
 }
 
-fn poll_total_row_count(connection_ref: &str) -> Result<i64> {
-    run_postgres_task(async move {
+fn poll_total_row_count(runtime: &PostgresGuardRuntime, connection_ref: &str) -> Result<i64> {
+    runtime.run_task(async move {
         let client = pg_connect_spawn(connection_ref).await?;
 
         // Use pg_class for row estimates (fast, no table scan).
@@ -870,15 +910,20 @@ fn poll_total_row_count(connection_ref: &str) -> Result<i64> {
     })
 }
 
-fn poll_ddl_events(connection_ref: &str, max_rows: i64) -> Result<Vec<String>> {
+fn poll_ddl_events(
+    runtime: &PostgresGuardRuntime,
+    connection_ref: &str,
+    max_rows: i64,
+) -> Result<Vec<String>> {
     let last_seen_id = {
-        let cache = PG_DDL_CURSOR
+        let cache = runtime
+            .ddl_cursor
             .lock()
             .map_err(|_| anyhow::anyhow!("Postgres DDL cursor lock poisoned"))?;
         cache.get(connection_ref).copied().unwrap_or(0)
     };
 
-    let result = run_postgres_task(async move {
+    let result = runtime.run_task(async move {
         let client = pg_connect_spawn(connection_ref).await?;
 
         // Keep helper table bounded to avoid unbounded growth in monitored DBs.
@@ -916,7 +961,8 @@ fn poll_ddl_events(connection_ref: &str, max_rows: i64) -> Result<Vec<String>> {
     })?;
 
     if let Some((id, rows)) = result {
-        let mut cache = PG_DDL_CURSOR
+        let mut cache = runtime
+            .ddl_cursor
             .lock()
             .map_err(|_| anyhow::anyhow!("Postgres DDL cursor lock poisoned"))?;
         cache.insert(connection_ref.to_string(), id);
@@ -930,10 +976,11 @@ async fn run_listen_worker(
     connection_ref: String,
     queue: std::sync::Arc<Mutex<Vec<String>>>,
     shutdown: CancellationToken,
+    ddl_cursor: Arc<Mutex<HashMap<String, i64>>>,
 ) {
     let mut backoff = std::time::Duration::from_secs(1);
     let max_backoff = std::time::Duration::from_secs(30);
-    let mut last_seen_id = match PG_DDL_CURSOR.lock() {
+    let mut last_seen_id = match ddl_cursor.lock() {
         Ok(cache) => cache.get(&connection_ref).copied().unwrap_or(0),
         Err(_) => 0,
     };
@@ -987,7 +1034,7 @@ async fn run_listen_worker(
                                     last_seen_id = last_seen_id.max(id);
                                     fresh.push(payload);
                                 }
-                                if let Ok(mut cache) = PG_DDL_CURSOR.lock() {
+                                if let Ok(mut cache) = ddl_cursor.lock() {
                                     cache.insert(connection_ref.clone(), last_seen_id);
                                 }
                                 if let Ok(mut pending) = queue.lock() {
@@ -1019,8 +1066,12 @@ async fn run_listen_worker(
     }
 }
 
-fn drain_listen_payloads(connection_ref: &str) -> Result<Vec<String>> {
-    let workers = PG_DDL_POLL_WORKERS
+fn drain_listen_payloads(
+    runtime: &PostgresGuardRuntime,
+    connection_ref: &str,
+) -> Result<Vec<String>> {
+    let workers = runtime
+        .ddl_poll_workers
         .lock()
         .map_err(|_| anyhow::anyhow!("Postgres DDL poll worker map lock poisoned"))?;
     let Some(worker) = workers.get(connection_ref) else {
@@ -1056,9 +1107,7 @@ pub(crate) fn run_postgres_task<T, F>(fut: F) -> Result<T>
 where
     F: std::future::Future<Output = Result<T>>,
 {
-    // Reuse a dedicated runtime for postgres task execution to avoid creating
-    // a fresh Tokio runtime on every polling tick.
-    PG_RUNTIME.block_on(fut)
+    build_postgres_task_runtime()?.block_on(fut)
 }
 
 /// Certificate verifier that accepts any server certificate (for sslmode=require).
