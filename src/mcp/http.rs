@@ -1,10 +1,11 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
 
-use super::McpState;
-use crate::mcp_protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::server::McpState;
 
-pub async fn mcp_get_not_supported() -> impl IntoResponse {
+use super::protocol::{JsonRpcRequest, JsonRpcResponse};
+
+pub async fn get_not_supported() -> impl IntoResponse {
     (
         StatusCode::METHOD_NOT_ALLOWED,
         Json(json!({
@@ -14,7 +15,7 @@ pub async fn mcp_get_not_supported() -> impl IntoResponse {
     )
 }
 
-pub async fn mcp_delete_not_supported() -> impl IntoResponse {
+pub async fn delete_not_supported() -> impl IntoResponse {
     (
         StatusCode::METHOD_NOT_ALLOWED,
         Json(json!({
@@ -24,12 +25,12 @@ pub async fn mcp_delete_not_supported() -> impl IntoResponse {
     )
 }
 
-pub async fn handle_mcp(
+pub async fn handle_http_request(
     State(state): State<McpState>,
     headers: axum::http::HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> axum::response::Response {
-    if !super::auth::validate_host(&headers, state.port) {
+    if !crate::server::auth::validate_host(&headers, state.port) {
         return (
             StatusCode::FORBIDDEN,
             Json(JsonRpcResponse::error(
@@ -41,7 +42,7 @@ pub async fn handle_mcp(
             .into_response();
     }
 
-    if !super::auth::validate_origin(&headers) {
+    if !crate::server::auth::validate_origin(&headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(JsonRpcResponse::error(
@@ -53,9 +54,9 @@ pub async fn handle_mcp(
             .into_response();
     }
 
-    match crate::mcp_app::handle_json_rpc_request(state.application.clone(), request).await {
-        crate::mcp_app::McpTransportResponse::Notification => StatusCode::ACCEPTED.into_response(),
-        crate::mcp_app::McpTransportResponse::Response(response) => {
+    match super::handle_json_rpc_request(state.application.clone(), request).await {
+        super::McpTransportResponse::Notification => StatusCode::ACCEPTED.into_response(),
+        super::McpTransportResponse::Response(response) => {
             (StatusCode::OK, Json(response)).into_response()
         }
     }

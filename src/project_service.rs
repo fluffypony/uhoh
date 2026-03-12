@@ -3,8 +3,8 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::db::{Database, ProjectEntry};
+use crate::events::ServerEvent;
 use crate::restore_runtime::RestoreRuntime;
-use crate::server::events::ServerEvent;
 
 #[derive(Debug, Clone)]
 pub struct SnapshotCreateResult {

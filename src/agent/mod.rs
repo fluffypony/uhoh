@@ -3,17 +3,17 @@ mod commands;
 #[cfg(target_os = "linux")]
 mod fanotify;
 mod intercept;
-mod mcp_proxy;
 mod profiles;
+mod proxy;
 mod sandbox;
 mod undo;
 
 pub use commands::handle_cli_action;
-pub use mcp_proxy::{
+pub use profiles::{load_agent_profile, resolve_session_log_path};
+pub use proxy::{
     approve_pending_actions, auth_handshake_line as proxy_auth_handshake_line,
     build_approval_response, deny_pending_actions, ensure_proxy_token,
 };
-pub use profiles::{load_agent_profile, resolve_session_log_path};
 pub use sandbox::{apply_landlock, sandbox_supported};
 pub use undo::resolve_event;
 
@@ -430,7 +430,7 @@ impl AgentSubsystem {
             let token_cl = token.clone();
             self.proxy_shutdown = Some(token);
             self.proxy_task = Some(tokio::spawn(async move {
-                mcp_proxy::run_proxy(ctx_cl, token_cl).await
+                proxy::run_proxy(ctx_cl, token_cl).await
             }));
         }
         Ok(())

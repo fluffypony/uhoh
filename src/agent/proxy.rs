@@ -829,7 +829,7 @@ pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_dangerous_tool_call, random_hex, validate_auth_line};
+    use super::{is_dangerous_tool_call, random_hex, read_approval_response, validate_auth_line};
 
     #[test]
     fn dangerous_tool_pattern_exact_and_substring() {
@@ -873,5 +873,20 @@ mod tests {
             !validate_auth_line(&expected_auth_value, &expected_auth_value)
                 .expect("raw token should fail")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn approval_reader_rejects_symlink_payloads() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("real.approved.json");
+        let link = temp.path().join("approval.approved.json");
+        std::fs::write(&target, r#"{"approval_id":"a","response":"b"}"#).expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        assert!(read_approval_response(&link)
+            .expect("read approval")
+            .is_none());
+        assert!(!link.exists());
     }
 }

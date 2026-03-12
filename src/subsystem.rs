@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::Database;
 use crate::event_ledger::EventLedger;
+use crate::events::ServerEvent;
 
 #[derive(Debug, Clone)]
 pub enum AuditSource {
@@ -34,7 +35,7 @@ pub struct SubsystemContext {
     pub event_ledger: EventLedger,
     pub config: crate::config::Config,
     pub uhoh_dir: std::path::PathBuf,
-    pub server_event_tx: tokio::sync::broadcast::Sender<crate::server::events::ServerEvent>,
+    pub server_event_tx: tokio::sync::broadcast::Sender<ServerEvent>,
 }
 
 #[derive(Clone)]
@@ -58,7 +59,7 @@ pub struct MaintenanceContext {
     pub database: Arc<Database>,
     pub config: crate::config::Config,
     pub uhoh_dir: std::path::PathBuf,
-    pub server_event_tx: tokio::sync::broadcast::Sender<crate::server::events::ServerEvent>,
+    pub server_event_tx: tokio::sync::broadcast::Sender<ServerEvent>,
 }
 
 impl SubsystemContext {

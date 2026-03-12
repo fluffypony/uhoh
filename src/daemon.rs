@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use crate::config::Config;
 use crate::db::Database;
 use crate::event_ledger::EventLedger;
+use crate::events::{publish_event, ServerEvent};
 use crate::notifications::NotificationPipeline;
 use crate::subsystem::{SubsystemContext, SubsystemManager};
 use crate::watcher;
@@ -242,12 +243,12 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
         lock_file // keep alive to hold the lock
     };
 
-    let (server_event_tx, _) = broadcast::channel::<crate::server::events::ServerEvent>(4096);
+    let (server_event_tx, _) = broadcast::channel::<ServerEvent>(4096);
     let restore_coordinator = crate::restore_runtime::RestoreCoordinator::new();
     let restore_in_progress = restore_coordinator.in_progress_flag();
 
     let event_ledger =
-        EventLedger::new(database.clone()).with_server_event_tx(server_event_tx.clone());
+        EventLedger::new(database.clone()).with_event_publisher(server_event_tx.clone());
     let mut subsystem_manager_inner = SubsystemManager::new(5, Duration::from_secs(600));
     subsystem_manager_inner.register(Box::new(crate::db_guard::DbGuardSubsystem::new()));
     subsystem_manager_inner.register(Box::new(crate::agent::AgentSubsystem::new()));
@@ -634,7 +635,7 @@ struct TickMaintenanceCtx<'a> {
     event_ledger: &'a EventLedger,
     subsystem_manager: &'a Arc<Mutex<SubsystemManager>>,
     uhoh_dir: &'a Path,
-    server_event_tx: &'a broadcast::Sender<crate::server::events::ServerEvent>,
+    server_event_tx: &'a broadcast::Sender<ServerEvent>,
     watcher_handle: &'a mut notify::RecommendedWatcher,
     project_states: &'a mut HashMap<String, snapshots::ProjectDaemonState>,
 }
@@ -754,9 +755,12 @@ async fn run_tick_maintenance(ctx: TickMaintenanceCtx<'_>) -> TickOutcome {
     }
     for key in to_remove {
         if let Some(state) = project_states.get(&key) {
-            let _ = server_event_tx.send(crate::server::events::ServerEvent::ProjectRemoved {
-                project_hash: state.hash.clone(),
-            });
+            publish_event(
+                server_event_tx,
+                ServerEvent::ProjectRemoved {
+                    project_hash: state.hash.clone(),
+                },
+            );
         }
         let _ = watcher_handle.unwatch(std::path::Path::new(&key));
         project_states.remove(&key);

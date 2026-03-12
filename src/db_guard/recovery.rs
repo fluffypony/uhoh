@@ -533,6 +533,22 @@ fn cleanup_old_files(dir: &std::path::Path, retention_days: u64) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::load_or_create_machine_key;
+
+    #[test]
+    fn load_or_create_machine_key_persists_and_reuses_master_key_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first = load_or_create_machine_key(temp.path()).expect("initial key");
+        let second = load_or_create_machine_key(temp.path()).expect("reused key");
+
+        assert_eq!(first, second);
+        let raw = std::fs::read_to_string(temp.path().join("master.key")).expect("master.key");
+        assert_eq!(raw.trim(), hex::encode(first));
+    }
+}
+
 pub fn cleanup_retention(dir: &std::path::Path, retention_days: u64) -> Result<()> {
     cleanup_old_files(dir, retention_days)
 }

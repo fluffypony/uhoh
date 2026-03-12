@@ -6,10 +6,13 @@ use serde_json::{json, Value};
 use crate::config::Config;
 use crate::db::Database;
 use crate::event_ledger::{new_event, EventLedger};
-use crate::mcp_protocol::JsonRpcResponse;
+use crate::events::{publish_event, ServerEvent};
 use crate::resolve;
-use crate::server::events::ServerEvent;
 use tokio::sync::broadcast;
+
+use super::protocol::JsonRpcResponse;
+
+const PRE_NOTIFY_TOOL_NAME: &str = "uhoh_pre_notify";
 
 #[derive(Debug, Clone)]
 pub struct McpToolError {
@@ -63,7 +66,7 @@ pub struct McpToolContext {
 
 /// Shared MCP tool definitions used by both HTTP and STDIO transports.
 ///
-/// Tool behavior is centralized here, while `mcp_app` owns JSON-RPC protocol
+/// Tool behavior is centralized here, while `mcp::application` owns JSON-RPC protocol
 /// dispatch and execution so the transport adapters stay thin.
 pub fn tool_definitions() -> serde_json::Value {
     json!({
@@ -113,7 +116,7 @@ pub fn tool_definitions() -> serde_json::Value {
                 }
             },
             {
-                "name": "uhoh_pre_notify",
+                "name": PRE_NOTIFY_TOOL_NAME,
                 "description": "Cooperative pre-action notification for agent actions.",
                 "inputSchema": {
                     "type": "object",
@@ -129,7 +132,7 @@ pub fn tool_definitions() -> serde_json::Value {
     })
 }
 
-pub fn parse_tool_call(params: Option<Value>) -> Result<(String, Value), McpToolError> {
+pub fn parse_mcp_tool_call(params: Option<Value>) -> Result<(String, Value), McpToolError> {
     let params = params.ok_or_else(|| McpToolError::invalid_params("Missing params"))?;
     let tool_name = params
         .get("name")
@@ -146,7 +149,7 @@ pub fn parse_tool_call(params: Option<Value>) -> Result<(String, Value), McpTool
     Ok((tool_name, args))
 }
 
-pub fn dispatch_tool_call(
+pub fn dispatch_mcp_tool_call(
     context: &McpToolContext,
     tool_name: &str,
     args: Value,
@@ -155,28 +158,28 @@ pub fn dispatch_tool_call(
         "create_snapshot" => tool_create_snapshot(context, args),
         "list_snapshots" => tool_list_snapshots(context, args),
         "restore_snapshot" => tool_restore_snapshot(context, args),
-        "uhoh_pre_notify" => tool_pre_notify(context, args),
+        PRE_NOTIFY_TOOL_NAME => handle_pre_notify_tool_call(context, args),
         _ => Err(McpToolError::invalid_params(format!(
             "Unknown tool: {tool_name}"
         ))),
     }
 }
 
-pub fn tools_list_response(id: Option<Value>) -> JsonRpcResponse {
+pub fn mcp_tools_list_response(id: Option<Value>) -> JsonRpcResponse {
     JsonRpcResponse::success(id, tool_definitions())
 }
 
-pub fn tools_call_response(
+pub fn mcp_tool_call_response(
     context: &McpToolContext,
     id: Option<Value>,
     params: Option<Value>,
 ) -> JsonRpcResponse {
-    let (tool_name, args) = match parse_tool_call(params) {
+    let (tool_name, args) = match parse_mcp_tool_call(params) {
         Ok(parsed) => parsed,
         Err(err) => return JsonRpcResponse::error_with_data(id, err.code, err.message, err.data),
     };
 
-    match dispatch_tool_call(context, &tool_name, args) {
+    match dispatch_mcp_tool_call(context, &tool_name, args) {
         Ok(value) => JsonRpcResponse::success(id, value),
         Err(err) => JsonRpcResponse::error_with_data(id, err.code, err.message, err.data),
     }
@@ -201,7 +204,7 @@ fn tool_create_snapshot(context: &McpToolContext, args: Value) -> Result<Value, 
 
     if let Some(snapshot_id) = result.snapshot_id {
         if let (Some(tx), Some(event)) = (&context.event_tx, result.snapshot_event) {
-            let _ = tx.send(event);
+            publish_event(tx, event);
         }
         Ok(json!({
             "content": [{"type": "text", "text": format!("Snapshot created: {}", crate::cas::id_to_base58(snapshot_id))}],
@@ -309,7 +312,10 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
     }))
 }
 
-fn tool_pre_notify(context: &McpToolContext, args: Value) -> Result<Value, McpToolError> {
+fn handle_pre_notify_tool_call(
+    context: &McpToolContext,
+    args: Value,
+) -> Result<Value, McpToolError> {
     let agent = required_string_field(&args, "agent")?.to_string();
     let action = required_string_field(&args, "action")?.to_string();
     let path = args
@@ -323,7 +329,7 @@ fn tool_pre_notify(context: &McpToolContext, args: Value) -> Result<Value, McpTo
     event.detail = Some(format!("action={action}"));
 
     let ledger = if let Some(tx) = &context.event_tx {
-        EventLedger::new(context.database.clone()).with_server_event_tx(tx.clone())
+        EventLedger::new(context.database.clone()).with_event_publisher(tx.clone())
     } else {
         EventLedger::new(context.database.clone())
     };

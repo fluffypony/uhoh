@@ -1274,3 +1274,84 @@ pub(crate) fn connection_requires_tls(connection_ref: &str) -> bool {
 
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_connect_dsn, drain_listen_payloads, parse_watched_tables, reconcile_listen_workers,
+        run_postgres_task, PostgresGuardRuntime,
+    };
+    use crate::db::{DbGuardEngine, DbGuardEntry, DbGuardMode};
+    use tokio_util::sync::CancellationToken;
+
+    fn guard(name: &str, engine: DbGuardEngine, connection_ref: &str) -> DbGuardEntry {
+        DbGuardEntry {
+            id: 1,
+            name: name.to_string(),
+            engine,
+            connection_ref: connection_ref.to_string(),
+            tables_csv: "*".to_string(),
+            watched_tables_cache: None,
+            mode: DbGuardMode::Triggers,
+            created_at: "2026-03-12T00:00:00Z".to_string(),
+            last_baseline_at: None,
+            active: true,
+        }
+    }
+
+    #[test]
+    fn parse_watched_tables_trims_entries_and_treats_wildcard_as_all_tables() {
+        assert!(parse_watched_tables("*").is_empty());
+        assert_eq!(
+            parse_watched_tables(" users , orders ,, audit_log "),
+            vec!["users", "orders", "audit_log"]
+        );
+    }
+
+    #[test]
+    fn run_postgres_task_executes_future_without_nested_runtime_helpers() {
+        let value = run_postgres_task(async { Ok::<_, anyhow::Error>(42) }).expect("task result");
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn reconcile_listen_workers_adds_reuses_and_removes_postgres_workers() {
+        let runtime = PostgresGuardRuntime::new();
+        let shutdown = CancellationToken::new();
+        let postgres_guard = guard("pg", DbGuardEngine::Postgres, "host=localhost dbname=uhoh");
+        let dsn = build_connect_dsn(&postgres_guard.connection_ref)
+            .unwrap_or_else(|_| postgres_guard.connection_ref.clone());
+        let tokio_runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+        tokio_runtime.block_on(async {
+            reconcile_listen_workers(&runtime, std::slice::from_ref(&postgres_guard), &shutdown)
+                .expect("start workers");
+            assert_eq!(runtime.ddl_poll_workers.lock().unwrap().len(), 1);
+
+            reconcile_listen_workers(&runtime, std::slice::from_ref(&postgres_guard), &shutdown)
+                .expect("reuse worker");
+            assert_eq!(runtime.ddl_poll_workers.lock().unwrap().len(), 1);
+
+            {
+                let workers = runtime.ddl_poll_workers.lock().unwrap();
+                let worker = workers.get(&dsn).expect("worker present");
+                let mut queue = worker.queue.lock().unwrap();
+                queue.push("payload-a".to_string());
+                queue.push("payload-b".to_string());
+            }
+            assert_eq!(
+                drain_listen_payloads(&runtime, &dsn).expect("drain queue"),
+                vec!["payload-a".to_string(), "payload-b".to_string()]
+            );
+            assert!(drain_listen_payloads(&runtime, &dsn)
+                .expect("drain empty queue")
+                .is_empty());
+
+            reconcile_listen_workers(&runtime, &[], &shutdown).expect("remove workers");
+            assert!(runtime.ddl_poll_workers.lock().unwrap().is_empty());
+        });
+
+        shutdown.cancel();
+        runtime.shutdown_all_listen_workers();
+    }
+}

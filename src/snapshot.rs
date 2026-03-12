@@ -1017,12 +1017,53 @@ fn load_previous_snapshot_files(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::time::SystemTime;
+
+    use super::{build_ai_diff_chunks, CachedFileState};
+    use crate::cas::{self, StorageMethod};
+    use crate::config::Config;
+
     #[test]
-    fn ai_diff_truncation_marker_present() {
-        let source = std::fs::read_to_string("src/snapshot.rs").expect("read snapshot source");
-        assert!(source.contains("[Diff truncated]"));
-        assert!(source.contains("is_char_boundary"));
-        assert!(source.contains("max_context_tokens.saturating_mul(4)"));
+    fn ai_diff_truncation_marker_appears_once_when_budget_is_exceeded() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old = "alpha\n".repeat(64);
+        let new = "beta\n".repeat(64);
+        let (old_hash, _) =
+            cas::store_blob(&temp.path().join("blobs"), old.as_bytes()).expect("store old blob");
+        let (new_hash, _) =
+            cas::store_blob(&temp.path().join("blobs"), new.as_bytes()).expect("store new blob");
+
+        let mut prev_files = HashMap::new();
+        prev_files.insert(
+            "src/lib.rs".to_string(),
+            CachedFileState {
+                hash: old_hash,
+                size: old.len() as u64,
+                mtime: SystemTime::UNIX_EPOCH,
+                stored: true,
+                executable: false,
+                storage_method: StorageMethod::Copy,
+                is_symlink: false,
+            },
+        );
+
+        let mut current_hashes = HashMap::new();
+        current_hashes.insert("src/lib.rs".to_string(), (new_hash, true));
+
+        let mut config = Config::default();
+        config.ai.max_context_tokens = 8;
+
+        let diff = build_ai_diff_chunks(
+            temp.path(),
+            &config,
+            &prev_files,
+            &current_hashes,
+            &["src/lib.rs".to_string()],
+        );
+
+        assert!(diff.contains("[Diff truncated]"));
+        assert_eq!(diff.matches("[Diff truncated]").count(), 1);
     }
 }
 

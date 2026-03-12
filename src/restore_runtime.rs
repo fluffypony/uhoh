@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 use crate::db::{Database, ProjectEntry};
+use crate::events::{publish_event, ServerEvent};
 use crate::restore::{RestoreOutcome, RestoreRequest, RESTORE_IN_PROGRESS_FILE};
 use crate::restore_guards::{RestoreFlagGuard, RestoreLockGuard};
-use crate::server::events::ServerEvent;
 
 #[derive(Clone, Default)]
 pub struct RestoreCoordinator {
@@ -126,12 +126,15 @@ pub fn restore_project(
 
     if !outcome.dry_run && outcome.applied {
         if let Some(event_tx) = &runtime.event_tx {
-            let _ = event_tx.send(ServerEvent::SnapshotRestored {
-                project_hash: project.hash.clone(),
-                snapshot_id: outcome.snapshot_id.clone(),
-                files_modified: outcome.files_restored,
-                files_deleted: outcome.files_deleted,
-            });
+            publish_event(
+                event_tx,
+                ServerEvent::SnapshotRestored {
+                    project_hash: project.hash.clone(),
+                    snapshot_id: outcome.snapshot_id.clone(),
+                    files_modified: outcome.files_restored,
+                    files_deleted: outcome.files_deleted,
+                },
+            );
         }
     }
 

@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::mcp_protocol::{
-    dispatch_protocol_request, JsonRpcRequest, JsonRpcResponse, ProtocolAction,
-};
-use crate::server::events::ServerEvent;
+use crate::events::ServerEvent;
+
+use super::protocol::{dispatch_protocol_request, JsonRpcRequest, JsonRpcResponse, ProtocolAction};
+use super::tools::{mcp_tool_call_response, mcp_tools_list_response, McpToolContext};
 
 #[derive(Clone, Copy)]
 pub enum McpExecutor {
@@ -16,7 +16,7 @@ pub enum McpExecutor {
 
 #[derive(Clone)]
 pub struct McpApplication {
-    pub tools: crate::mcp_tools::McpToolContext,
+    pub tools: McpToolContext,
     pub executor: McpExecutor,
 }
 
@@ -40,7 +40,7 @@ pub fn build_application(
         restore_coordinator,
     );
     McpApplication {
-        tools: crate::mcp_tools::McpToolContext {
+        tools: McpToolContext {
             database,
             uhoh_dir,
             config,
@@ -59,28 +59,26 @@ pub async fn handle_json_rpc_request(
         ProtocolAction::Notification => McpTransportResponse::Notification,
         ProtocolAction::Response(response) => McpTransportResponse::Response(response),
         ProtocolAction::ToolsList { id } => {
-            McpTransportResponse::Response(crate::mcp_tools::tools_list_response(id))
+            McpTransportResponse::Response(mcp_tools_list_response(id))
         }
         ProtocolAction::ToolsCall { id, params } => {
-            let response = handle_tools_call(application, id, params).await;
+            let response = dispatch_mcp_tool_request(application, id, params).await;
             McpTransportResponse::Response(response)
         }
     }
 }
 
-async fn handle_tools_call(
+async fn dispatch_mcp_tool_request(
     application: McpApplication,
     id: Option<serde_json::Value>,
     params: Option<serde_json::Value>,
 ) -> JsonRpcResponse {
     match application.executor {
-        McpExecutor::Inline => {
-            crate::mcp_tools::tools_call_response(&application.tools, id, params)
-        }
+        McpExecutor::Inline => mcp_tool_call_response(&application.tools, id, params),
         McpExecutor::SpawnBlocking => {
             let request_id = id.clone();
             let result = tokio::task::spawn_blocking(move || {
-                crate::mcp_tools::tools_call_response(&application.tools, id, params)
+                mcp_tool_call_response(&application.tools, id, params)
             })
             .await;
             match result {

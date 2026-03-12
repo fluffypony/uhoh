@@ -5,7 +5,7 @@ use tokio::sync::broadcast;
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::server::events::ServerEvent;
+use crate::events::{publish_event, ServerEvent};
 
 const MAX_AI_SUMMARIES_PER_TICK: u32 = 2;
 const MAX_AI_SUMMARY_ATTEMPTS: i64 = 5;
@@ -89,11 +89,14 @@ pub async fn process_summary_queue(
                 } else {
                     let _ = database.delete_pending_ai(job.snapshot_rowid);
                     if let Ok(Some(snapshot)) = database.get_snapshot_by_rowid(job.snapshot_rowid) {
-                        let _ = event_tx.send(ServerEvent::AiSummaryCompleted {
-                            project_hash: job.project_hash.clone(),
-                            snapshot_id: crate::cas::id_to_base58(snapshot.snapshot_id),
-                            summary: text,
-                        });
+                        publish_event(
+                            event_tx,
+                            ServerEvent::AiSummaryCompleted {
+                                project_hash: job.project_hash.clone(),
+                                snapshot_id: crate::cas::id_to_base58(snapshot.snapshot_id),
+                                summary: text,
+                            },
+                        );
                     }
                 }
             }

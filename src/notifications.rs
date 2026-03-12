@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::config::NotificationsConfig;
-use crate::server::events::ServerEvent;
+use crate::events::ServerEvent;
 
 #[derive(Clone)]
 pub struct NotificationPipeline {

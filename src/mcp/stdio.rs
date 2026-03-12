@@ -5,22 +5,23 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::mcp_protocol::JsonRpcRequest;
 
-pub fn run_stdio_mcp(config: &Config) -> Result<()> {
+use super::{JsonRpcRequest, McpExecutor, McpTransportResponse};
+
+pub fn run_stdio_server(config: &Config) -> Result<()> {
     let uhoh_dir = crate::uhoh_dir();
     let database = Database::open(&uhoh_dir.join("uhoh.db"))?;
     let database_handle = Arc::new(database.clone_handle());
     let runtime_handle = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let application = crate::mcp_app::build_application(
+    let application = super::build_application(
         database_handle,
         uhoh_dir.clone(),
         config.clone(),
         None,
         None,
-        crate::mcp_app::McpExecutor::Inline,
+        McpExecutor::Inline,
     );
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
@@ -45,12 +46,10 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
             }
         };
 
-        match runtime_handle.block_on(crate::mcp_app::handle_json_rpc_request(
-            application.clone(),
-            request,
-        )) {
-            crate::mcp_app::McpTransportResponse::Notification => continue,
-            crate::mcp_app::McpTransportResponse::Response(response) => {
+        match runtime_handle.block_on(super::handle_json_rpc_request(application.clone(), request))
+        {
+            McpTransportResponse::Notification => continue,
+            McpTransportResponse::Response(response) => {
                 writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
                 stdout.flush()?;
             }

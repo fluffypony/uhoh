@@ -515,7 +515,7 @@ pub async fn create_snapshot(
         .map_err(ApiError::invalid_input)?;
         if let Some(id) = result.snapshot_id {
             if let Some(event) = result.snapshot_event {
-                let _ = event_tx.send(event);
+                crate::events::publish_event(&event_tx, event);
             }
             Ok(json!({ "snapshot_id": crate::cas::id_to_base58(id) }))
         } else {

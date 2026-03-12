@@ -8,18 +8,14 @@ use tracing::warn;
 
 use uhoh::cas;
 use uhoh::cli::{Cli, Commands, LedgerAction};
+use uhoh::commands::{
+    ledger as ledger_commands, project as project_commands, runtime as runtime_commands,
+    shared as command_shared,
+};
 use uhoh::config;
-use uhoh::daemon;
 use uhoh::db;
-use uhoh::diff_view;
-use uhoh::gc;
-use uhoh::git;
 use uhoh::marker;
-use uhoh::operations;
-use uhoh::platform;
-use uhoh::restore;
 use uhoh::snapshot;
-use uhoh::update;
 
 // Deduplicated: use library function for ~/.uhoh
 fn uhoh_dir() -> PathBuf {
@@ -48,90 +44,6 @@ fn ensure_uhoh_dir() -> Result<PathBuf> {
         }
     }
     Ok(dir)
-}
-
-fn is_daemon_running(uhoh: &std::path::Path) -> bool {
-    let pid_path = uhoh.join("daemon.pid");
-    match std::fs::read_to_string(&pid_path) {
-        Ok(pid_str) => {
-            let mut parts = pid_str.split_whitespace();
-            let Some(pid_raw) = parts.next() else {
-                return false;
-            };
-            let Ok(pid) = pid_raw.parse::<u32>() else {
-                return false;
-            };
-            let expected_start = parts.next().and_then(|v| v.parse::<u64>().ok());
-            platform::is_uhoh_process_alive_with_start(pid, expected_start)
-        }
-        Err(_) => false,
-    }
-}
-
-fn maybe_start_daemon(uhoh: &std::path::Path) -> Result<()> {
-    if !is_daemon_running(uhoh) {
-        tracing::info!("Daemon not running, starting automatically...");
-        daemon::spawn_detached_daemon(uhoh)?;
-    }
-    Ok(())
-}
-
-fn resolve_project_path(path: Option<String>) -> Result<PathBuf> {
-    let p = match path {
-        Some(s) => dunce::canonicalize(&s).with_context(|| format!("Cannot resolve path: {s}"))?,
-        None => dunce::canonicalize(std::env::current_dir()?)
-            .context("Cannot resolve current directory")?,
-    };
-    Ok(p)
-}
-
-fn resolve_target_project(
-    _uhoh: &std::path::Path,
-    database: &db::Database,
-    target: Option<&str>,
-) -> Result<db::ProjectEntry> {
-    match target {
-        Some(t) => {
-            let as_path = PathBuf::from(t);
-            if as_path.exists() {
-                let canonical = dunce::canonicalize(&as_path)?;
-                return database
-                    .find_project_by_path(&canonical)?
-                    .context("Not a registered uhoh project");
-            }
-            database
-                .find_project_by_hash_prefix(t)?
-                .context("No project matching that identifier")
-        }
-        None => {
-            let cwd = dunce::canonicalize(std::env::current_dir()?)?;
-            database
-                .find_project_by_path(&cwd)?
-                .context("Not a registered uhoh project. Run `uhoh add` first.")
-        }
-    }
-}
-
-fn confirm_restore_delete(count: usize) -> Result<bool> {
-    use std::io::{self, IsTerminal, Write};
-
-    if !io::stdin().is_terminal() {
-        anyhow::bail!(
-            "Refusing to delete {} files without confirmation. Use --force or run in an interactive terminal.",
-            count
-        );
-    }
-
-    eprintln!(
-        "⚠ This will delete {} tracked files. Use --force to skip this prompt.",
-        count
-    );
-    eprint!("Continue? [y/N] ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
 #[tokio::main]
@@ -165,357 +77,33 @@ async fn main() -> Result<()> {
     let database = db::Database::open(&uhoh.join("uhoh.db"))?;
 
     match cli.command {
-        Commands::Add { path } => {
-            maybe_start_daemon(&uhoh)?;
-            let project_path = resolve_project_path(path)?;
-
-            let uhoh_home = uhoh.clone();
-            if uhoh_home.starts_with(&project_path) {
-                anyhow::bail!(
-                    "Refusing to watch parent directory '{}' because it contains {}",
-                    project_path.display(),
-                    uhoh_home.display()
-                );
-            }
-
-            if let Some(existing_hash) = marker::read_marker(&project_path)? {
-                if let Some(existing) = database.get_project(&existing_hash)? {
-                    let canonical = dunce::canonicalize(&project_path)?;
-                    if existing.current_path != canonical.to_string_lossy().as_ref() {
-                        database
-                            .update_project_path(&existing_hash, &canonical.to_string_lossy())?;
-                        println!("Updated project path: {}", canonical.display());
-                    } else {
-                        println!("Already registered: {}", canonical.display());
-                    }
-                    return Ok(());
-                }
-            }
-
-            let git_dir = project_path.join(".git");
-            if !git_dir.exists() {
-                warn!(
-                    "Not a git repo. Marker at {0}/.uhoh — add to your ignore file.",
-                    project_path.display()
-                );
-                eprintln!("⚠ Warning: Not a git repo. Add `.uhoh` to your ignore file.");
-            }
-
-            let project_hash = marker::create_marker(&project_path)?;
-            let canonical = dunce::canonicalize(&project_path)?;
-            database.add_project(&project_hash, &canonical.to_string_lossy())?;
-            println!("Registered: {}", canonical.display());
-
-            let cfg = config::Config::load(&uhoh.join("config.toml"))?;
-            snapshot::create_snapshot(
-                &uhoh,
-                &database,
-                &cfg,
-                snapshot::CreateSnapshotRequest {
-                    project_hash: &project_hash,
-                    project_path: &canonical,
-                    trigger: "manual",
-                    message: Some("Initial snapshot"),
-                    changed_paths: None,
-                },
-            )?;
-            println!("Initial snapshot created.");
-        }
-
-        Commands::Remove { target } => {
-            let project = match target {
-                Some(ref t) => {
-                    // Try as path first, then fall back to hash prefix lookup
-                    let path = std::path::Path::new(t);
-                    if path.exists() || path.is_absolute() {
-                        let canonical = dunce::canonicalize(t)?;
-                        database.find_project_by_path(&canonical)?
-                    } else {
-                        // Try as hash prefix
-                        let projects = database.list_projects()?;
-                        let matches: Vec<_> = projects
-                            .iter()
-                            .filter(|p| p.hash.starts_with(t.as_str()))
-                            .collect();
-                        match matches.len() {
-                            0 => {
-                                // Last resort: try canonicalizing anyway
-                                let canonical = dunce::canonicalize(t)?;
-                                database.find_project_by_path(&canonical)?
-                            }
-                            1 => Some(matches[0].clone()),
-                            _ => anyhow::bail!(
-                                "Ambiguous hash prefix '{}': matches {} projects",
-                                t,
-                                matches.len()
-                            ),
-                        }
-                    }
-                }
-                None => {
-                    let cwd = dunce::canonicalize(std::env::current_dir()?)?;
-                    database.find_project_by_path(&cwd)?
-                }
-            }
-            .context("Project not found")?;
-            // Attempt to remove marker files
-            let project_path = std::path::Path::new(&project.current_path);
-            let marker_git = project_path.join(".git/.uhoh");
-            let marker_root = project_path.join(".uhoh");
-            if marker_git.exists() {
-                std::fs::remove_file(&marker_git).ok();
-            }
-            if marker_root.exists() {
-                std::fs::remove_file(&marker_root).ok();
-            }
-            database.remove_project(&project.hash)?;
-            println!("Removed: {}", project.current_path);
-        }
-
-        Commands::List => {
-            let projects = database.list_projects()?;
-            if projects.is_empty() {
-                println!("No registered projects. Use `uhoh add` to register one.");
-            } else {
-                for p in &projects {
-                    let exists = std::path::Path::new(&p.current_path).exists();
-                    let status = if exists { "✓" } else { "✗ MISSING" };
-                    let count = database.snapshot_count(&p.hash)?;
-                    println!(
-                        "  {} {} ({} snapshots) [{}]",
-                        status,
-                        p.current_path,
-                        count,
-                        &p.hash[..p.hash.len().min(12)]
-                    );
-                }
-            }
-        }
-
-        Commands::Snapshots { target } => {
-            let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
-            let snapshots = database.list_snapshots(&project.hash)?;
-            if snapshots.is_empty() {
-                println!("No snapshots.");
-            } else {
-                for s in &snapshots {
-                    let id_str = cas::id_to_base58(s.snapshot_id);
-                    let pin = if s.pinned { " 📌" } else { "" };
-                    let msg = if s.message.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" — {}", s.message)
-                    };
-                    println!("  {} [{}] {}{}{}", s.timestamp, id_str, s.trigger, pin, msg);
-                    // Show files with storage info
-                    let files = database.get_snapshot_files(s.rowid)?;
-                    for f in files.iter().take(10) {
-                        let method = f.storage_method.display_name();
-                        println!("       {:>8}  {:>7}  {}", f.size, method, f.path);
-                    }
-                    if files.len() > 10 {
-                        println!("       ... and {} more", files.len() - 10);
-                    }
-                }
-            }
-        }
-
+        Commands::Add { path } => project_commands::add(&uhoh, &database, path)?,
+        Commands::Remove { target } => project_commands::remove(&database, target)?,
+        Commands::List => project_commands::list(&database)?,
+        Commands::Snapshots { target } => project_commands::snapshots(&database, target)?,
         Commands::Commit { message, trigger } => {
-            maybe_start_daemon(&uhoh)?;
-            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
-            let project = database
-                .find_project_by_path(&project_path)?
-                .context("Not registered")?;
-            let trigger_str = trigger.unwrap_or_else(|| "manual".to_string());
-            let cfg = config::Config::load(&uhoh.join("config.toml"))?;
-            snapshot::create_snapshot(
-                &uhoh,
-                &database,
-                &cfg,
-                snapshot::CreateSnapshotRequest {
-                    project_hash: &project.hash,
-                    project_path: &project_path,
-                    trigger: &trigger_str,
-                    message: message.as_deref(),
-                    changed_paths: None,
-                },
-            )?;
-            println!("Snapshot created.");
+            project_commands::commit(&uhoh, &database, message, trigger)?
         }
-
         Commands::Restore {
             id,
             target,
             dry_run,
             force,
-        } => {
-            let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
-            let cfg = config::Config::load(&uhoh.join("config.toml"))?;
-            let pre_restore_message = format!("Before restore to {id}");
-            let confirm_large_delete = |count| confirm_restore_delete(count);
-            let outcome = restore::restore_project(
-                &uhoh,
-                &database,
-                &project,
-                restore::RestoreRequest {
-                    snapshot_id: &id,
-                    target_path: None,
-                    dry_run,
-                    force,
-                    pre_restore_snapshot: Some(restore::PreRestoreSnapshot {
-                        trigger: "pre-restore",
-                        message: Some(pre_restore_message),
-                        config: &cfg,
-                    }),
-                    confirm_large_delete: Some(&confirm_large_delete),
-                },
-            )?;
-            if outcome.dry_run {
-                println!("Dry run — changes that would be applied:");
-                for path in &outcome.files_to_delete {
-                    println!("  DELETE {}", std::path::Path::new(path).display());
-                }
-                for path in &outcome.files_to_restore {
-                    println!("  RESTORE {}", std::path::Path::new(path).display());
-                }
-            } else if outcome.applied {
-                println!(
-                    "Restored to snapshot {} ({} files restored, {} deleted)",
-                    outcome.snapshot_id, outcome.files_restored, outcome.files_deleted
-                );
-            }
-        }
-
+        } => project_commands::restore_snapshot(&uhoh, &database, &id, target, dry_run, force)?,
         Commands::Gitstash { id, target } => {
-            let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
-            git::cmd_gitstash(&uhoh, &database, &project, &id)?;
+            project_commands::gitstash(&uhoh, &database, &id, target)?
         }
-
-        Commands::Diff { id1, id2 } => {
-            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
-            let project = database
-                .find_project_by_path(&project_path)?
-                .context("Not registered")?;
-            diff_view::cmd_diff(&uhoh, &database, &project, id1.as_deref(), id2.as_deref())?;
-        }
-
-        Commands::Cat { path, id } => {
-            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
-            let project = database
-                .find_project_by_path(&project_path)?
-                .context("Not registered")?;
-            diff_view::cmd_cat(&uhoh, &database, &project, &path, &id)?;
-        }
-
-        Commands::Log { path } => {
-            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
-            let project = database
-                .find_project_by_path(&project_path)?
-                .context("Not registered")?;
-            diff_view::cmd_log(&database, &project, &path)?;
-        }
-
-        Commands::Mcp => {
-            let config_path = uhoh.join("config.toml");
-            let config = config::Config::load(&config_path)?;
-            uhoh::mcp_stdio::run_stdio_mcp(&config)?;
-        }
-
-        Commands::Start { service } => {
-            if service {
-                daemon::run_foreground(&uhoh, std::sync::Arc::new(database)).await?;
-            } else {
-                daemon::spawn_detached_daemon(&uhoh)?;
-            }
-        }
-        Commands::Stop => {
-            daemon::stop_daemon(&uhoh)?;
-        }
-        Commands::Restart => {
-            daemon::stop_daemon(&uhoh).ok();
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            daemon::spawn_detached_daemon(&uhoh)?;
-        }
-
-        Commands::Hook { action } => {
-            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
-            match action.as_str() {
-                "install" => git::install_hook(&project_path)?,
-                "remove" => git::remove_hook(&project_path)?,
-                other => {
-                    anyhow::bail!("Unknown hook action: '{other}'. Use 'install' or 'remove'.")
-                }
-            }
-        }
-
-        Commands::Config { action } => {
-            let config_path = uhoh.join("config.toml");
-            match action {
-                Some(uhoh::cli::ConfigAction::Edit) => {
-                    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-                    std::process::Command::new(&editor)
-                        .arg(&config_path)
-                        .status()?;
-                }
-                Some(uhoh::cli::ConfigAction::Set { key, value }) => {
-                    let content = if config_path.exists() {
-                        std::fs::read_to_string(&config_path)?
-                    } else {
-                        String::new()
-                    };
-                    let mut doc: toml_edit::DocumentMut = content
-                        .parse()
-                        .unwrap_or_else(|_| toml_edit::DocumentMut::new());
-                    let parts: Vec<&str> = key.split('.').collect();
-                    match parts.as_slice() {
-                        [k] => {
-                            doc[*k] = toml_edit::value(parse_toml_value(&value));
-                        }
-                        [a, b] => {
-                            if !doc.contains_key(a) {
-                                doc[*a] = toml_edit::Item::Table(toml_edit::Table::new());
-                            }
-                            doc[*a][*b] = toml_edit::value(parse_toml_value(&value));
-                        }
-                        _ => anyhow::bail!("Key nesting deeper than 2 levels is not supported"),
-                    }
-                    std::fs::write(&config_path, doc.to_string())?;
-                    println!("Set {key} = {value}");
-                }
-                Some(uhoh::cli::ConfigAction::Get { key }) => {
-                    let content = if config_path.exists() {
-                        std::fs::read_to_string(&config_path)?
-                    } else {
-                        String::new()
-                    };
-                    let doc: toml_edit::DocumentMut = content
-                        .parse()
-                        .unwrap_or_else(|_| toml_edit::DocumentMut::new());
-                    let parts: Vec<&str> = key.split('.').collect();
-                    let out = match parts.as_slice() {
-                        [k] => doc.get(k).map(|v| v.to_string()).unwrap_or_default(),
-                        [a, b] => doc
-                            .get(a)
-                            .and_then(|t| t.get(*b))
-                            .map(|v| v.to_string())
-                            .unwrap_or_default(),
-                        _ => String::new(),
-                    };
-                    println!("{out}");
-                }
-                None => {
-                    let cfg = config::Config::load(&config_path)?;
-                    println!("{}", toml::to_string_pretty(&cfg)?);
-                }
-            }
-        }
-
-        Commands::Gc => {
-            gc::run_gc(&uhoh, &database)?;
-        }
-        Commands::Update => {
-            update::check_and_apply_update(&uhoh).await?;
-        }
+        Commands::Diff { id1, id2 } => project_commands::diff(&uhoh, &database, id1, id2)?,
+        Commands::Cat { path, id } => project_commands::cat(&uhoh, &database, &path, &id)?,
+        Commands::Log { path } => project_commands::log(&database, &path)?,
+        Commands::Mcp => runtime_commands::run_mcp(&uhoh)?,
+        Commands::Start { service } => runtime_commands::start(&uhoh, &database, service).await?,
+        Commands::Stop => runtime_commands::stop(&uhoh)?,
+        Commands::Restart => runtime_commands::restart(&uhoh)?,
+        Commands::Hook { action } => runtime_commands::hook(&action)?,
+        Commands::Config { action } => runtime_commands::config_action(&uhoh, action)?,
+        Commands::Gc => runtime_commands::run_gc(&uhoh, &database)?,
+        Commands::Update => runtime_commands::update(&uhoh).await?,
         Commands::Doctor {
             fix,
             restore_latest,
@@ -530,91 +118,12 @@ async fn main() -> Result<()> {
             let doctor_db = db::Database::open(&uhoh.join("uhoh.db"))?;
             run_doctor(&uhoh, doctor_db, fix, restore_latest).await?;
         }
-
-        Commands::Status => {
-            let running = is_daemon_running(&uhoh);
-            println!("Daemon: {}", if running { "running" } else { "stopped" });
-            let projects = database.list_projects()?;
-            println!("Projects: {}", projects.len());
-            let total: u64 = projects
-                .iter()
-                .filter_map(|p| database.snapshot_count(&p.hash).ok())
-                .sum();
-            println!("Snapshots: {total}");
-            let size = database.get_blob_bytes().unwrap_or(0);
-            println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0);
-            let cfg = config::Config::load(&uhoh.join("config.toml")).unwrap_or_default();
-            println!(
-                "AI: {}",
-                if cfg.ai.enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-            );
-            // Inception loop guard: warn if project includes ~/.uhoh
-            let uhoh_path = uhoh.clone();
-            for p in &projects {
-                let proj_path = std::path::Path::new(&p.current_path);
-                if uhoh_path.starts_with(proj_path) {
-                    println!("Warning: Project {} includes the uhoh data directory; this may cause snapshot loops.", p.current_path);
-                    break;
-                }
-            }
-
-            if running {
-                if let Ok(port_raw) = std::fs::read_to_string(uhoh.join("server.port")) {
-                    if let Ok(port) = port_raw.trim().parse::<u16>() {
-                        let url = format!("http://127.0.0.1:{port}/health");
-                        if let Ok(resp) = reqwest::get(url).await {
-                            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                                if let Some(subsystems) =
-                                    json.get("subsystems").and_then(|v| v.as_array())
-                                {
-                                    println!("Subsystems:");
-                                    for item in subsystems {
-                                        let name = item
-                                            .get("name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown");
-                                        let status = item
-                                            .get("status")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown");
-                                        println!("  - {}: {}", name, status);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Commands::Mark { label } => {
-            let project_path = dunce::canonicalize(std::env::current_dir()?)?;
-            let project = database
-                .find_project_by_path(&project_path)?
-                .context("Not registered")?;
-            operations::cmd_mark(&database, &project, &label)?;
-        }
-        Commands::Undo { target } => {
-            let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
-            operations::cmd_undo(&uhoh, &database, &project)?;
-        }
-        Commands::Operations { target } => {
-            let project = resolve_target_project(&uhoh, &database, target.as_deref())?;
-            operations::cmd_list_operations(&database, &project)?;
-        }
-
-        Commands::ServiceInstall => {
-            platform::install_service()?;
-            println!("Service installed.");
-        }
-        Commands::ServiceRemove => {
-            platform::remove_service()?;
-            println!("Service removed.");
-        }
+        Commands::Status => runtime_commands::status(&uhoh, &database).await?,
+        Commands::Mark { label } => project_commands::mark(&database, &label)?,
+        Commands::Undo { target } => project_commands::undo(&uhoh, &database, target)?,
+        Commands::Operations { target } => project_commands::operations(&database, target)?,
+        Commands::ServiceInstall => runtime_commands::install_service()?,
+        Commands::ServiceRemove => runtime_commands::remove_service()?,
 
         Commands::Db { action } => {
             uhoh::db_guard::handle_cli_action(&database, &uhoh, &action)?;
@@ -624,103 +133,13 @@ async fn main() -> Result<()> {
             uhoh::agent::handle_cli_action(&uhoh, &database, &action)?;
         }
 
-        Commands::Trace { event_id } => {
-            let chain = database.event_ledger_trace(event_id)?;
-            if chain.entries.is_empty() {
-                println!("No events found for trace id {event_id}");
-            } else {
-                for entry in chain.entries {
-                    println!(
-                        "#{} {} {} [{}] {}",
-                        entry.id, entry.ts, entry.source, entry.severity, entry.event_type
-                    );
-                }
-                if chain.truncated {
-                    println!("Trace truncated after 1024 links; graph depth exceeded safe traversal limit.");
-                }
-            }
-        }
-
-        Commands::Blame { path } => {
-            let events = database.event_ledger_recent(None, None, None, None, 500)?;
-            if let Some(seed) = events
-                .into_iter()
-                .find(|e| e.path.as_deref() == Some(path.as_str()))
-            {
-                let chain = database.event_ledger_trace(seed.id)?;
-                println!("Blame chain for {}", path);
-                for entry in chain.entries {
-                    println!(
-                        "#{} {} {} [{}] {}",
-                        entry.id, entry.ts, entry.source, entry.severity, entry.event_type
-                    );
-                }
-                if chain.truncated {
-                    println!("Trace truncated after 1024 links; graph depth exceeded safe traversal limit.");
-                }
-            } else {
-                println!("No events found for path {}", path);
-            }
-        }
-
+        Commands::Trace { event_id } => ledger_commands::trace(&database, event_id)?,
+        Commands::Blame { path } => ledger_commands::blame(&database, &path)?,
         Commands::Timeline { source, since } => {
-            let normalized_source = source
-                .as_deref()
-                .map(normalize_timeline_source)
-                .transpose()?;
-            let since_cutoff = since.as_deref().map(parse_since_cutoff).transpose()?;
-            let since_rfc3339 = since_cutoff.map(|c| c.to_rfc3339());
-
-            let events = database.event_ledger_recent_since(
-                normalized_source,
-                None,
-                None,
-                None,
-                since_rfc3339.as_deref(),
-                1000,
-            )?;
-            let mut filtered = events;
-            filtered.reverse();
-
-            if filtered.is_empty() {
-                println!("No timeline events matched filters");
-            } else {
-                for entry in filtered {
-                    println!(
-                        "#{} {} {} [{}] {}{}",
-                        entry.id,
-                        entry.ts,
-                        entry.source,
-                        entry.severity,
-                        entry.event_type,
-                        entry
-                            .path
-                            .as_deref()
-                            .map(|p| format!(" path={p}"))
-                            .unwrap_or_default()
-                    );
-                }
-            }
+            ledger_commands::timeline(&database, source, since)?
         }
-
         Commands::Ledger { action } => match action {
-            LedgerAction::Verify => {
-                let (count, broken) = database.verify_event_ledger_chain()?;
-                if broken.is_empty() {
-                    println!("Ledger verified: {} event(s), chain intact", count);
-                } else {
-                    println!(
-                        "Ledger verification failed: {} broken event(s): {}",
-                        broken.len(),
-                        broken
-                            .iter()
-                            .map(std::string::ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    std::process::exit(2);
-                }
-            }
+            LedgerAction::Verify => ledger_commands::verify(&database)?,
         },
 
         Commands::Run { command } => {
@@ -732,7 +151,7 @@ async fn main() -> Result<()> {
             cmd.args(&command[1..]);
 
             // Verify daemon is running before exporting proxy env vars
-            if !is_daemon_running(&uhoh) {
+            if !command_shared::is_daemon_running(&uhoh) {
                 eprintln!("Warning: uhoh daemon is not running. Start it with `uhoh start` for full protection.");
             }
             if cfg.agent.mcp_proxy_enabled {
@@ -849,77 +268,6 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-fn normalize_timeline_source(source: &str) -> Result<uhoh::db::LedgerSource> {
-    let source = source.trim().to_ascii_lowercase();
-    let normalized = match source.as_str() {
-        "fs" | "filesystem" => uhoh::db::LedgerSource::Fs,
-        "db" | "db_guard" | "database" => uhoh::db::LedgerSource::DbGuard,
-        "agent" => uhoh::db::LedgerSource::Agent,
-        "daemon" => uhoh::db::LedgerSource::Daemon,
-        "mlx" => uhoh::db::LedgerSource::Mlx,
-        _ => {
-            anyhow::bail!(
-                "Invalid --source '{}'. Expected one of: fs, db_guard, agent, daemon, mlx",
-                source
-            )
-        }
-    };
-    Ok(normalized)
-}
-
-fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
-    let s = raw.trim();
-    if s.is_empty() {
-        anyhow::bail!("--since cannot be empty");
-    }
-    if s.len() < 2 {
-        anyhow::bail!(
-            "Invalid --since format '{}'; use forms like 30m, 1h, 2d",
-            raw
-        );
-    }
-
-    // Split into numeric prefix and alphabetic suffix (supports multi-char units like "min")
-    let split_pos = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
-    let num_part = &s[..split_pos];
-    let unit_part = &s[split_pos..];
-    let qty: i64 = num_part
-        .parse()
-        .with_context(|| format!("Invalid --since quantity '{}'", num_part))?;
-    if qty <= 0 {
-        anyhow::bail!("--since quantity must be positive");
-    }
-
-    let delta = match unit_part.to_ascii_lowercase().as_str() {
-        "s" | "sec" | "secs" => chrono::Duration::seconds(qty),
-        "m" | "min" | "mins" => chrono::Duration::minutes(qty),
-        "h" | "hr" | "hrs" | "hour" | "hours" => chrono::Duration::hours(qty),
-        "d" | "day" | "days" => chrono::Duration::days(qty),
-        _ => anyhow::bail!(
-            "Invalid --since unit '{}'. Use one of s, m, h, d",
-            unit_part
-        ),
-    };
-
-    Ok(chrono::Utc::now() - delta)
-}
-
-fn parse_toml_value(s: &str) -> toml_edit::Value {
-    if s.eq_ignore_ascii_case("true") {
-        return toml_edit::Value::from(true);
-    }
-    if s.eq_ignore_ascii_case("false") {
-        return toml_edit::Value::from(false);
-    }
-    if let Ok(i) = s.parse::<i64>() {
-        return toml_edit::Value::from(i);
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return toml_edit::Value::from(f);
-    }
-    toml_edit::Value::from(s.to_string())
-}
-
 async fn run_zero_verb() -> Result<()> {
     let uhoh = ensure_uhoh_dir()?;
     let database = db::Database::open(&uhoh.join("uhoh.db"))?;
@@ -956,7 +304,7 @@ async fn run_zero_verb() -> Result<()> {
         );
     }
 
-    maybe_start_daemon(&uhoh)?;
+    command_shared::maybe_start_daemon(&uhoh)?;
     let project_path = cwd;
 
     if let Some(existing_hash) = marker::read_marker(&project_path)? {

@@ -10,7 +10,7 @@ use tokio::sync::broadcast;
 use crate::config::Config;
 use crate::db::{Database, ProjectEntry, SnapshotRow};
 use crate::event_ledger::{new_event, EventLedger};
-use crate::server::events::ServerEvent;
+use crate::events::{publish_event, ServerEvent};
 use crate::snapshot;
 
 use super::WatchEvent;
@@ -447,10 +447,13 @@ pub(super) fn check_for_new_projects(
             }
 
             entry.insert(seed_project_state(database, project));
-            let _ = event_tx.send(ServerEvent::ProjectAdded {
-                project_hash: project.hash.clone(),
-                path: project.current_path.clone(),
-            });
+            publish_event(
+                event_tx,
+                ServerEvent::ProjectAdded {
+                    project_hash: project.hash.clone(),
+                    path: project.current_path.clone(),
+                },
+            );
             tracing::info!("Started watching new project: {}", path.display());
         }
     }
@@ -698,16 +701,19 @@ fn emit_emergency_delete_detected(
     ledger_event.detail = Some(detail.to_string());
     let _ = event_ledger.append(ledger_event);
 
-    let _ = event_tx.send(ServerEvent::EmergencyDeleteDetected {
-        project_hash: project_hash.to_string(),
-        deleted_count,
-        baseline_count,
-        ratio,
-        threshold: config.watch.emergency_delete_threshold,
-        min_files: config.watch.emergency_delete_min_files,
-        cooldown_suppressed,
-        cooldown_remaining_secs,
-    });
+    publish_event(
+        event_tx,
+        ServerEvent::EmergencyDeleteDetected {
+            project_hash: project_hash.to_string(),
+            deleted_count,
+            baseline_count,
+            ratio,
+            threshold: config.watch.emergency_delete_threshold,
+            min_files: config.watch.emergency_delete_min_files,
+            cooldown_suppressed,
+            cooldown_remaining_secs,
+        },
+    );
 }
 
 fn build_auto_snapshot_request(
@@ -896,18 +902,21 @@ fn handle_created_snapshot(
                 );
             }
 
-            let _ = event_tx.send(ServerEvent::SnapshotCreated {
-                project_hash: state.hash.clone(),
-                snapshot_id: crate::cas::id_to_base58(snapshot_id),
-                timestamp: row.timestamp,
-                trigger: row.trigger,
-                file_count: row.file_count as usize,
-                message: if row.message.is_empty() {
-                    None
-                } else {
-                    Some(row.message)
+            publish_event(
+                event_tx,
+                ServerEvent::SnapshotCreated {
+                    project_hash: state.hash.clone(),
+                    snapshot_id: crate::cas::id_to_base58(snapshot_id),
+                    timestamp: row.timestamp,
+                    trigger: row.trigger,
+                    file_count: row.file_count as usize,
+                    message: if row.message.is_empty() {
+                        None
+                    } else {
+                        Some(row.message)
+                    },
                 },
-            });
+            );
         }
 
         refresh_cached_snapshot_state(database, state);

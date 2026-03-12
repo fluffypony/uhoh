@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::events::{publish_event, ServerEvent};
 use crate::subsystem::{MaintenanceContext, Subsystem, SubsystemContext, SubsystemHealth};
 
 pub(super) struct DaemonMaintenanceSubsystem {
@@ -198,11 +199,13 @@ impl DaemonMaintenanceSubsystem {
                             let after = crate::ai::llama::read_manifest(&sidecar_dir)
                                 .map(|m| m.version)
                                 .unwrap_or_else(|| "unknown".to_string());
-                            let _ =
-                                event_tx.send(crate::server::events::ServerEvent::SidecarUpdated {
+                            publish_event(
+                                &event_tx,
+                                ServerEvent::SidecarUpdated {
                                     old_version: before,
                                     new_version: after,
-                                });
+                                },
+                            );
                         }
                         Ok(false) => {}
                         Err(err) => tracing::warn!("Sidecar update check failed: {}", err),
@@ -219,12 +222,13 @@ impl DaemonMaintenanceSubsystem {
         )
         .await
         {
-            let _ = ctx
-                .server_event_tx
-                .send(crate::server::events::ServerEvent::MlxUpdateStatus {
+            publish_event(
+                &ctx.server_event_tx,
+                ServerEvent::MlxUpdateStatus {
                     status: "failed".to_string(),
                     detail: err.to_string(),
-                });
+                },
+            );
             if tick_failure.is_none() {
                 tick_failure = Some(format!("mlx auto-update failed: {err}"));
             }
@@ -272,4 +276,41 @@ impl Subsystem for DaemonMaintenanceSubsystem {
 
 fn database_backup_to(database: &Database, path: &std::path::Path) -> anyhow::Result<()> {
     database.backup_to(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DaemonMaintenanceSubsystem;
+    use crate::config::Config;
+    use crate::db::Database;
+    use crate::subsystem::{MaintenanceContext, Subsystem, SubsystemHealth};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn run_tick_creates_backup_and_reports_healthy_when_no_failures_occur() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let database = Arc::new(Database::open(&temp.path().join("uhoh.db")).expect("open db"));
+        let (server_event_tx, _) = tokio::sync::broadcast::channel(8);
+        let mut config = Config::default();
+        config.ai.enabled = false;
+        config.sidecar_update.auto_update = false;
+
+        let mut subsystem = DaemonMaintenanceSubsystem::new(&config);
+        let ctx = MaintenanceContext {
+            database,
+            config: config.clone(),
+            uhoh_dir: temp.path().to_path_buf(),
+            server_event_tx,
+        };
+
+        subsystem.run_tick(&ctx).await;
+
+        let backups = std::fs::read_dir(temp.path().join("backups"))
+            .expect("backup dir")
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        assert!(subsystem.last_backup.is_some());
+        assert!(matches!(subsystem.health_check(), SubsystemHealth::Healthy));
+    }
 }

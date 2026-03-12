@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 use crate::config::{AiConfig, MlxConfig};
-use crate::server::events::ServerEvent;
+use crate::events::{publish_event, ServerEvent};
 
 #[derive(Debug, Default)]
 pub struct MlxAutoUpdateState {
@@ -252,10 +252,13 @@ fn emit_mlx_failed(
     detail: &str,
 ) {
     if let Some(tx) = event_tx {
-        let _ = tx.send(ServerEvent::MlxUpdateFailed {
-            status: status.to_string(),
-            detail: detail.to_string(),
-        });
+        publish_event(
+            tx,
+            ServerEvent::MlxUpdateFailed {
+                status: status.to_string(),
+                detail: detail.to_string(),
+            },
+        );
     }
 }
 
