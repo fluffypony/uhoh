@@ -1,4 +1,5 @@
 mod audit;
+mod commands;
 #[cfg(target_os = "linux")]
 mod fanotify;
 mod intercept;
@@ -7,6 +8,7 @@ mod profiles;
 mod sandbox;
 mod undo;
 
+pub use commands::handle_cli_action;
 pub use mcp_proxy::{
     approve_pending_actions, auth_handshake_line as proxy_auth_handshake_line,
     build_approval_response, deny_pending_actions, ensure_proxy_token,

@@ -1,3 +1,4 @@
+mod commands;
 mod credentials;
 mod mysql;
 mod postgres;
@@ -13,6 +14,7 @@ use crate::db::DbGuardEntry;
 use crate::event_ledger::new_event;
 use crate::subsystem::{DbGuardContext, Subsystem, SubsystemContext, SubsystemHealth};
 
+pub use commands::handle_cli_action;
 pub use credentials::ensure_guard_dir;
 pub use credentials::resolve_postgres_credentials;
 pub use credentials::resolve_postgres_credentials_cli;
@@ -21,7 +23,11 @@ pub use credentials::scrub_dsn;
 pub use credentials::scrub_error_message;
 pub use credentials::store_encrypted_credential;
 pub use credentials::store_postgres_credentials_cli;
+pub use credentials::CliCredentialResolution;
 pub use credentials::CredentialMaterial;
+pub use credentials::CredentialSource;
+pub use credentials::CredentialStoreOutcome;
+pub use credentials::KeyringStatus;
 pub use postgres::{
     build_connect_dsn, drop_monitoring_infrastructure, execute_sql,
     install_monitoring_infrastructure, test_monitoring_infrastructure,

@@ -195,9 +195,8 @@ impl DaemonMaintenanceSubsystem {
                 let pin = ctx.config.sidecar_update.pin_version.clone();
                 let event_tx = ctx.server_event_tx.clone();
                 tokio::task::spawn_blocking(move || {
-                    let before =
-                        crate::ai::sidecar_update::read_manifest(&sidecar_dir).map(|m| m.version);
-                    match crate::ai::sidecar_update::run_update_check(
+                    let before = crate::ai::llama::read_manifest(&sidecar_dir).map(|m| m.version);
+                    match crate::ai::llama::run_update_check(
                         &sidecar_dir,
                         &repo,
                         pin.as_deref(),
@@ -206,7 +205,7 @@ impl DaemonMaintenanceSubsystem {
                         },
                     ) {
                         Ok(true) => {
-                            let after = crate::ai::sidecar_update::read_manifest(&sidecar_dir)
+                            let after = crate::ai::llama::read_manifest(&sidecar_dir)
                                 .map(|m| m.version)
                                 .unwrap_or_else(|| "unknown".to_string());
                             let _ =
@@ -222,7 +221,7 @@ impl DaemonMaintenanceSubsystem {
             }
         }
 
-        if let Err(e) = crate::ai::mlx_update::maybe_run_mlx_auto_update(
+        if let Err(e) = crate::ai::mlx::maybe_run_mlx_auto_update(
             &ctx.config.ai,
             &ctx.uhoh_dir,
             Some(&ctx.server_event_tx),

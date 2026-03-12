@@ -368,11 +368,12 @@ fn mcp_approval_reader_uses_nofollow_guards() {
 
 #[test]
 fn db_recover_apply_output_clarifies_manual_sql_execution() {
-    let source = std::fs::read_to_string("src/main.rs").expect("read main command handler");
+    let source =
+        std::fs::read_to_string("src/db_guard/commands.rs").expect("read db guard CLI commands");
     assert!(source.contains("Applied recovery artifact from"));
     assert!(source.contains("Use --apply to validate, decrypt, and execute the recovery artifact"));
-    assert!(source.contains("fn apply_postgres_recovery"));
     assert!(source.contains("fn apply_sqlite_recovery"));
+    assert!(source.contains("super::execute_sql(&guard.connection_ref, &sql)"));
 }
 
 #[test]
@@ -417,8 +418,9 @@ fn postgres_db_ops_use_runtime_bridge_instead_of_nested_runtime_builder() {
 
 #[test]
 fn db_add_rolls_back_remote_and_credentials_on_local_failure() {
-    let source = std::fs::read_to_string("src/main.rs").expect("read main command handler");
-    assert!(source.contains("uhoh::db_guard::drop_monitoring_infrastructure"));
+    let source =
+        std::fs::read_to_string("src/db_guard/commands.rs").expect("read db guard CLI commands");
+    assert!(source.contains("super::drop_monitoring_infrastructure"));
     assert!(source.contains("resolve_stored_credentials"));
     assert!(source.contains("store_encrypted_credential"));
 }

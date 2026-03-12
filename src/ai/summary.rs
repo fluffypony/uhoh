@@ -64,7 +64,7 @@ pub fn generate_summary_blocking(
     };
 
     // Choose a model tier using centralized selector
-    let Some(model) = crate::ai::models::select_model(&config.ai) else {
+    let Some(model) = crate::ai::llama::select_model(&config.ai) else {
         tracing::warn!("No suitable AI model tier for available RAM; skipping summary generation");
         return Ok(String::new());
     };
@@ -77,7 +77,7 @@ pub fn generate_summary_blocking(
         // MLX doesn't use the local GGUF; provide the filename for sidecar mapping
         uhoh_dir.join("models").join(&model.filename)
     } else {
-        match crate::ai::models::ensure_model_downloaded(uhoh_dir, &model) {
+        match crate::ai::llama::ensure_model_downloaded(uhoh_dir, &model) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("Cannot download model {}: {}", model.name, e);

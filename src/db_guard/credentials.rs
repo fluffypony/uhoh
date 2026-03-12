@@ -32,6 +32,69 @@ pub struct CredentialMaterial {
     pub password: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub enum CredentialSource {
+    Environment,
+    EncryptedFile,
+    Keyring,
+    PgPass,
+    None,
+}
+
+impl CredentialSource {
+    pub fn label(&self) -> &'static str {
+        match self {
+            CredentialSource::Environment => "environment",
+            CredentialSource::EncryptedFile => "encrypted_file",
+            CredentialSource::Keyring => "keyring",
+            CredentialSource::PgPass => "pgpass",
+            CredentialSource::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum KeyringStatus {
+    NotChecked,
+    Available,
+    NoEntry,
+    Unsupported,
+    TimedOut,
+    Unavailable(String),
+}
+
+impl KeyringStatus {
+    pub fn is_degraded(&self) -> bool {
+        matches!(
+            self,
+            KeyringStatus::TimedOut | KeyringStatus::Unavailable(_)
+        )
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            KeyringStatus::NotChecked => "not_checked".to_string(),
+            KeyringStatus::Available => "available".to_string(),
+            KeyringStatus::NoEntry => "no_entry".to_string(),
+            KeyringStatus::Unsupported => "unsupported".to_string(),
+            KeyringStatus::TimedOut => "timed_out".to_string(),
+            KeyringStatus::Unavailable(message) => message.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CliCredentialResolution {
+    pub material: CredentialMaterial,
+    pub source: CredentialSource,
+    pub keyring_status: KeyringStatus,
+}
+
+#[derive(Debug, Clone)]
+pub struct CredentialStoreOutcome {
+    pub keyring_status: KeyringStatus,
+}
+
 trait CredentialBackend {
     fn load(&self, key: &str) -> Result<Option<CredentialMaterial>>;
     fn store(&self, key: &str, value: &CredentialMaterial) -> Result<()>;
@@ -47,19 +110,6 @@ impl CredentialBackend for EncryptedFileBackend {
 
     fn store(&self, key: &str, value: &CredentialMaterial) -> Result<()> {
         store_encrypted_credential(key, value)
-    }
-}
-
-#[derive(Default)]
-struct KeyringBackend;
-
-impl CredentialBackend for KeyringBackend {
-    fn load(&self, key: &str) -> Result<Option<CredentialMaterial>> {
-        load_keyring_credential(key)
-    }
-
-    fn store(&self, key: &str, value: &CredentialMaterial) -> Result<()> {
-        store_keyring_credential(key, value)
     }
 }
 
@@ -122,26 +172,53 @@ pub fn resolve_postgres_credentials(connection_ref: &str) -> Result<CredentialMa
     })
 }
 
-pub fn resolve_postgres_credentials_cli(connection_ref: &str) -> Result<CredentialMaterial> {
+pub fn resolve_postgres_credentials_cli(connection_ref: &str) -> Result<CliCredentialResolution> {
     if let Some(material) = resolve_env_credentials("PG") {
-        return Ok(material);
+        return Ok(CliCredentialResolution {
+            material,
+            source: CredentialSource::Environment,
+            keyring_status: KeyringStatus::NotChecked,
+        });
     }
 
     if let Some(material) = EncryptedFileBackend.load(connection_ref)? {
-        return Ok(material);
+        return Ok(CliCredentialResolution {
+            material,
+            source: CredentialSource::EncryptedFile,
+            keyring_status: KeyringStatus::NotChecked,
+        });
     }
 
-    if let Some(material) = KeyringBackend.load(connection_ref)? {
-        return Ok(material);
-    }
+    let keyring_status = match load_keyring_credential(connection_ref)? {
+        KeyringLookup::Found(material) => {
+            return Ok(CliCredentialResolution {
+                material,
+                source: CredentialSource::Keyring,
+                keyring_status: KeyringStatus::Available,
+            })
+        }
+        KeyringLookup::NoEntry => KeyringStatus::NoEntry,
+        #[cfg(not(feature = "keyring"))]
+        KeyringLookup::Unsupported => KeyringStatus::Unsupported,
+        KeyringLookup::TimedOut => KeyringStatus::TimedOut,
+        KeyringLookup::Unavailable(message) => KeyringStatus::Unavailable(message),
+    };
 
     if let Some(material) = resolve_pgpass(connection_ref)? {
-        return Ok(material);
+        return Ok(CliCredentialResolution {
+            material,
+            source: CredentialSource::PgPass,
+            keyring_status,
+        });
     }
 
-    Ok(CredentialMaterial {
-        username: None,
-        password: None,
+    Ok(CliCredentialResolution {
+        material: CredentialMaterial {
+            username: None,
+            password: None,
+        },
+        source: CredentialSource::None,
+        keyring_status,
     })
 }
 
@@ -192,21 +269,30 @@ pub fn store_encrypted_credential(connection_ref: &str, cred: &CredentialMateria
 pub fn store_postgres_credentials_cli(
     connection_ref: &str,
     cred: &CredentialMaterial,
-) -> Result<()> {
+) -> Result<CredentialStoreOutcome> {
     EncryptedFileBackend.store(connection_ref, cred)?;
-    if let Err(err) = KeyringBackend.store(connection_ref, cred) {
-        tracing::warn!(
-            "Keyring store failed for '{}': {}",
-            scrub_dsn(connection_ref),
-            err
-        );
-    }
-    Ok(())
+    let keyring_status = match store_keyring_credential(connection_ref, cred)? {
+        KeyringStoreStatus::Stored => KeyringStatus::Available,
+        #[cfg(not(feature = "keyring"))]
+        KeyringStoreStatus::Unsupported => KeyringStatus::Unsupported,
+        KeyringStoreStatus::TimedOut => KeyringStatus::TimedOut,
+        KeyringStoreStatus::Unavailable(message) => KeyringStatus::Unavailable(message),
+    };
+    Ok(CredentialStoreOutcome { keyring_status })
 }
 
-fn load_keyring_credential(key: &str) -> Result<Option<CredentialMaterial>> {
+enum KeyringLookup {
+    Found(CredentialMaterial),
+    NoEntry,
+    #[cfg(not(feature = "keyring"))]
+    Unsupported,
+    TimedOut,
+    Unavailable(String),
+}
+
+fn load_keyring_credential(key: &str) -> Result<KeyringLookup> {
     let key_owned = key.to_string();
-    run_with_timeout(KEYRING_TIMEOUT_SECS, move || {
+    match run_with_timeout(KEYRING_TIMEOUT_SECS, move || {
         #[cfg(feature = "keyring")]
         {
             let entry = keyring::Entry::new(KEYRING_SERVICE, &key_owned)?;
@@ -214,38 +300,58 @@ fn load_keyring_credential(key: &str) -> Result<Option<CredentialMaterial>> {
                 Ok(raw) => {
                     let material: CredentialMaterial = serde_json::from_str(&raw)
                         .context("Keyring credential payload is invalid JSON")?;
-                    Ok(Some(material))
+                    Ok(KeyringLookup::Found(material))
                 }
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(err) => Err(anyhow::anyhow!("Keyring read failed: {err}")),
+                Err(keyring::Error::NoEntry) => Ok(KeyringLookup::NoEntry),
+                Err(err) => Ok(KeyringLookup::Unavailable(format!(
+                    "Keyring read failed: {err}"
+                ))),
             }
         }
         #[cfg(not(feature = "keyring"))]
         {
             let _ = key_owned;
-            Ok(None)
+            Ok(KeyringLookup::Unsupported)
         }
-    })
-    .unwrap_or_else(|_| Ok(None))
+    }) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(KeyringLookup::TimedOut),
+        Err(err) => Err(anyhow::anyhow!("Keyring read failed: {err}")),
+    }
 }
 
-fn store_keyring_credential(key: &str, value: &CredentialMaterial) -> Result<()> {
+enum KeyringStoreStatus {
+    Stored,
+    #[cfg(not(feature = "keyring"))]
+    Unsupported,
+    TimedOut,
+    Unavailable(String),
+}
+
+fn store_keyring_credential(key: &str, value: &CredentialMaterial) -> Result<KeyringStoreStatus> {
     let key_owned = key.to_string();
     let payload = serde_json::to_string(value)?;
-    run_with_timeout(KEYRING_TIMEOUT_SECS, move || {
+    match run_with_timeout(KEYRING_TIMEOUT_SECS, move || {
         #[cfg(feature = "keyring")]
         {
             let entry = keyring::Entry::new(KEYRING_SERVICE, &key_owned)?;
-            entry.set_password(&payload)?;
-            Ok(())
+            match entry.set_password(&payload) {
+                Ok(()) => Ok(KeyringStoreStatus::Stored),
+                Err(err) => Ok(KeyringStoreStatus::Unavailable(format!(
+                    "Keyring store failed: {err}"
+                ))),
+            }
         }
         #[cfg(not(feature = "keyring"))]
         {
             let _ = (key_owned, payload);
-            Ok(())
+            Ok(KeyringStoreStatus::Unsupported)
         }
-    })
-    .unwrap_or(Ok(()))
+    }) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(KeyringStoreStatus::TimedOut),
+        Err(err) => Err(anyhow::anyhow!("Keyring store failed: {err}")),
+    }
 }
 
 fn run_with_timeout<T, F>(

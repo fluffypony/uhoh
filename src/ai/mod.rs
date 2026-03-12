@@ -1,7 +1,9 @@
-pub mod mlx_update;
-pub mod models;
+pub mod llama;
+pub mod mlx;
+mod mlx_update;
+mod models;
 pub mod sidecar;
-pub mod sidecar_update;
+mod sidecar_update;
 pub mod summary;
 
 use crate::config::AiConfig;
