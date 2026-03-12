@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::db::AgentEntry;
 use crate::event_ledger::new_event;
-use crate::subsystem::SubsystemContext;
+use crate::subsystem::AgentContext;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AuditEvent {
@@ -21,7 +21,7 @@ pub enum AuditEvent {
     },
 }
 
-pub fn tick_audit(ctx: &SubsystemContext, agents: &[AgentEntry]) -> Result<()> {
+pub fn tick_audit(ctx: &AgentContext, agents: &[AgentEntry]) -> Result<()> {
     for agent in agents {
         let session_id = format!("agent:{}", agent.name);
         let mut event = new_event("agent", "audit_tick", "info");

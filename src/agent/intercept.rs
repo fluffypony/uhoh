@@ -8,12 +8,9 @@ use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 
 use crate::db::AgentEntry;
 use crate::event_ledger::new_event;
-use crate::subsystem::SubsystemContext;
+use crate::subsystem::AgentContext;
 
-pub async fn run_session_tailers_async(
-    ctx: &SubsystemContext,
-    agents: &[AgentEntry],
-) -> Result<()> {
+pub async fn run_session_tailers_async(ctx: &AgentContext, agents: &[AgentEntry]) -> Result<()> {
     let mut offsets: HashMap<String, u64> = load_offsets(&ctx.uhoh_dir).unwrap_or_default();
     loop {
         let mut offsets_changed = false;
@@ -110,7 +107,7 @@ fn persist_offsets(uhoh_dir: &Path, offsets: &HashMap<String, u64>) -> Result<()
 }
 
 async fn async_tail_one_file(
-    ctx: &SubsystemContext,
+    ctx: &AgentContext,
     agent: &AgentEntry,
     path: &Path,
     offset: u64,
@@ -150,7 +147,7 @@ async fn async_tail_one_file(
 }
 
 async fn process_jsonl_event(
-    ctx: &SubsystemContext,
+    ctx: &AgentContext,
     agent: &AgentEntry,
     event: &serde_json::Value,
 ) -> Result<()> {

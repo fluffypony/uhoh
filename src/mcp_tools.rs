@@ -10,7 +10,6 @@ use crate::mcp_protocol::{
     dispatch_protocol_request, JsonRpcRequest, JsonRpcResponse, ProtocolAction,
 };
 use crate::resolve;
-use crate::restore_guards::{RestoreFlagGuard, RestoreLockGuard, StaticRestoreFlagGuard};
 use crate::server::events::ServerEvent;
 use tokio::sync::broadcast;
 
@@ -61,14 +60,7 @@ pub struct McpToolContext {
     pub uhoh_dir: std::path::PathBuf,
     pub config: Config,
     pub event_tx: Option<broadcast::Sender<ServerEvent>>,
-    pub restore_in_progress: Option<RestoreInProgressFlag>,
-    pub restore_locks: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
-}
-
-#[derive(Clone)]
-pub enum RestoreInProgressFlag {
-    Shared(Arc<std::sync::atomic::AtomicBool>),
-    Global(&'static std::sync::atomic::AtomicBool),
+    pub restore_runtime: crate::restore_runtime::RestoreRuntime,
 }
 
 #[derive(Clone, Copy)]
@@ -217,9 +209,7 @@ pub async fn handle_json_rpc_request(
     match dispatch_protocol_request(request) {
         ProtocolAction::Notification => McpTransportResponse::Notification,
         ProtocolAction::Response(response) => McpTransportResponse::Response(response),
-        ProtocolAction::ToolsList { id } => {
-            McpTransportResponse::Response(tools_list_response(id))
-        }
+        ProtocolAction::ToolsList { id } => McpTransportResponse::Response(tools_list_response(id)),
         ProtocolAction::ToolsCall { id, params } => {
             let response = handle_tools_call(runtime, id, params).await;
             McpTransportResponse::Response(response)
@@ -255,8 +245,8 @@ fn tool_create_snapshot(context: &McpToolContext, args: Value) -> Result<Value, 
     let hash = args.get("project_hash").and_then(|v| v.as_str());
     let message = args.get("message").and_then(|v| v.as_str());
 
-    let project =
-        resolve::resolve_project(&context.database, path.or(hash), None).map_err(classify_lookup_error)?;
+    let project = resolve::resolve_project(&context.database, path.or(hash), None)
+        .map_err(classify_lookup_error)?;
     let project_path = Path::new(&project.current_path);
 
     let info = crate::snapshot::create_snapshot(
@@ -305,8 +295,8 @@ fn tool_list_snapshots(context: &McpToolContext, args: Value) -> Result<Value, M
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-    let project =
-        resolve::resolve_project(&context.database, path.or(hash), None).map_err(classify_lookup_error)?;
+    let project = resolve::resolve_project(&context.database, path.or(hash), None)
+        .map_err(classify_lookup_error)?;
     let snapshots = context
         .database
         .list_snapshots_paginated(&project.hash, limit, offset)
@@ -359,57 +349,16 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
     let hash = args.get("project_hash").and_then(|v| v.as_str());
     let target_path = args.get("target_path").and_then(|v| v.as_str());
 
-    let project =
-        resolve::resolve_project(&context.database, path.or(hash), None).map_err(classify_lookup_error)?;
-
-    let _project_lock_guard = if !dry_run {
-        if let Some(restore_locks) = &context.restore_locks {
-            let guard = RestoreLockGuard::acquire(restore_locks.clone(), project.hash.clone())
-                .map_err(|e: anyhow::Error| McpToolError::conflict(e.to_string()))?;
-            Some(guard)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let project = resolve::resolve_project(&context.database, path.or(hash), None)
+        .map_err(classify_lookup_error)?;
 
     if let Some(tp) = target_path {
         resolve::validate_path_within_project(Path::new(&project.current_path), tp)
             .map_err(|e| McpToolError::invalid_params(e.to_string()))?;
     }
 
-    #[allow(dead_code)]
-    enum RestoreGuard {
-        Shared(RestoreFlagGuard),
-        Global(StaticRestoreFlagGuard),
-    }
-
-    let _restore_guard: Option<RestoreGuard> = if !dry_run {
-        let flag = context
-            .restore_in_progress
-            .as_ref()
-            .ok_or_else(|| McpToolError::internal("Restore lock is not configured"))?
-            .clone();
-        match flag {
-            RestoreInProgressFlag::Shared(flag) => {
-                let guard = RestoreFlagGuard::acquire(flag)
-                    .map_err(|e: anyhow::Error| McpToolError::conflict(e.to_string()))?;
-                Some(RestoreGuard::Shared(guard))
-            }
-            RestoreInProgressFlag::Global(flag) => {
-                let guard = StaticRestoreFlagGuard::acquire(flag)
-                    .map_err(|e: anyhow::Error| McpToolError::conflict(e.to_string()))?;
-                Some(RestoreGuard::Global(guard))
-            }
-        }
-    } else {
-        None
-    };
-
-    let outcome = crate::restore::restore_project(
-        &context.uhoh_dir,
-        &context.database,
+    let outcome = crate::restore_runtime::restore_project(
+        &context.restore_runtime,
         &project,
         crate::restore::RestoreRequest {
             snapshot_id: &snapshot_id,
@@ -425,17 +374,6 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
         },
     )
     .map_err(classify_restore_error)?;
-
-    if !dry_run && outcome.applied {
-        if let Some(tx) = &context.event_tx {
-            let _ = tx.send(ServerEvent::SnapshotRestored {
-                project_hash: project.hash,
-                snapshot_id: outcome.snapshot_id.clone(),
-                files_modified: outcome.files_restored,
-                files_deleted: outcome.files_deleted,
-            });
-        }
-    }
 
     Ok(json!({
         "content": [{"type":"text", "text": if dry_run {

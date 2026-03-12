@@ -8,13 +8,13 @@ use tokio::net::TcpListener;
 use zeroize::Zeroize;
 
 use crate::event_ledger::new_event;
-use crate::subsystem::SubsystemContext;
+use crate::subsystem::AgentContext;
 use tokio_util::sync::CancellationToken;
 
 const PROXY_TOKEN_FILE: &str = "server.token";
 const APPROVAL_RESPONSE_FILE_SUFFIX: &str = ".approved.json";
 
-pub async fn run_proxy(ctx: SubsystemContext, shutdown: CancellationToken) -> Result<()> {
+pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result<()> {
     let _ = ensure_proxy_token(&ctx.uhoh_dir)?;
     let addr = format!("127.0.0.1:{}", ctx.config.agent.mcp_proxy_port);
     let listener = TcpListener::bind(&addr)
@@ -650,7 +650,10 @@ fn list_pending_approval_files(runtime: &Path, strict: bool) -> Result<Vec<Pendi
             Ok(Some(pending)) => approvals.push(pending),
             Ok(None) => {}
             Err(err) if !strict => {
-                tracing::warn!("Ignoring invalid pending approval {}: {err}", path.display());
+                tracing::warn!(
+                    "Ignoring invalid pending approval {}: {err}",
+                    path.display()
+                );
             }
             Err(err) => return Err(err),
         }
@@ -667,8 +670,8 @@ fn parse_pending_approval_file(path: &Path) -> Result<Option<PendingApprovalFile
     else {
         return Ok(None);
     };
-    let pending_raw =
-        std::fs::read_to_string(path).with_context(|| format!("Failed reading {}", path.display()))?;
+    let pending_raw = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed reading {}", path.display()))?;
     let pending_json: serde_json::Value = serde_json::from_str(&pending_raw)
         .with_context(|| format!("Invalid pending approval JSON: {}", path.display()))?;
     let approval_id = pending_json

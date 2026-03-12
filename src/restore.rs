@@ -1,49 +1,12 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::cas;
 use crate::db::{Database, ProjectEntry};
 use crate::snapshot;
 
 pub(crate) const RESTORE_IN_PROGRESS_FILE: &str = ".restore-in-progress";
-
-struct RestoreSignalGuard {
-    path: PathBuf,
-}
-
-impl RestoreSignalGuard {
-    fn install(uhoh_dir: &Path, project_hash: &str) -> Result<Self> {
-        let path = uhoh_dir.join(RESTORE_IN_PROGRESS_FILE);
-        let pid = std::process::id();
-        let start_ticks = crate::platform::read_process_start_ticks(pid).unwrap_or(0);
-        let payload =
-            format!("project_hash={project_hash}\npid={pid}\nstart_ticks={start_ticks}\n");
-        // Use create_new(true) for atomic mutual exclusion: if another
-        // restore is in progress, the file already exists and this fails.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(payload.as_bytes())
-            })
-            .with_context(|| {
-                format!(
-                    "Failed to create restore marker (another restore may be in progress): {}",
-                    path.display()
-                )
-            })?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for RestoreSignalGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct RestoreOutcome {
@@ -69,6 +32,19 @@ pub struct RestoreRequest<'a> {
     pub force: bool,
     pub pre_restore_snapshot: Option<PreRestoreSnapshot<'a>>,
     pub confirm_large_delete: Option<&'a dyn Fn(usize) -> Result<bool>>,
+}
+
+pub fn restore_project(
+    uhoh_dir: &Path,
+    database: &Database,
+    project: &ProjectEntry,
+    request: RestoreRequest<'_>,
+) -> Result<RestoreOutcome> {
+    let runtime = crate::restore_runtime::RestoreRuntime::new(
+        std::sync::Arc::new(database.clone_handle()),
+        uhoh_dir.to_path_buf(),
+    );
+    crate::restore_runtime::restore_project(&runtime, project, request)
 }
 
 pub fn restore_symlink_target(content: &[u8], full_path: &Path) -> Result<()> {
@@ -204,7 +180,7 @@ fn quick_hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-pub fn restore_project(
+pub(crate) fn apply_restore(
     uhoh_dir: &Path,
     database: &Database,
     project: &ProjectEntry,
@@ -283,11 +259,6 @@ pub fn restore_project(
     let mut to_restore: Vec<(std::path::PathBuf, String, bool, bool)> = Vec::new(); // (path, hash, executable, is_symlink)
 
     let mut cleanup_staging: Option<std::path::PathBuf> = None;
-    let _restore_signal = if dry_run {
-        None
-    } else {
-        Some(RestoreSignalGuard::install(uhoh_dir, &project.hash)?)
-    };
 
     let result = (|| -> Result<RestoreOutcome> {
         // Files to delete: in current manifest but not in target manifest

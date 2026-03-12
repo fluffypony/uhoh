@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use super::ApiState;
 use crate::resolve;
+use crate::restore_runtime;
 
 #[derive(Deserialize)]
 pub struct PaginationParams {
@@ -111,14 +112,6 @@ fn internal_error_response(error: impl ToString) -> axum::response::Response {
 
 fn bad_request_response(error: impl ToString) -> axum::response::Response {
     ApiError::invalid_input(error).into_response()
-}
-
-fn not_found_response(error: impl ToString) -> axum::response::Response {
-    ApiError::not_found(error).into_response()
-}
-
-fn conflict_response(error: impl ToString) -> axum::response::Response {
-    ApiError::conflict(error).into_response()
 }
 
 pub async fn list_projects(State(state): State<ApiState>) -> impl IntoResponse {
@@ -435,8 +428,11 @@ pub async fn get_file_content(
         let project =
             resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::not_found)?;
         let clean_path = file_path.trim_start_matches('/').replace('\\', "/");
-        resolve::validate_path_within_project(std::path::Path::new(&project.current_path), &clean_path)
-            .map_err(ApiError::invalid_input)?;
+        resolve::validate_path_within_project(
+            std::path::Path::new(&project.current_path),
+            &clean_path,
+        )
+        .map_err(ApiError::invalid_input)?;
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
             .ok_or_else(|| ApiError::not_found("Snapshot not found"))
@@ -583,42 +579,9 @@ pub async fn restore_snapshot(
     }
 
     let db = state.database.clone();
-    let uhoh_dir = state.uhoh_dir.clone();
-    let restore_in_progress = state.restore_in_progress.clone();
-    let restore_locks = state.restore_locks.clone();
-    let event_tx = state.event_tx.clone();
     let cfg = state.config.clone();
+    let restore_runtime = state.restore_runtime.clone();
     let target_path_for_task = target_path.clone();
-
-    let restore_key = if !dry_run {
-        let db_for_key = db.clone();
-        let hash_for_key = hash.clone();
-        match tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            let project = resolve::resolve_project(&db_for_key, Some(&hash_for_key), None)?;
-            Ok(project.hash)
-        })
-        .await
-        {
-            Ok(Ok(key)) => Some(key),
-            Ok(Err(e)) => return not_found_response(e),
-            Err(e) => return internal_error_response(format!("Internal error: {e}")),
-        }
-    } else {
-        None
-    };
-
-    let mut lock_guard: Option<crate::restore_guards::RestoreLockGuard> = None;
-    if let Some(restore_key) = restore_key {
-        match crate::restore_guards::RestoreLockGuard::acquire(restore_locks.clone(), restore_key)
-        {
-            Ok(guard) => {
-                lock_guard = Some(guard);
-            }
-            Err(e) => {
-                return conflict_response(e)
-            }
-        }
-    }
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
         let project = resolve::resolve_project(&db, Some(&hash), None)?;
@@ -626,17 +589,8 @@ pub async fn restore_snapshot(
             resolve::validate_path_within_project(std::path::Path::new(&project.current_path), tp)?;
         }
 
-        let _restore_guard = if !dry_run {
-            Some(crate::restore_guards::RestoreFlagGuard::acquire(
-                restore_in_progress.clone(),
-            )?)
-        } else {
-            None
-        };
-
-        let outcome = crate::restore::restore_project(
-            &uhoh_dir,
-            &db,
+        let outcome = restore_runtime::restore_project(
+            &restore_runtime,
             &project,
             crate::restore::RestoreRequest {
                 snapshot_id: &snap_id,
@@ -652,15 +606,6 @@ pub async fn restore_snapshot(
             },
         )?;
 
-        if !dry_run && outcome.applied {
-            let _ = event_tx.send(crate::server::events::ServerEvent::SnapshotRestored {
-                project_hash: project.hash.clone(),
-                snapshot_id: outcome.snapshot_id.clone(),
-                files_modified: outcome.files_restored,
-                files_deleted: outcome.files_deleted,
-            });
-        }
-
         Ok(json!({
             "restored": outcome.applied,
             "dry_run": outcome.dry_run,
@@ -673,12 +618,31 @@ pub async fn restore_snapshot(
     })
     .await;
 
-    drop(lock_guard);
-
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(e)) => bad_request_response(e),
+        Ok(Err(e)) => classify_restore_api_error(e).into_response(),
         Err(e) => internal_error_response(e),
+    }
+}
+
+fn classify_restore_api_error(err: anyhow::Error) -> ApiError {
+    let message = err.to_string();
+    let lowered = message.to_ascii_lowercase();
+    if lowered.contains("not registered")
+        || lowered.contains("no project matching")
+        || lowered.contains("snapshot not found")
+        || lowered.contains("not found")
+    {
+        ApiError::not_found(message)
+    } else if lowered.contains("already in progress") {
+        ApiError::conflict(message)
+    } else if lowered.contains("invalid")
+        || lowered.contains("requires 'confirm'")
+        || lowered.contains("requires confirm")
+    {
+        ApiError::invalid_input(message)
+    } else {
+        ApiError::internal(message)
     }
 }
 

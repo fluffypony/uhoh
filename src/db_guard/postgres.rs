@@ -12,7 +12,7 @@ use crate::db::DbGuardEntry;
 use crate::db_guard::credentials;
 use crate::db_guard::recovery;
 use crate::event_ledger::new_event;
-use crate::subsystem::SubsystemContext;
+use crate::subsystem::DbGuardContext;
 
 /// Build a connection string with resolved credentials injected.
 pub fn build_connect_dsn(connection_ref: &str) -> Result<String> {
@@ -72,7 +72,7 @@ static PG_DDL_POLL_WORKERS: Lazy<Mutex<HashMap<String, DdlPollWorker>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn emit_recovery_event(
-    ctx: &SubsystemContext,
+    ctx: &DbGuardContext,
     guard_name: &str,
     event_type: &str,
     detail: serde_json::Value,
@@ -87,8 +87,23 @@ fn emit_recovery_event(
     }
 }
 
+fn emit_degraded_event(ctx: &DbGuardContext, guard_name: &str, step: &str, err: &anyhow::Error) {
+    let mut event = new_event("db_guard", "postgres_optional_step_degraded", "warn");
+    event.guard_name = Some(guard_name.to_string());
+    event.detail = Some(
+        serde_json::json!({
+            "step": step,
+            "error": err.to_string(),
+        })
+        .to_string(),
+    );
+    if let Err(append_err) = ctx.event_ledger.append(event) {
+        tracing::error!("failed to append postgres_optional_step_degraded event: {append_err}");
+    }
+}
+
 pub fn tick_postgres_guard(
-    ctx: &SubsystemContext,
+    ctx: &DbGuardContext,
     guard: &DbGuardEntry,
     tick_interval_secs: i64,
 ) -> Result<()> {
@@ -102,6 +117,7 @@ pub fn tick_postgres_guard(
                 guard.name,
                 err
             );
+            emit_degraded_event(ctx, &guard.name, "wildcard_trigger_reconcile", &err);
         }
     }
 
@@ -176,18 +192,19 @@ pub fn tick_postgres_guard(
     match poll_delete_count(&poll_dsn, poll_window_secs, &guard.tables_csv) {
         Ok(deleted_rows) => {
             let total_rows = match poll_total_row_count(&poll_dsn) {
-                Ok(total) => total,
+                Ok(total) => Some(total),
                 Err(err) => {
                     tracing::warn!(
                         "postgres total row count poll failed for {}: {}",
                         guard.name,
                         err
                     );
-                    0
+                    emit_degraded_event(ctx, &guard.name, "total_row_count_poll", &err);
+                    None
                 }
             };
-            let pct = if total_rows > 0 {
-                deleted_rows as f64 / total_rows as f64
+            let pct = if total_rows.unwrap_or(0) > 0 {
+                deleted_rows as f64 / total_rows.unwrap_or(0) as f64
             } else {
                 0.0
             };
@@ -267,7 +284,13 @@ pub fn tick_postgres_guard(
     }
 
     let listen_payloads = drain_listen_payloads(&poll_dsn)?;
-    let ddl_payloads = poll_ddl_events(&poll_dsn, 64).unwrap_or_default();
+    let ddl_payloads = match poll_ddl_events(&poll_dsn, 64) {
+        Ok(payloads) => payloads,
+        Err(err) => {
+            emit_degraded_event(ctx, &guard.name, "ddl_event_poll", &err);
+            Vec::new()
+        }
+    };
     let mut payloads = Vec::new();
     payloads.extend(listen_payloads);
     payloads.extend(ddl_payloads);
@@ -320,7 +343,7 @@ pub fn tick_postgres_guard(
 }
 
 fn reconcile_wildcard_delete_triggers(
-    ctx: &SubsystemContext,
+    ctx: &DbGuardContext,
     guard: &DbGuardEntry,
     poll_dsn: &str,
 ) -> Result<()> {
@@ -458,7 +481,249 @@ async fn install_delete_counter_trigger_sql(
     Ok(())
 }
 
-pub fn reconcile_listen_workers(
+pub fn install_monitoring_infrastructure(
+    connection_ref: &str,
+    tables_csv: &str,
+) -> Result<Option<String>> {
+    let connection_ref =
+        build_connect_dsn(connection_ref).unwrap_or_else(|_| connection_ref.to_string());
+    let tables = parse_watched_tables(tables_csv);
+    run_postgres_task(async move {
+        let client = pg_connect_spawn(&connection_ref).await?;
+        client
+            .batch_execute(
+                "
+                CREATE TABLE IF NOT EXISTS _uhoh_ddl_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_tag TEXT NOT NULL,
+                    object_type TEXT,
+                    schema_name TEXT,
+                    object_identity TEXT,
+                    payload TEXT,
+                    occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+
+                CREATE TABLE IF NOT EXISTS _uhoh_delete_counts (
+                    table_name TEXT NOT NULL,
+                    txid BIGINT NOT NULL DEFAULT txid_current(),
+                    delete_count INTEGER NOT NULL DEFAULT 0,
+                    ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (table_name, txid)
+                );
+                CREATE INDEX IF NOT EXISTS idx_uhoh_delete_counts_ts ON _uhoh_delete_counts(ts);
+
+                CREATE OR REPLACE FUNCTION _uhoh_ddl_handler() RETURNS event_trigger AS $$
+                DECLARE rec RECORD;
+                DECLARE payload_json TEXT;
+                BEGIN
+                    FOR rec IN SELECT * FROM pg_event_trigger_dropped_objects() LOOP
+                        payload_json := json_build_object(
+                            'event_tag', tg_tag,
+                            'object_type', rec.object_type,
+                            'schema_name', rec.schema_name,
+                            'object_identity', rec.object_identity
+                        )::text;
+
+                        INSERT INTO _uhoh_ddl_events (
+                            event_tag,
+                            object_type,
+                            schema_name,
+                            object_identity,
+                            payload
+                        ) VALUES (
+                            tg_tag,
+                            rec.object_type,
+                            rec.schema_name,
+                            rec.object_identity,
+                            payload_json
+                        );
+                    END LOOP;
+                END;
+                $$ LANGUAGE plpgsql;
+                ",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+
+        match client
+            .batch_execute(
+                "DROP EVENT TRIGGER IF EXISTS uhoh_ddl_drop;
+                 CREATE EVENT TRIGGER uhoh_ddl_drop ON sql_drop
+                     EXECUTE FUNCTION _uhoh_ddl_handler();",
+            )
+            .await
+        {
+            Ok(_) => tracing::info!("DDL event trigger installed"),
+            Err(err) => {
+                let message = credentials::scrub_error_message(&err.to_string());
+                if message.contains("permission denied") || message.contains("must be superuser") {
+                    eprintln!(
+                        "Warning: Could not create event trigger (requires superuser). DDL changes like DROP TABLE will not be tracked, but row-level delete monitoring will still function."
+                    );
+                } else {
+                    return Err(anyhow::anyhow!(message));
+                }
+            }
+        }
+
+        if tables.is_empty() {
+            let rows = client
+                .query(
+                    "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = current_schema()",
+                    &[],
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+            let mut table_names: Vec<String> = rows
+                .into_iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect();
+            for table in &table_names {
+                install_delete_counter_trigger_sql(&client, table).await?;
+            }
+            table_names.sort();
+            table_names.dedup();
+            Ok(Some(table_names.join(",")))
+        } else {
+            for table in tables {
+                install_delete_counter_trigger_sql(&client, &table).await?;
+            }
+            Ok(None)
+        }
+    })
+}
+
+pub fn drop_monitoring_infrastructure(connection_ref: &str, tables_csv: &str) -> Result<()> {
+    let connection_ref =
+        build_connect_dsn(connection_ref).unwrap_or_else(|_| connection_ref.to_string());
+    let tables = parse_watched_tables(tables_csv);
+    run_postgres_task(async move {
+        let client = pg_connect_spawn(&connection_ref).await?;
+
+        if tables.is_empty() {
+            client
+                .batch_execute(
+                    r#"
+                    DO $$
+                    DECLARE rec RECORD;
+                    BEGIN
+                        FOR rec IN
+                            SELECT n.nspname AS schema_name, c.relname AS table_name, t.tgname AS trigger_name
+                            FROM pg_trigger t
+                            JOIN pg_class c ON c.oid = t.tgrelid
+                            JOIN pg_namespace n ON n.oid = c.relnamespace
+                            WHERE NOT t.tgisinternal
+                              AND t.tgname LIKE 'uhoh_delete_counter_%'
+                        LOOP
+                            EXECUTE format(
+                                'DROP TRIGGER IF EXISTS %I ON %I.%I',
+                                rec.trigger_name,
+                                rec.schema_name,
+                                rec.table_name
+                            );
+                        END LOOP;
+
+                        FOR rec IN
+                            SELECT n.nspname AS schema_name, p.proname AS fn_name
+                            FROM pg_proc p
+                            JOIN pg_namespace n ON n.oid = p.pronamespace
+                            WHERE p.proname LIKE '_uhoh_count_deletes_%'
+                        LOOP
+                            EXECUTE format(
+                                'DROP FUNCTION IF EXISTS %I.%I()',
+                                rec.schema_name,
+                                rec.fn_name
+                            );
+                        END LOOP;
+                    END $$;
+                    "#,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+        } else {
+            for table in tables {
+                let trigger_ident = crate::db_guard::quote_pg_ident(&format!(
+                    "uhoh_delete_counter_{}",
+                    blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
+                ))?;
+                let fn_ident = crate::db_guard::quote_pg_ident(&format!(
+                    "_uhoh_count_deletes_{}",
+                    blake3::hash(table.as_bytes()).to_hex()
+                ))?;
+                let table_quoted = crate::db_guard::quote_pg_ident(&table)?;
+                let sql = format!(
+                    "DROP TRIGGER IF EXISTS {trigger_ident} ON {table_quoted}; DROP FUNCTION IF EXISTS {fn_ident}();"
+                );
+                client.batch_execute(&sql).await.map_err(|e| {
+                    anyhow::anyhow!(credentials::scrub_error_message(&e.to_string()))
+                })?;
+            }
+        }
+
+        client
+            .batch_execute(
+                "
+                DROP EVENT TRIGGER IF EXISTS uhoh_ddl_drop;
+                DROP FUNCTION IF EXISTS _uhoh_ddl_handler();
+                DROP TABLE IF EXISTS _uhoh_ddl_events;
+                DROP TABLE IF EXISTS _uhoh_delete_counts;
+                ",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+        Ok(())
+    })
+}
+
+pub fn test_monitoring_infrastructure(connection_ref: &str) -> Result<()> {
+    let connection_ref =
+        build_connect_dsn(connection_ref).unwrap_or_else(|_| connection_ref.to_string());
+    run_postgres_task(async move {
+        let client = pg_connect_spawn(&connection_ref).await?;
+
+        match client
+            .query_one("SELECT 1 FROM _uhoh_ddl_events LIMIT 1", &[])
+            .await
+        {
+            Ok(_) => {}
+            Err(_) => {
+                let _ = client.query_one("SELECT 1", &[]).await.map_err(|e| {
+                    anyhow::anyhow!(credentials::scrub_error_message(&e.to_string()))
+                })?;
+            }
+        }
+
+        match client
+            .query_one("SELECT 1 FROM _uhoh_delete_counts LIMIT 1", &[])
+            .await
+        {
+            Ok(_) => {}
+            Err(_) => {
+                let _ = client.query_one("SELECT 1", &[]).await.map_err(|e| {
+                    anyhow::anyhow!(credentials::scrub_error_message(&e.to_string()))
+                })?;
+            }
+        }
+
+        Ok(())
+    })
+}
+
+pub fn execute_sql(connection_ref: &str, sql: &str) -> Result<()> {
+    let connection_ref =
+        build_connect_dsn(connection_ref).unwrap_or_else(|_| connection_ref.to_string());
+    let sql = sql.to_string();
+    run_postgres_task(async move {
+        let client = pg_connect_spawn(&connection_ref).await?;
+        client
+            .batch_execute(&sql)
+            .await
+            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
+        Ok(())
+    })
+}
+
+pub(crate) fn reconcile_listen_workers(
     guards: &[DbGuardEntry],
     shutdown: &CancellationToken,
 ) -> Result<()> {
@@ -509,7 +774,7 @@ pub fn reconcile_listen_workers(
     Ok(())
 }
 
-pub fn shutdown_all_listen_workers() {
+pub(crate) fn shutdown_all_listen_workers() {
     if let Ok(mut workers) = PG_DDL_POLL_WORKERS.lock() {
         for (_, worker) in workers.drain() {
             worker.cancel.cancel();
@@ -775,6 +1040,18 @@ async fn sleep_or_cancel(duration: std::time::Duration, shutdown: &CancellationT
     }
 }
 
+fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
+    if tables_csv.trim() == "*" {
+        return Vec::new();
+    }
+    tables_csv
+        .split(',')
+        .map(str::trim)
+        .filter(|table| !table.is_empty())
+        .map(|table| table.to_string())
+        .collect()
+}
+
 pub(crate) fn run_postgres_task<T, F>(fut: F) -> Result<T>
 where
     F: std::future::Future<Output = Result<T>>,
@@ -866,7 +1143,7 @@ pub(crate) fn native_rustls_connector_for_sslmode(sslmode: &str) -> Result<MakeR
     Ok(MakeRustlsConnect::new(config))
 }
 
-pub async fn pg_connect_spawn(connection_ref: &str) -> Result<tokio_postgres::Client> {
+pub(crate) async fn pg_connect_spawn(connection_ref: &str) -> Result<tokio_postgres::Client> {
     if connection_requires_tls(connection_ref) {
         let sslmode = extract_sslmode(connection_ref).unwrap_or("require");
         let tls = native_rustls_connector_for_sslmode(sslmode)?;

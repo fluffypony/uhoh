@@ -39,7 +39,6 @@ impl EventLedger {
 
         Ok(id)
     }
-
 }
 
 /// Map a persisted event ledger entry to a `ServerEvent` for real-time broadcast.

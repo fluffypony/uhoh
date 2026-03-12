@@ -64,8 +64,13 @@ impl JsonRpcResponse {
 pub enum ProtocolAction {
     Notification,
     Response(JsonRpcResponse),
-    ToolsList { id: Option<Value> },
-    ToolsCall { id: Option<Value>, params: Option<Value> },
+    ToolsList {
+        id: Option<Value>,
+    },
+    ToolsCall {
+        id: Option<Value>,
+        params: Option<Value>,
+    },
 }
 
 pub fn dispatch_protocol_request(request: JsonRpcRequest) -> ProtocolAction {

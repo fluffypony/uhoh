@@ -31,8 +31,7 @@ pub struct AppState {
     pub uhoh_dir: PathBuf,
     pub config: crate::config::Config,
     pub event_tx: broadcast::Sender<ServerEvent>,
-    pub restore_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    pub restore_locks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    pub restore_coordinator: crate::restore_runtime::RestoreCoordinator,
     pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
     /// Cached server auth token, read once at startup.
     pub cached_token: Option<String>,
@@ -44,8 +43,7 @@ pub struct ApiState {
     pub uhoh_dir: PathBuf,
     pub config: crate::config::Config,
     pub event_tx: broadcast::Sender<ServerEvent>,
-    pub restore_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    pub restore_locks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    pub restore_runtime: crate::restore_runtime::RestoreRuntime,
 }
 
 #[derive(Clone)]
@@ -73,8 +71,12 @@ impl FromRef<AppState> for ApiState {
             uhoh_dir: input.uhoh_dir.clone(),
             config: input.config.clone(),
             event_tx: input.event_tx.clone(),
-            restore_in_progress: input.restore_in_progress.clone(),
-            restore_locks: input.restore_locks.clone(),
+            restore_runtime: crate::restore_runtime::RestoreRuntime::new(
+                input.database.clone(),
+                input.uhoh_dir.clone(),
+            )
+            .with_event_tx(input.event_tx.clone())
+            .with_coordinator(input.restore_coordinator.clone()),
         }
     }
 }
@@ -97,10 +99,12 @@ impl FromRef<AppState> for McpState {
                     uhoh_dir: input.uhoh_dir.clone(),
                     config: input.config.clone(),
                     event_tx: Some(input.event_tx.clone()),
-                    restore_in_progress: Some(crate::mcp_tools::RestoreInProgressFlag::Shared(
-                        input.restore_in_progress.clone(),
-                    )),
-                    restore_locks: Some(input.restore_locks.clone()),
+                    restore_runtime: crate::restore_runtime::RestoreRuntime::new(
+                        input.database.clone(),
+                        input.uhoh_dir.clone(),
+                    )
+                    .with_event_tx(input.event_tx.clone())
+                    .with_coordinator(input.restore_coordinator.clone()),
                 },
                 executor: crate::mcp_tools::McpToolExecutor::SpawnBlocking,
             },
@@ -124,7 +128,7 @@ pub async fn start_server(
     database: Arc<Database>,
     uhoh_dir: PathBuf,
     event_tx: broadcast::Sender<ServerEvent>,
-    restore_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    restore_coordinator: crate::restore_runtime::RestoreCoordinator,
     subsystem_manager: Arc<Mutex<SubsystemManager>>,
 ) -> Result<tokio::task::JoinHandle<()>> {
     // Reuse existing token if present, only generate on first run
@@ -150,8 +154,7 @@ pub async fn start_server(
         uhoh_dir: uhoh_dir.clone(),
         config: full_config,
         event_tx,
-        restore_in_progress,
-        restore_locks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        restore_coordinator,
         subsystem_manager,
         cached_token: Some(auth_token.clone()),
     };

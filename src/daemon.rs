@@ -13,7 +13,9 @@ use crate::db::Database;
 use crate::event_ledger::EventLedger;
 use crate::notifications::NotificationPipeline;
 use crate::snapshot;
-use crate::subsystem::{Subsystem, SubsystemContext, SubsystemHealth, SubsystemManager};
+use crate::subsystem::{
+    MaintenanceContext, Subsystem, SubsystemContext, SubsystemHealth, SubsystemManager,
+};
 use crate::watcher;
 use notify::{RecursiveMode, Watcher as _};
 
@@ -44,7 +46,7 @@ impl DaemonMaintenanceSubsystem {
         }
     }
 
-    async fn run_tick(&mut self, ctx: &SubsystemContext) {
+    async fn run_tick(&mut self, ctx: &MaintenanceContext) {
         let mut tick_failure: Option<String> = None;
         let db_projects = {
             let db = ctx.database.clone();
@@ -253,6 +255,7 @@ impl Subsystem for DaemonMaintenanceSubsystem {
         shutdown: tokio_util::sync::CancellationToken,
         ctx: SubsystemContext,
     ) -> Result<()> {
+        let ctx = ctx.maintenance_context();
         let mut tick_interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             tokio::select! {
@@ -501,7 +504,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     };
 
     let (server_event_tx, _) = broadcast::channel::<crate::server::events::ServerEvent>(4096);
-    let restore_in_progress = Arc::new(AtomicBool::new(false));
+    let restore_coordinator = crate::restore_runtime::RestoreCoordinator::new();
+    let restore_in_progress = restore_coordinator.in_progress_flag();
 
     let event_ledger =
         EventLedger::new(database.clone()).with_server_event_tx(server_event_tx.clone());
@@ -533,7 +537,7 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                 database.clone(),
                 uhoh_dir.clone(),
                 server_event_tx.clone(),
-                restore_in_progress.clone(),
+                restore_coordinator.clone(),
                 subsystem_manager.clone(),
             )
             .await?,
@@ -692,8 +696,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
     loop {
         tokio::select! {
             Some(event) = event_rx.recv() => {
-                let currently_restoring = restore_in_progress.load(std::sync::atomic::Ordering::SeqCst)
-                    || restore_marker_active(&uhoh_dir);
+                let currently_restoring =
+                    crate::restore_runtime::is_restore_active(&restore_coordinator, &uhoh_dir);
                 // Detect restore completion (true → false transition)
                 if was_restoring && !currently_restoring {
                     let now = Instant::now();
@@ -722,7 +726,8 @@ pub async fn run_foreground(uhoh_dir: &Path, database: std::sync::Arc<Database>)
                     // project being restored.
                     let is_control = matches!(event, WatchEvent::WatcherDied | WatchEvent::Overflow);
                     if !is_control {
-                        let restoring_hash = read_restoring_project_hash(&uhoh_dir);
+                        let restoring_hash =
+                            crate::restore_runtime::read_restoring_project_hash(&uhoh_dir);
                         let event_path = match &event {
                             WatchEvent::FileChanged(p) | WatchEvent::FileDeleted(p) | WatchEvent::Rescan(p) => Some(p.clone()),
                             _ => None,
@@ -998,76 +1003,6 @@ type SnapshotTaskResult = (
 );
 
 const MAX_DELETED_PATHS: usize = 100_000;
-
-fn restore_marker_active(uhoh_dir: &Path) -> bool {
-    let marker_path = uhoh_dir.join(crate::restore::RESTORE_IN_PROGRESS_FILE);
-    if !marker_path.exists() {
-        return false;
-    }
-
-    const MAX_MARKER_AGE_SECS: u64 = 3600;
-    if let Ok(meta) = std::fs::metadata(&marker_path) {
-        if let Ok(modified) = meta.modified() {
-            if modified
-                .elapsed()
-                .map(|d| d > Duration::from_secs(MAX_MARKER_AGE_SECS))
-                .unwrap_or(false)
-            {
-                tracing::warn!("Removing stale restore marker: {}", marker_path.display());
-                let _ = std::fs::remove_file(&marker_path);
-                return false;
-            }
-        }
-    }
-
-    // If marker is stale (originating process died), remove it and treat as inactive.
-    if let Ok(text) = std::fs::read_to_string(&marker_path) {
-        let mut parseable = false;
-        if let Some(pid_line) = text.lines().find(|l| l.starts_with("pid=")) {
-            if let Ok(pid) = pid_line.trim_start_matches("pid=").trim().parse::<u32>() {
-                parseable = true;
-                // Use start_ticks from marker file for PID-reuse-safe check
-                let expected_start = text
-                    .lines()
-                    .find(|l| l.starts_with("start_ticks="))
-                    .and_then(|l| {
-                        l.trim_start_matches("start_ticks=")
-                            .trim()
-                            .parse::<u64>()
-                            .ok()
-                    });
-                if !crate::platform::is_uhoh_process_alive_with_start(pid, expected_start) {
-                    let _ = std::fs::remove_file(&marker_path);
-                    return false;
-                }
-            }
-        }
-        if !parseable {
-            tracing::warn!("Removing corrupt restore marker: {}", marker_path.display());
-            let _ = std::fs::remove_file(&marker_path);
-            return false;
-        }
-    } else {
-        tracing::warn!(
-            "Removing unreadable restore marker: {}",
-            marker_path.display()
-        );
-        let _ = std::fs::remove_file(&marker_path);
-        return false;
-    }
-
-    true
-}
-
-/// Read the project_hash from the .restore-in-progress marker, if present.
-fn read_restoring_project_hash(uhoh_dir: &Path) -> Option<String> {
-    let marker_path = uhoh_dir.join(crate::restore::RESTORE_IN_PROGRESS_FILE);
-    let text = std::fs::read_to_string(&marker_path).ok()?;
-    text.lines()
-        .find(|l| l.starts_with("project_hash="))
-        .map(|l| l.trim_start_matches("project_hash=").trim().to_string())
-        .filter(|h| !h.is_empty())
-}
 
 fn handle_watch_event(
     states: &mut HashMap<String, ProjectDaemonState>,
@@ -1351,7 +1286,7 @@ async fn process_pending_snapshots(ctx: SnapshotProcessCtx<'_>) {
     // Detect restore completion here too (not just in watcher handler), so that
     // if restore starts and ends between watcher events, grace period still fires.
     let currently_restoring = restore_in_progress.load(std::sync::atomic::Ordering::SeqCst)
-        || restore_marker_active(uhoh_dir);
+        || crate::restore_runtime::restore_marker_active(uhoh_dir);
     if *was_restoring_snapshot && !currently_restoring {
         for state in states.values_mut() {
             state.restore_completed_at = Some(now);
@@ -1377,7 +1312,7 @@ async fn process_pending_snapshots(ctx: SnapshotProcessCtx<'_>) {
 
         // ===== EMERGENCY EVALUATION (before normal debounce) =====
         let is_restoring = restore_in_progress.load(std::sync::atomic::Ordering::SeqCst)
-            || restore_marker_active(uhoh_dir);
+            || crate::restore_runtime::restore_marker_active(uhoh_dir);
 
         // Post-restore grace period: suppress emergency detection for a short
         // window after restore completes to avoid false alarms from delayed

@@ -405,32 +405,33 @@ fn cargo_features_include_core_gates() {
 
 #[test]
 fn postgres_db_ops_use_runtime_bridge_instead_of_nested_runtime_builder() {
-    let source = std::fs::read_to_string("src/main.rs").expect("read main command handler");
-    assert!(source.contains("fn block_on_runtime<T>"));
-    assert!(source.contains("Builder::new_current_thread()"));
-    assert!(!source.contains("tokio::task::block_in_place(|| handle.block_on(fut))"));
-    assert!(
-        !source.contains("postgres guard install")
-            || source.contains("block_on_runtime(async move")
-    );
+    let main = std::fs::read_to_string("src/main.rs").expect("read main command handler");
+    let postgres =
+        std::fs::read_to_string("src/db_guard/postgres.rs").expect("read postgres guard module");
+    assert!(!main.contains("fn block_on_runtime<T>"));
+    assert!(!main.contains("connect_postgres_client"));
+    assert!(postgres.contains("pub(crate) fn run_postgres_task"));
+    assert!(postgres.contains("install_monitoring_infrastructure"));
+    assert!(postgres.contains("execute_sql(connection_ref: &str, sql: &str)"));
 }
 
 #[test]
 fn db_add_rolls_back_remote_and_credentials_on_local_failure() {
     let source = std::fs::read_to_string("src/main.rs").expect("read main command handler");
-    assert!(source.contains("drop_postgres_monitoring_infrastructure"));
+    assert!(source.contains("uhoh::db_guard::drop_monitoring_infrastructure"));
     assert!(source.contains("resolve_stored_credentials"));
     assert!(source.contains("store_encrypted_credential"));
 }
 
 #[test]
-fn db_guard_module_uses_trait_based_engine_dispatch() {
+fn db_guard_module_uses_explicit_engine_dispatch() {
     let source =
         std::fs::read_to_string("src/db_guard/mod.rs").expect("read db_guard subsystem module");
-    assert!(source.contains("trait DbGuardEngine"));
-    assert!(source.contains("impl DbGuardEngine for SqliteEngine"));
-    assert!(source.contains("impl DbGuardEngine for PostgresEngine"));
-    assert!(source.contains("impl DbGuardEngine for MysqlEngine"));
+    assert!(!source.contains("trait DbGuardEngine"));
+    assert!(source.contains("match guard.engine.as_str()"));
+    assert!(source.contains("\"sqlite\" => sqlite::tick_sqlite_guard"));
+    assert!(source.contains("\"postgres\" => postgres::tick_postgres_guard"));
+    assert!(source.contains("\"mysql\" => {"));
 }
 
 #[test]

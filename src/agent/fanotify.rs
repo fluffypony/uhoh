@@ -27,7 +27,7 @@ use crate::event_ledger::new_event;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use crate::event_ledger::EventLedger;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
-use crate::subsystem::SubsystemContext;
+use crate::subsystem::AgentContext;
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 struct FanotifyFd(RawFd);
@@ -43,7 +43,7 @@ impl Drop for FanotifyFd {
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 pub fn run_permission_monitor_with_roots(
-    ctx: &SubsystemContext,
+    ctx: &AgentContext,
     _agents: &[AgentEntry],
     monitor_roots: &[PathBuf],
 ) -> Result<()> {
@@ -223,7 +223,7 @@ pub fn run_permission_monitor_with_roots(
 
 #[cfg(not(all(target_os = "linux", feature = "audit-trail")))]
 pub fn run_permission_monitor_with_roots(
-    _ctx: &crate::subsystem::SubsystemContext,
+    _ctx: &crate::subsystem::AgentContext,
     _agents: &[crate::db::AgentEntry],
     _monitor_roots: &[std::path::PathBuf],
 ) -> anyhow::Result<()> {

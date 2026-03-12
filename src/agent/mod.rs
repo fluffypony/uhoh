@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::AgentEntry;
 use crate::event_ledger::new_event;
-use crate::subsystem::{AuditSource, Subsystem, SubsystemContext, SubsystemHealth};
+use crate::subsystem::{AgentContext, AuditSource, Subsystem, SubsystemContext, SubsystemHealth};
 
 pub struct AgentSubsystem {
     healthy: bool,
@@ -76,6 +76,7 @@ impl Subsystem for AgentSubsystem {
     }
 
     async fn run(&mut self, shutdown: CancellationToken, ctx: SubsystemContext) -> Result<()> {
+        let ctx = ctx.agent_context();
         if !ctx.config.agent.enabled {
             tracing::info!("agent monitor disabled by config");
             shutdown.cancelled().await;
@@ -248,7 +249,7 @@ impl AgentSubsystem {
         }
     }
 
-    fn tick_agents(&mut self, ctx: &SubsystemContext, agents: &[AgentEntry]) -> Result<()> {
+    fn tick_agents(&mut self, ctx: &AgentContext, agents: &[AgentEntry]) -> Result<()> {
         if ctx.config.agent.intercept_enabled {
             // Detect agent set changes and restart the tailer if needed
             let current_names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();

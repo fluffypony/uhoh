@@ -123,7 +123,10 @@ fn confirm_restore_delete(count: usize) -> Result<bool> {
         );
     }
 
-    eprintln!("⚠ This will delete {} tracked files. Use --force to skip this prompt.", count);
+    eprintln!(
+        "⚠ This will delete {} tracked files. Use --force to skip this prompt.",
+        count
+    );
     eprint!("Continue? [y/N] ");
     io::stdout().flush()?;
 
@@ -950,7 +953,7 @@ fn handle_db_commands(
             let mut postgres_infra_installed = false;
             let mut watched_tables_cache: Option<String> = None;
             if engine == "postgres" {
-                match install_postgres_monitoring_infrastructure(dsn, tables_csv.as_str()) {
+                match uhoh::db_guard::install_monitoring_infrastructure(dsn, tables_csv.as_str()) {
                     Ok(cache) => {
                         postgres_infra_installed = true;
                         watched_tables_cache = cache;
@@ -1002,7 +1005,7 @@ fn handle_db_commands(
                 }
                 if postgres_infra_installed {
                     if let Err(clean_err) =
-                        drop_postgres_monitoring_infrastructure(dsn, tables_csv.as_str())
+                        uhoh::db_guard::drop_monitoring_infrastructure(dsn, tables_csv.as_str())
                     {
                         tracing::warn!(
                             "Failed to roll back postgres monitoring infrastructure after local DB add failure for '{}': {}",
@@ -1022,7 +1025,7 @@ fn handle_db_commands(
                 .find(|g| g.name == *name)
             {
                 if guard.engine == "postgres" {
-                    drop_postgres_monitoring_infrastructure(
+                    uhoh::db_guard::drop_monitoring_infrastructure(
                         &guard.connection_ref,
                         &guard.tables_csv,
                     )?;
@@ -1129,7 +1132,7 @@ fn handle_db_commands(
                 .find(|g| g.name == *name)
                 .context("Guard not found")?;
             if guard.engine == "postgres" {
-                test_postgres_monitoring_infrastructure(&guard.connection_ref)?;
+                uhoh::db_guard::test_monitoring_infrastructure(&guard.connection_ref)?;
             }
             println!(
                 "Guard '{}' OK: engine={}, mode={}, conn={}",
@@ -1138,304 +1141,6 @@ fn handle_db_commands(
         }
     }
     Ok(())
-}
-
-fn install_postgres_monitoring_infrastructure(
-    dsn: &str,
-    tables_csv: &str,
-) -> Result<Option<String>> {
-    block_on_runtime(async move {
-        let client = connect_postgres_client(dsn).await?;
-
-        // Step 1: Create tables and indexes (standard permissions)
-        client
-            .batch_execute(
-                "
-                CREATE TABLE IF NOT EXISTS _uhoh_ddl_events (
-                    id BIGSERIAL PRIMARY KEY,
-                    event_tag TEXT NOT NULL,
-                    object_type TEXT,
-                    schema_name TEXT,
-                    object_identity TEXT,
-                    payload TEXT,
-                    occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                );
-
-                CREATE TABLE IF NOT EXISTS _uhoh_delete_counts (
-                    table_name TEXT NOT NULL,
-                    txid BIGINT NOT NULL DEFAULT txid_current(),
-                    delete_count INTEGER NOT NULL DEFAULT 0,
-                    ts TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    PRIMARY KEY (table_name, txid)
-                );
-                CREATE INDEX IF NOT EXISTS idx_uhoh_delete_counts_ts ON _uhoh_delete_counts(ts);
-
-                CREATE OR REPLACE FUNCTION _uhoh_ddl_handler() RETURNS event_trigger AS $$
-                DECLARE rec RECORD;
-                DECLARE payload_json TEXT;
-                BEGIN
-                    FOR rec IN SELECT * FROM pg_event_trigger_dropped_objects() LOOP
-                        payload_json := json_build_object(
-                            'event_tag', tg_tag,
-                            'object_type', rec.object_type,
-                            'schema_name', rec.schema_name,
-                            'object_identity', rec.object_identity
-                        )::text;
-
-                        INSERT INTO _uhoh_ddl_events (
-                            event_tag,
-                            object_type,
-                            schema_name,
-                            object_identity,
-                            payload
-                        ) VALUES (
-                            tg_tag,
-                            rec.object_type,
-                            rec.schema_name,
-                            rec.object_identity,
-                            payload_json
-                        );
-
-                    END LOOP;
-                END;
-                $$ LANGUAGE plpgsql;
-                ",
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-
-        // Step 2: Create event trigger (requires superuser). Non-fatal if denied.
-        match client
-            .batch_execute(
-                "DROP EVENT TRIGGER IF EXISTS uhoh_ddl_drop;
-                 CREATE EVENT TRIGGER uhoh_ddl_drop ON sql_drop
-                     EXECUTE FUNCTION _uhoh_ddl_handler();",
-            )
-            .await
-        {
-            Ok(_) => tracing::info!("DDL event trigger installed"),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("permission denied") || msg.contains("must be superuser") {
-                    eprintln!(
-                        "Warning: Could not create event trigger (requires superuser). \
-                         DDL changes like DROP TABLE will not be tracked, but \
-                         row-level delete monitoring will still function."
-                    );
-                } else {
-                    return Err(anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&msg)));
-                }
-            }
-        }
-
-        let tables = parse_watched_tables(tables_csv);
-        if tables.is_empty() {
-            let rows = client
-                .query(
-                    "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = current_schema()",
-                    &[],
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-            let table_names: Vec<String> =
-                rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
-            for table in &table_names {
-                install_delete_counter_trigger(&client, table).await?;
-            }
-            let mut sorted = table_names;
-            sorted.sort();
-            sorted.dedup();
-            return Ok(Some(sorted.join(",")));
-        }
-        for table in tables {
-            install_delete_counter_trigger(&client, &table).await?;
-        }
-
-        Ok(None)
-    })
-}
-
-async fn install_delete_counter_trigger(
-    client: &tokio_postgres::Client,
-    table: &str,
-) -> Result<()> {
-    let table_safe = table.replace('\'', "''");
-    let table_quoted = uhoh::db_guard::quote_pg_ident(table)?;
-    let fn_ident = uhoh::db_guard::quote_pg_ident(&format!(
-        "_uhoh_count_deletes_{}",
-        blake3::hash(table.as_bytes()).to_hex()
-    ))?;
-    let trigger_ident = uhoh::db_guard::quote_pg_ident(&format!(
-        "uhoh_delete_counter_{}",
-        blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
-    ))?;
-
-    let install_sql = format!(
-        "
-        CREATE OR REPLACE FUNCTION {fn_ident}() RETURNS trigger AS $$
-        BEGIN
-            INSERT INTO _uhoh_delete_counts (table_name, txid, delete_count)
-            VALUES ('{table_safe}', txid_current(), 1)
-            ON CONFLICT (table_name, txid)
-            DO UPDATE SET delete_count = _uhoh_delete_counts.delete_count + 1,
-                          ts = now();
-            RETURN OLD;
-        END;
-        $$ LANGUAGE plpgsql;
-
-        DROP TRIGGER IF EXISTS {trigger_ident} ON {table_quoted};
-        CREATE TRIGGER {trigger_ident}
-            BEFORE DELETE ON {table_quoted}
-            FOR EACH ROW EXECUTE FUNCTION {fn_ident}();
-        "
-    );
-
-    client
-        .batch_execute(&install_sql)
-        .await
-        .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-    Ok(())
-}
-
-fn drop_postgres_monitoring_infrastructure(dsn: &str, tables_csv: &str) -> Result<()> {
-    block_on_runtime(async move {
-        let client = connect_postgres_client(dsn).await?;
-
-        let tables = parse_watched_tables(tables_csv);
-        if tables.is_empty() {
-            // Wildcard mode (`*`): remove all uhoh-installed table triggers/functions.
-            client
-                .batch_execute(
-                    r#"
-                    DO $$
-                    DECLARE rec RECORD;
-                    BEGIN
-                        FOR rec IN
-                            SELECT n.nspname AS schema_name, c.relname AS table_name, t.tgname AS trigger_name
-                            FROM pg_trigger t
-                            JOIN pg_class c ON c.oid = t.tgrelid
-                            JOIN pg_namespace n ON n.oid = c.relnamespace
-                            WHERE NOT t.tgisinternal
-                              AND t.tgname LIKE 'uhoh_delete_counter_%'
-                        LOOP
-                            EXECUTE format(
-                                'DROP TRIGGER IF EXISTS %I ON %I.%I',
-                                rec.trigger_name,
-                                rec.schema_name,
-                                rec.table_name
-                            );
-                        END LOOP;
-
-                        FOR rec IN
-                            SELECT n.nspname AS schema_name, p.proname AS fn_name
-                            FROM pg_proc p
-                            JOIN pg_namespace n ON n.oid = p.pronamespace
-                            WHERE p.proname LIKE '_uhoh_count_deletes_%'
-                        LOOP
-                            EXECUTE format(
-                                'DROP FUNCTION IF EXISTS %I.%I()',
-                                rec.schema_name,
-                                rec.fn_name
-                            );
-                        END LOOP;
-                    END $$;
-                    "#,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-        } else {
-            for table in tables {
-                let trigger_ident = uhoh::db_guard::quote_pg_ident(&format!(
-                    "uhoh_delete_counter_{}",
-                    blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
-                ))?;
-                let fn_ident = uhoh::db_guard::quote_pg_ident(&format!(
-                    "_uhoh_count_deletes_{}",
-                    blake3::hash(table.as_bytes()).to_hex()
-                ))?;
-                let table_quoted = uhoh::db_guard::quote_pg_ident(&table)?;
-                let sql = format!(
-                    "DROP TRIGGER IF EXISTS {trigger_ident} ON {table_quoted}; DROP FUNCTION IF EXISTS {fn_ident}();"
-                );
-                client.batch_execute(&sql).await.map_err(|e| {
-                    anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string()))
-                })?;
-            }
-        }
-
-        client
-            .batch_execute(
-                "
-                DROP EVENT TRIGGER IF EXISTS uhoh_ddl_drop;
-                DROP FUNCTION IF EXISTS _uhoh_ddl_handler();
-                DROP TABLE IF EXISTS _uhoh_ddl_events;
-                DROP TABLE IF EXISTS _uhoh_delete_counts;
-                ",
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-
-        Ok(())
-    })
-}
-
-fn test_postgres_monitoring_infrastructure(dsn: &str) -> Result<()> {
-    block_on_runtime(async move {
-        let client = connect_postgres_client(dsn).await?;
-
-        match client
-            .query_one("SELECT 1 FROM _uhoh_ddl_events LIMIT 1", &[])
-            .await
-        {
-            Ok(_) => {}
-            Err(_) => {
-                let _ = client.query_one("SELECT 1", &[]).await.map_err(|e| {
-                    anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string()))
-                })?;
-            }
-        }
-
-        match client
-            .query_one("SELECT 1 FROM _uhoh_delete_counts LIMIT 1", &[])
-            .await
-        {
-            Ok(_) => {}
-            Err(_) => {
-                let _ = client.query_one("SELECT 1", &[]).await.map_err(|e| {
-                    anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string()))
-                })?;
-            }
-        }
-
-        Ok(())
-    })
-}
-
-fn block_on_runtime<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    // Always create a dedicated runtime. block_in_place panics when invoked
-    // from spawn_blocking threads, and these DB commands can execute there.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Failed to build tokio runtime for postgres guard operation")?;
-    rt.block_on(fut)
-}
-
-fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
-    if tables_csv.trim() == "*" {
-        return Vec::new();
-    }
-    tables_csv
-        .split(',')
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_string())
-        .collect()
-}
-
-// Postgres TLS/connection helpers are shared from db_guard::postgres.
-async fn connect_postgres_client(dsn: &str) -> Result<tokio_postgres::Client> {
-    uhoh::db_guard::pg_connect_spawn(dsn).await
 }
 
 fn extract_dsn_credentials(dsn: &str) -> Option<uhoh::db_guard::CredentialMaterial> {
@@ -1543,19 +1248,7 @@ fn apply_sqlite_recovery(connection_ref: &str, sql: &str) -> Result<()> {
 }
 
 fn apply_postgres_recovery(connection_ref: &str, sql: &str) -> Result<()> {
-    let dsn = build_connect_dsn_with_resolved_credentials(connection_ref)?;
-    block_on_runtime(async move {
-        let client = connect_postgres_client(&dsn).await?;
-        client
-            .batch_execute(sql)
-            .await
-            .map_err(|e| anyhow::anyhow!(uhoh::db_guard::scrub_error_message(&e.to_string())))?;
-        Ok(())
-    })
-}
-
-fn build_connect_dsn_with_resolved_credentials(connection_ref: &str) -> Result<String> {
-    uhoh::db_guard::build_connect_dsn(connection_ref)
+    uhoh::db_guard::execute_sql(connection_ref, sql)
 }
 
 fn session_matches_event(entry: &db::EventLedgerEntry, session_id: &str) -> bool {

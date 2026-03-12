@@ -6,10 +6,10 @@ use rusqlite::Connection;
 use crate::db::{DbGuardEntry, LedgerSeverity};
 use crate::db_guard::recovery;
 use crate::event_ledger::new_event;
-use crate::subsystem::SubsystemContext;
+use crate::subsystem::DbGuardContext;
 
 pub fn tick_sqlite_guard(
-    ctx: &SubsystemContext,
+    ctx: &DbGuardContext,
     guard: &DbGuardEntry,
     versions: &mut HashMap<String, i64>,
 ) -> Result<()> {

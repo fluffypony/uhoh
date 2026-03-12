@@ -6,7 +6,7 @@ use url::Url;
 use crate::db::DbGuardEntry;
 use crate::db_guard::CredentialMaterial;
 use crate::event_ledger::new_event;
-use crate::subsystem::SubsystemContext;
+use crate::subsystem::DbGuardContext;
 
 #[derive(Debug, Clone, Default)]
 pub struct MysqlGuardState {
@@ -16,7 +16,7 @@ pub struct MysqlGuardState {
 }
 
 pub fn tick_mysql_guard(
-    ctx: &SubsystemContext,
+    ctx: &DbGuardContext,
     guard: &DbGuardEntry,
     state: &mut MysqlGuardState,
 ) -> Result<()> {

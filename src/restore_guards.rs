@@ -49,22 +49,3 @@ impl Drop for RestoreFlagGuard {
         self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
-
-pub struct StaticRestoreFlagGuard {
-    flag: &'static std::sync::atomic::AtomicBool,
-}
-
-impl StaticRestoreFlagGuard {
-    pub fn acquire(flag: &'static std::sync::atomic::AtomicBool) -> anyhow::Result<Self> {
-        if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!("Another restore is already in progress");
-        }
-        Ok(Self { flag })
-    }
-}
-
-impl Drop for StaticRestoreFlagGuard {
-    fn drop(&mut self) {
-        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}

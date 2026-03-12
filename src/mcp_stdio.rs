@@ -7,25 +7,23 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::mcp_protocol::JsonRpcRequest;
 
-static RESTORE_IN_PROGRESS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 pub fn run_stdio_mcp(config: &Config) -> Result<()> {
     let uhoh_dir = crate::uhoh_dir();
     let database = Database::open(&uhoh_dir.join("uhoh.db"))?;
+    let database_handle = Arc::new(database.clone_handle());
     let runtime_handle = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let runtime = crate::mcp_tools::McpRuntime {
         tools: crate::mcp_tools::McpToolContext {
-            database: Arc::new(database.clone_handle()),
+            database: database_handle.clone(),
             uhoh_dir: uhoh_dir.clone(),
             config: config.clone(),
             event_tx: None,
-            restore_in_progress: Some(crate::mcp_tools::RestoreInProgressFlag::Global(
-                &RESTORE_IN_PROGRESS,
-            )),
-            restore_locks: None,
+            restore_runtime: crate::restore_runtime::RestoreRuntime::new(
+                database_handle,
+                uhoh_dir.clone(),
+            ),
         },
         executor: crate::mcp_tools::McpToolExecutor::Inline,
     };
