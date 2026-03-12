@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::RngCore;
@@ -7,15 +6,13 @@ use tempfile::NamedTempFile;
 use zeroize::Zeroize;
 
 use super::credentials::CredentialMaterial;
+use super::postgres_connection::ResolvedPostgresConnection;
 
 const ENC_MAGIC: &[u8; 8] = b"UHOHENC2";
 const ENC_KDF_BLAKE3: u8 = 0;
 const ENC_KDF_ARGON2ID: u8 = 1;
 const ENC_V2_HEADER_LEN: usize = 8 + 1 + 16 + 12;
 const MACHINE_KEY_FILE: &str = "master.key";
-const ARGON2_MEMORY_KIB: u32 = 19 * 1024;
-const ARGON2_TIME_COST: u32 = 2;
-const ARGON2_PARALLELISM: u32 = 1;
 const RECOVERY_BLAKE3_CONTEXT: &str = "uhoh::recovery-artifacts::enc-v2";
 
 struct EncryptionMaterial {
@@ -106,7 +103,7 @@ pub fn write_sqlite_schema_recovery(
 pub fn write_postgres_schema_recovery(
     uhoh_dir: &std::path::Path,
     guard_name: &str,
-    connection_ref: &str,
+    connection: &ResolvedPostgresConnection,
     creds: &CredentialMaterial,
     label: &str,
     encrypt: bool,
@@ -117,7 +114,7 @@ pub fn write_postgres_schema_recovery(
     ensure_secure_dir(&baseline_dir)?;
     ensure_secure_dir(&recovery_dir)?;
 
-    let schema = postgres_schema_dump(connection_ref, creds)?;
+    let schema = postgres_schema_dump(connection, creds)?;
     let mut payload = schema.into_bytes();
     if encrypt {
         payload = maybe_encrypt(&payload, uhoh_dir)?;
@@ -140,7 +137,7 @@ pub fn write_postgres_schema_recovery(
 pub fn write_postgres_schema_baseline(
     uhoh_dir: &std::path::Path,
     guard_name: &str,
-    connection_ref: &str,
+    connection: &ResolvedPostgresConnection,
     creds: &CredentialMaterial,
     retention_days: u64,
     max_baseline_size_mb: u64,
@@ -148,7 +145,7 @@ pub fn write_postgres_schema_baseline(
     let (_, baseline_dir, _) = ensure_guard_dirs(uhoh_dir, guard_name)?;
     ensure_secure_dir(&baseline_dir)?;
 
-    let schema = postgres_schema_dump(connection_ref, creds)?;
+    let schema = postgres_schema_dump(connection, creds)?;
     let payload = schema.into_bytes();
     enforce_max_payload_size(&payload, max_baseline_size_mb, "postgres baseline")?;
     let file = baseline_dir.join(format!("{}_schema.sql", timestamp_tag()));
@@ -185,15 +182,18 @@ pub fn sqlite_schema_dump(sqlite_path: &std::path::Path) -> Result<String> {
     Ok(sql)
 }
 
-fn postgres_schema_dump(connection_ref: &str, creds: &CredentialMaterial) -> Result<String> {
+fn postgres_schema_dump(
+    connection: &ResolvedPostgresConnection,
+    creds: &CredentialMaterial,
+) -> Result<String> {
     let mut passfile: Option<NamedTempFile> = None;
     let mut cmd = std::process::Command::new("pg_dump");
     cmd.arg("--schema-only")
         .arg("--no-owner")
         .arg("--no-privileges")
-        .arg(connection_ref);
+        .arg(connection.connect_dsn());
     if let Some(password) = &creds.password {
-        let parsed = parse_postgres_connection_ref(connection_ref)?;
+        let parsed = parse_postgres_connection_ref(connection.connect_dsn())?;
         let mut file = NamedTempFile::new().context("Failed creating temporary pgpass file")?;
         use std::io::Write as _;
         writeln!(
@@ -439,21 +439,9 @@ fn decode_hex_key(input: &str) -> Option<[u8; 32]> {
 }
 
 fn derive_argon2_key(master: &str, salt: &[u8; 16]) -> Result<[u8; 32]> {
-    let params = Params::new(
-        ARGON2_MEMORY_KIB,
-        ARGON2_TIME_COST,
-        ARGON2_PARALLELISM,
-        Some(32),
-    )
-    .map_err(|e| anyhow::anyhow!("Invalid Argon2 parameters: {e}"))?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut out = [0u8; 32];
-    argon2
-        .hash_password_into(master.as_bytes(), salt, &mut out)
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to derive encryption key from UHOH_MASTER_KEY: {e}")
-        })?;
-    Ok(out)
+    super::crypto_policy::derive_argon2id_key(master, salt).map_err(|err| {
+        anyhow::anyhow!("Failed to derive encryption key from UHOH_MASTER_KEY: {err}")
+    })
 }
 
 pub(crate) fn load_or_create_machine_key(uhoh_dir: &std::path::Path) -> Result<[u8; 32]> {

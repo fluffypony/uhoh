@@ -19,67 +19,53 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
             let guard_name = name
                 .clone()
                 .unwrap_or_else(|| super::derive_guard_name_from_dsn(dsn));
-            let engine = super::detect_engine(dsn);
-            if engine == "unknown" {
-                anyhow::bail!("Unsupported DSN format");
-            }
-            if engine == "postgres" {
+            let engine = super::detect_engine(dsn).context("Unsupported DSN format")?;
+            if engine == db::DbGuardEngine::Postgres {
                 if which::which("pg_dump").is_err() {
                     anyhow::bail!(
                         "pg_dump not found in PATH. Postgres guard requires pg_dump for baseline snapshots. Install postgresql-client or equivalent package."
                     );
                 }
-            } else if engine == "mysql" && which::which("mysql").is_err() {
+            } else if engine == db::DbGuardEngine::Mysql && which::which("mysql").is_err() {
                 anyhow::bail!(
                     "mysql CLI not found in PATH. MySQL guard requires the mysql client. Install mysql-client or equivalent package."
                 );
             }
             let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
 
-            let mode = if engine == "mysql" {
-                if !mode.eq_ignore_ascii_case("schema_polling") {
+            let mode_kind = if engine == db::DbGuardEngine::Mysql {
+                if !db::DbGuardMode::SchemaPolling.eq_ignore_ascii_case(mode) {
                     tracing::warn!(
                         "MySQL guard only supports schema_polling mode; normalizing requested mode '{}'",
                         mode
                     );
                 }
-                "schema_polling"
+                db::DbGuardMode::SchemaPolling
             } else {
-                let valid_modes = ["triggers", "schema_polling"];
-                if !valid_modes
-                    .iter()
-                    .any(|candidate| mode.eq_ignore_ascii_case(candidate))
-                {
-                    anyhow::bail!("Supported modes: {}", valid_modes.join(", "));
-                }
-                mode.as_str()
+                db::DbGuardMode::parse(mode)
+                    .with_context(|| "Supported modes: triggers, schema_polling".to_string())?
             };
 
-            let engine_kind = match engine {
-                "sqlite" => db::DbGuardEngine::Sqlite,
-                "postgres" => db::DbGuardEngine::Postgres,
-                "mysql" => db::DbGuardEngine::Mysql,
-                _ => anyhow::bail!("Unsupported DSN format"),
-            };
-            let mode_kind = db::DbGuardMode::parse(mode)
-                .context("Invalid db guard mode after normalization")?;
-
-            let connection_ref = super::scrub_dsn(dsn);
+            let connection_ref = super::credentials::scrub_dsn(dsn);
             let embedded_creds = extract_dsn_credentials(dsn);
-            let mut previous_stored_cred: Option<Option<super::CredentialMaterial>> = None;
+            let mut previous_stored_cred: Option<Option<super::credentials::CredentialMaterial>> =
+                None;
 
             if let Some(creds) = embedded_creds.as_ref() {
-                previous_stored_cred =
-                    Some(super::resolve_stored_credentials(&connection_ref).unwrap_or(None));
-                super::store_encrypted_credential(&connection_ref, creds).with_context(|| {
+                previous_stored_cred = Some(
+                    super::credentials::load_encrypted_credentials(&connection_ref).unwrap_or(None),
+                );
+                super::credentials::store_encrypted_credential(&connection_ref, creds).with_context(|| {
                     format!(
                         "Failed to persist credentials for guard '{}'. Ensure UHOH_MASTER_KEY is set and valid before adding a DSN with embedded credentials",
                         guard_name
                     )
                 })?;
-                if engine == "postgres" {
-                    let outcome =
-                        super::store_postgres_credentials_with_keyring(&connection_ref, creds)?;
+                if engine == db::DbGuardEngine::Postgres {
+                    let outcome = super::credentials::store_postgres_credentials_with_keyring(
+                        &connection_ref,
+                        creds,
+                    )?;
                     if outcome.keyring_status.is_degraded() {
                         eprintln!(
                             "Warning: stored credentials for '{}' in the encrypted file backend, but the keyring mirror is unavailable ({})",
@@ -92,21 +78,28 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
 
             let mut postgres_infra_installed = false;
             let mut watched_tables_cache: Option<String> = None;
-            if engine == "postgres" {
-                match super::install_monitoring_infrastructure(dsn, tables_csv.as_str()) {
+            if engine == db::DbGuardEngine::Postgres {
+                let postgres_connection =
+                    super::postgres_connection::ResolvedPostgresConnection::resolve(dsn)?;
+                match super::postgres::install_monitoring_infrastructure(
+                    &postgres_connection,
+                    tables_csv.as_str(),
+                ) {
                     Ok(cache) => {
                         postgres_infra_installed = true;
                         watched_tables_cache = cache;
                     }
                     Err(err) => {
                         if let Some(previous) = previous_stored_cred.clone() {
-                            let restore = previous.unwrap_or(super::CredentialMaterial {
-                                username: None,
-                                password: None,
-                            });
-                            if let Err(clean_err) =
-                                super::store_encrypted_credential(&connection_ref, &restore)
-                            {
+                            let restore =
+                                previous.unwrap_or(super::credentials::CredentialMaterial {
+                                    username: None,
+                                    password: None,
+                                });
+                            if let Err(clean_err) = super::credentials::store_encrypted_credential(
+                                &connection_ref,
+                                &restore,
+                            ) {
                                 tracing::warn!(
                                     "Failed to restore stored credentials after postgres infra install failure for '{}': {}",
                                     guard_name,
@@ -121,19 +114,19 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
 
             if let Err(err) = database.add_db_guard(
                 &guard_name,
-                engine_kind,
+                engine,
                 &connection_ref,
                 &tables_csv,
                 watched_tables_cache.as_deref(),
                 mode_kind,
             ) {
                 if let Some(previous) = previous_stored_cred {
-                    let restore = previous.unwrap_or(super::CredentialMaterial {
+                    let restore = previous.unwrap_or(super::credentials::CredentialMaterial {
                         username: None,
                         password: None,
                     });
                     if let Err(clean_err) =
-                        super::store_encrypted_credential(&connection_ref, &restore)
+                        super::credentials::store_encrypted_credential(&connection_ref, &restore)
                     {
                         tracing::warn!(
                             "Failed to restore stored credentials after local DB add failure for '{}': {}",
@@ -143,9 +136,12 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
                     }
                 }
                 if postgres_infra_installed {
-                    if let Err(clean_err) =
-                        super::drop_monitoring_infrastructure(dsn, tables_csv.as_str())
-                    {
+                    let postgres_connection =
+                        super::postgres_connection::ResolvedPostgresConnection::resolve(dsn)?;
+                    if let Err(clean_err) = super::postgres::drop_monitoring_infrastructure(
+                        &postgres_connection,
+                        tables_csv.as_str(),
+                    ) {
                         tracing::warn!(
                             "Failed to roll back postgres monitoring infrastructure after local DB add failure for '{}': {}",
                             guard_name,
@@ -163,9 +159,13 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
                 .into_iter()
                 .find(|guard| guard.name == *name)
             {
-                if guard.engine == "postgres" {
-                    super::drop_monitoring_infrastructure(
-                        &guard.connection_ref,
+                if guard.engine == db::DbGuardEngine::Postgres {
+                    let postgres_connection =
+                        super::postgres_connection::ResolvedPostgresConnection::resolve(
+                            &guard.connection_ref,
+                        )?;
+                    super::postgres::drop_monitoring_infrastructure(
+                        &postgres_connection,
                         &guard.tables_csv,
                     )?;
                 }
@@ -236,13 +236,13 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
                 .into_iter()
                 .find(|guard| guard.name == *name)
                 .context("Guard not found")?;
-            match guard.engine.as_str() {
-                "sqlite" => {
+            match guard.engine {
+                db::DbGuardEngine::Sqlite => {
                     let sqlite_path = guard
                         .connection_ref
                         .strip_prefix("sqlite://")
                         .unwrap_or(&guard.connection_ref);
-                    let _ = super::write_sqlite_baseline(
+                    let _ = super::recovery::write_sqlite_baseline(
                         uhoh_dir,
                         &guard.name,
                         Path::new(sqlite_path),
@@ -253,9 +253,10 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
                             .max_baseline_size_mb,
                     )?;
                 }
-                "postgres" => {
-                    let creds =
-                        super::resolve_postgres_credentials_with_keyring(&guard.connection_ref)?;
+                db::DbGuardEngine::Postgres => {
+                    let creds = super::credentials::resolve_postgres_credentials_with_keyring(
+                        &guard.connection_ref,
+                    )?;
                     if creds.keyring_status.is_degraded() {
                         eprintln!(
                             "Warning: using {} credentials for '{}'; keyring status is {}",
@@ -264,17 +265,21 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
                             creds.keyring_status.describe()
                         );
                     }
+                    let postgres_connection =
+                        super::postgres_connection::ResolvedPostgresConnection::resolve(
+                            &guard.connection_ref,
+                        )?;
                     let cfg = config::Config::load(&uhoh_dir.join("config.toml"))?;
-                    let _ = super::write_postgres_schema_baseline(
+                    let _ = super::recovery::write_postgres_schema_baseline(
                         uhoh_dir,
                         &guard.name,
-                        &guard.connection_ref,
+                        &postgres_connection,
                         &creds.material,
                         30,
                         cfg.db_guard.max_baseline_size_mb,
                     )?;
                 }
-                _ => {}
+                db::DbGuardEngine::Mysql => {}
             }
             let ts = chrono::Utc::now().to_rfc3339();
             database.set_db_guard_baseline_time(name, &ts)?;
@@ -286,8 +291,12 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
                 .into_iter()
                 .find(|guard| guard.name == *name)
                 .context("Guard not found")?;
-            if guard.engine == "postgres" {
-                super::test_monitoring_infrastructure(&guard.connection_ref)?;
+            if guard.engine == db::DbGuardEngine::Postgres {
+                let postgres_connection =
+                    super::postgres_connection::ResolvedPostgresConnection::resolve(
+                        &guard.connection_ref,
+                    )?;
+                super::postgres::test_monitoring_infrastructure(&postgres_connection)?;
             }
             println!(
                 "Guard '{}' OK: engine={}, mode={}, conn={}",
@@ -298,7 +307,7 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
     Ok(())
 }
 
-fn extract_dsn_credentials(dsn: &str) -> Option<super::CredentialMaterial> {
+fn extract_dsn_credentials(dsn: &str) -> Option<super::credentials::CredentialMaterial> {
     let parsed = Url::parse(dsn).ok()?;
     let username = if parsed.username().is_empty() {
         None
@@ -309,7 +318,7 @@ fn extract_dsn_credentials(dsn: &str) -> Option<super::CredentialMaterial> {
     if username.is_none() && password.is_none() {
         return None;
     }
-    Some(super::CredentialMaterial { username, password })
+    Some(super::credentials::CredentialMaterial { username, password })
 }
 
 fn extract_artifact_path(detail: &Option<String>) -> Option<String> {
@@ -336,7 +345,7 @@ fn apply_recovery_artifact(
 
     let mut bytes = std::fs::read(artifact_path)?;
     let mut sql = if artifact_path.extension().and_then(|s| s.to_str()) == Some("enc") {
-        let plaintext = super::decrypt_recovery_payload(&bytes, uhoh_dir)
+        let plaintext = super::recovery::decrypt_recovery_payload(&bytes, uhoh_dir)
             .context("Failed to decrypt recovery payload")?;
         bytes.zeroize();
         let sql = String::from_utf8(plaintext).context("Recovery payload is not valid UTF-8")?;
@@ -370,10 +379,18 @@ fn apply_recovery_artifact(
         .find(|guard| guard.name == guard_name)
         .with_context(|| format!("Guard '{guard_name}' not found"))?;
 
-    match guard.engine.as_str() {
-        "sqlite" => apply_sqlite_recovery(&guard.connection_ref, &sql),
-        "postgres" => super::execute_sql(&guard.connection_ref, &sql),
-        other => anyhow::bail!("Recovery apply is not supported for engine '{other}'"),
+    match guard.engine {
+        db::DbGuardEngine::Sqlite => apply_sqlite_recovery(&guard.connection_ref, &sql),
+        db::DbGuardEngine::Postgres => {
+            let postgres_connection =
+                super::postgres_connection::ResolvedPostgresConnection::resolve(
+                    &guard.connection_ref,
+                )?;
+            super::postgres::execute_sql(&postgres_connection, &sql)
+        }
+        db::DbGuardEngine::Mysql => {
+            anyhow::bail!("Recovery apply is not supported for engine 'mysql'")
+        }
     }?;
 
     println!("-- SQL preview begin");

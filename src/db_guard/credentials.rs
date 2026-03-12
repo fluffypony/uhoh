@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::RngCore;
@@ -15,9 +14,6 @@ const CRED_VERSION: u8 = 1;
 const CRED_KDF_ARGON2ID: u8 = 0;
 const CRED_KDF_BLAKE3: u8 = 1;
 const CRED_CONTEXT: &str = "uhoh::credentials::enc-v1";
-const ARGON2_MEMORY_KIB: u32 = 19 * 1024;
-const ARGON2_TIME_COST: u32 = 2;
-const ARGON2_PARALLELISM: u32 = 1;
 
 #[derive(Debug, Clone)]
 struct EncEntry {
@@ -58,6 +54,7 @@ pub enum KeyringStatus {
     NotChecked,
     Available,
     NoEntry,
+    #[allow(dead_code)]
     Unsupported,
     TimedOut,
     Unavailable(String),
@@ -140,17 +137,6 @@ pub fn scrub_dsn(dsn: &str) -> String {
         .filter(|seg| !seg.to_ascii_lowercase().starts_with("password="))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-pub fn ensure_guard_dir(uhoh_dir: &std::path::Path) -> Result<std::path::PathBuf> {
-    let dir = uhoh_dir.join("db_guard");
-    std::fs::create_dir_all(&dir).context("Failed to create db_guard directory")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    }
-    Ok(dir)
 }
 
 pub fn resolve_postgres_credentials(connection_ref: &str) -> Result<CredentialMaterial> {
@@ -237,7 +223,9 @@ fn resolve_encrypted_credentials(connection_ref: &str) -> Result<Option<Credenti
     Ok(map.get(connection_ref).cloned())
 }
 
-pub fn resolve_stored_credentials(connection_ref: &str) -> Result<Option<CredentialMaterial>> {
+pub(crate) fn load_encrypted_credentials(
+    connection_ref: &str,
+) -> Result<Option<CredentialMaterial>> {
     resolve_encrypted_credentials(connection_ref)
 }
 
@@ -427,9 +415,9 @@ fn encrypt_credentials_map(
     out.push(kdf_id);
     out.extend_from_slice(&salt);
     if kdf_id == CRED_KDF_ARGON2ID {
-        out.extend_from_slice(&ARGON2_MEMORY_KIB.to_be_bytes());
-        out.extend_from_slice(&ARGON2_TIME_COST.to_be_bytes());
-        out.extend_from_slice(&ARGON2_PARALLELISM.to_be_bytes());
+        out.extend_from_slice(&super::crypto_policy::ARGON2_MEMORY_KIB.to_be_bytes());
+        out.extend_from_slice(&super::crypto_policy::ARGON2_TIME_COST.to_be_bytes());
+        out.extend_from_slice(&super::crypto_policy::ARGON2_PARALLELISM.to_be_bytes());
     }
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
     for entry in entries {
@@ -541,19 +529,7 @@ fn decrypt_credentials_map(
 }
 
 fn derive_argon2_key(master: &str, salt: &[u8; 16]) -> Result<[u8; 32]> {
-    let params = Params::new(
-        ARGON2_MEMORY_KIB,
-        ARGON2_TIME_COST,
-        ARGON2_PARALLELISM,
-        Some(32),
-    )
-    .map_err(|e| anyhow::anyhow!("Invalid Argon2 params: {e}"))?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut out = [0u8; 32];
-    argon2
-        .hash_password_into(master.as_bytes(), salt, &mut out)
-        .map_err(|e| anyhow::anyhow!("Argon2 key derivation failed: {e}"))?;
-    Ok(out)
+    super::crypto_policy::derive_argon2id_key(master, salt)
 }
 
 fn decode_hex_key(v: &str) -> Option<[u8; 32]> {

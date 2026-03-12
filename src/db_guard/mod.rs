@@ -1,7 +1,9 @@
 mod commands;
 mod credentials;
+mod crypto_policy;
 mod mysql;
 mod postgres;
+mod postgres_connection;
 mod recovery;
 mod sqlite;
 use std::collections::HashMap;
@@ -11,44 +13,20 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::DbGuardEntry;
+use crate::db::{DbGuardEngine, DbGuardEntry, DbGuardMode};
 use crate::event_ledger::new_event;
 use crate::subsystem::{DbGuardContext, Subsystem, SubsystemContext, SubsystemHealth};
 
 pub use commands::handle_cli_action;
-pub use credentials::ensure_guard_dir;
-pub use credentials::resolve_postgres_credentials;
-pub use credentials::resolve_postgres_credentials_with_keyring;
-pub use credentials::resolve_stored_credentials;
-pub use credentials::scrub_dsn;
-pub use credentials::scrub_error_message;
-pub use credentials::store_encrypted_credential;
-pub use credentials::store_postgres_credentials_with_keyring;
-pub use credentials::CliCredentialResolution;
-pub use credentials::CredentialMaterial;
-pub use credentials::CredentialSource;
-pub use credentials::CredentialStoreOutcome;
-pub use credentials::KeyringStatus;
-pub use postgres::{
-    build_connect_dsn, drop_monitoring_infrastructure, execute_sql,
-    install_monitoring_infrastructure, test_monitoring_infrastructure,
-};
-pub use recovery::decrypt_recovery_payload;
-pub use recovery::write_postgres_schema_baseline;
-pub use recovery::write_sqlite_baseline;
 
-fn normalize_guard_mode(engine: &str, mode: &str) -> String {
-    let mode_l = mode.trim().to_ascii_lowercase();
-    if engine == "postgres" {
-        if mode_l == "schema_polling" {
-            "schema_polling".to_string()
-        } else {
-            "triggers".to_string()
-        }
-    } else if engine == "mysql" {
-        "schema_polling".to_string()
-    } else {
-        mode_l
+fn normalize_guard_mode(engine: DbGuardEngine, mode: DbGuardMode) -> DbGuardMode {
+    match engine {
+        DbGuardEngine::Postgres => match mode {
+            DbGuardMode::SchemaPolling => DbGuardMode::SchemaPolling,
+            DbGuardMode::Triggers => DbGuardMode::Triggers,
+        },
+        DbGuardEngine::Mysql => DbGuardMode::SchemaPolling,
+        DbGuardEngine::Sqlite => mode,
     }
 }
 
@@ -223,18 +201,10 @@ impl DbGuardSubsystem {
         }
 
         for guard in guards {
-            let effective_mode = normalize_guard_mode(guard.engine.as_str(), guard.mode.as_str());
-            match guard.engine.as_str() {
-                "sqlite" | "postgres" | "mysql" => {
-                    if let Err(err) = self.tick_guard_engine(ctx, guard) {
-                        self.record_guard_tick_failure(ctx, guard, &err);
-                        continue;
-                    }
-                }
-                _ => {
-                    self.record_unknown_guard_engine(ctx, guard);
-                    continue;
-                }
+            let effective_mode = normalize_guard_mode(guard.engine, guard.mode);
+            if let Err(err) = self.tick_guard_engine(ctx, guard, effective_mode) {
+                self.record_guard_tick_failure(ctx, guard, &err);
+                continue;
             }
 
             // Global retention cleanup pass per guard.
@@ -266,13 +236,12 @@ impl DbGuardSubsystem {
                 }
             }
 
-            let configured_mode = guard.mode.trim().to_ascii_lowercase();
-            if configured_mode != effective_mode {
+            if guard.mode != effective_mode {
                 let mut event = new_event("db_guard", "guard_mode_normalized", "info");
                 event.guard_name = Some(guard.name.clone());
                 event.detail = Some(format!(
                     "engine={}, configured_mode={}, effective_mode={}",
-                    guard.engine, configured_mode, effective_mode
+                    guard.engine, guard.mode, effective_mode
                 ));
                 if let Err(err) = ctx.event_ledger.append(event) {
                     tracing::error!("failed to append guard_mode_normalized event: {err}");
@@ -282,25 +251,28 @@ impl DbGuardSubsystem {
         Ok(())
     }
 
-    fn tick_guard_engine(&mut self, ctx: &DbGuardContext, guard: &DbGuardEntry) -> Result<()> {
+    fn tick_guard_engine(
+        &mut self,
+        ctx: &DbGuardContext,
+        guard: &DbGuardEntry,
+        effective_mode: DbGuardMode,
+    ) -> Result<()> {
         tracing::trace!("db_guard tick via {} engine", guard.engine);
-        match guard.engine.as_str() {
-            "sqlite" => sqlite::tick_sqlite_guard(ctx, guard, &mut self.sqlite_versions),
-            "postgres" => postgres::tick_postgres_guard(
+        match guard.engine {
+            DbGuardEngine::Sqlite => {
+                sqlite::tick_sqlite_guard(ctx, guard, &mut self.sqlite_versions)
+            }
+            DbGuardEngine::Postgres => postgres::tick_postgres_guard(
                 &self.postgres_runtime,
                 ctx,
                 guard,
+                effective_mode,
                 GUARD_TICK_INTERVAL_SECS,
             ),
-            "mysql" => {
+            DbGuardEngine::Mysql => {
                 let state = self.mysql_states.entry(guard.name.clone()).or_default();
                 mysql::tick_mysql_guard(ctx, guard, state)
             }
-            _ => Err(anyhow::anyhow!(
-                "unsupported db guard engine '{}' for guard {}",
-                guard.engine,
-                guard.name
-            )),
         }
     }
 
@@ -323,25 +295,6 @@ impl DbGuardSubsystem {
             tracing::error!("failed to append guard_tick_failed event: {append_err}");
         }
     }
-
-    fn record_unknown_guard_engine(&mut self, ctx: &DbGuardContext, guard: &DbGuardEntry) {
-        tracing::warn!(
-            "Skipping db_guard '{}' with unsupported engine '{}'; expected one of sqlite/postgres/mysql",
-            guard.name,
-            guard.engine
-        );
-        self.healthy = false;
-        self.last_failure = Some(format!(
-            "unsupported db guard engine '{}' for guard {}",
-            guard.engine, guard.name
-        ));
-        let mut event = new_event("db_guard", "guard_engine_unknown", "warn");
-        event.guard_name = Some(guard.name.clone());
-        event.detail = Some(format!("engine={}", guard.engine));
-        if let Err(err) = ctx.event_ledger.append(event) {
-            tracing::error!("failed to append guard_engine_unknown event: {err}");
-        }
-    }
 }
 
 pub fn derive_guard_name_from_dsn(dsn: &str) -> String {
@@ -353,14 +306,14 @@ pub fn derive_guard_name_from_dsn(dsn: &str) -> String {
     stripped.chars().take(64).collect()
 }
 
-pub fn detect_engine(dsn: &str) -> &'static str {
+pub fn detect_engine(dsn: &str) -> Option<DbGuardEngine> {
     if dsn.starts_with("postgres://") || dsn.starts_with("postgresql://") {
-        "postgres"
+        Some(DbGuardEngine::Postgres)
     } else if dsn.starts_with("mysql://") {
-        "mysql"
+        Some(DbGuardEngine::Mysql)
     } else if dsn.starts_with("sqlite://") {
-        "sqlite"
+        Some(DbGuardEngine::Sqlite)
     } else {
-        "unknown"
+        None
     }
 }

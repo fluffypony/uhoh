@@ -1,59 +1,14 @@
-use anyhow::{Context, Result};
-use rustls::RootCertStore;
+use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use tokio_postgres::NoTls;
-use tokio_postgres_rustls::MakeRustlsConnect;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::DbGuardEntry;
-use crate::db_guard::credentials;
-use crate::db_guard::recovery;
+use super::postgres_connection::{connect_postgres_client, ResolvedPostgresConnection};
+use super::{credentials, recovery};
+use crate::db::{DbGuardEntry, DbGuardMode};
 use crate::event_ledger::new_event;
 use crate::subsystem::DbGuardContext;
-
-/// Build a connection string with resolved credentials injected.
-pub fn build_connect_dsn(connection_ref: &str) -> Result<String> {
-    let creds = credentials::resolve_postgres_credentials(connection_ref)?;
-    if connection_ref.starts_with("postgres://") || connection_ref.starts_with("postgresql://") {
-        let mut url = url::Url::parse(connection_ref)
-            .with_context(|| format!("Invalid Postgres connection reference: {connection_ref}"))?;
-
-        if let Some(ref user) = creds.username {
-            let _ = url.set_username(user);
-        }
-        if let Some(ref pw) = creds.password {
-            let _ = url.set_password(Some(pw));
-        }
-
-        return Ok(url.to_string());
-    }
-
-    let mut parts: Vec<String> = connection_ref
-        .split_whitespace()
-        .map(|p| p.to_string())
-        .collect();
-    let has_user = parts.iter().any(|p| {
-        p.split_once('=')
-            .is_some_and(|(k, _)| k.eq_ignore_ascii_case("user"))
-    });
-    let has_password = parts.iter().any(|p| {
-        p.split_once('=')
-            .is_some_and(|(k, _)| k.eq_ignore_ascii_case("password"))
-    });
-    if let Some(ref user) = creds.username {
-        if !has_user {
-            parts.push(format!("user={user}"));
-        }
-    }
-    if let Some(ref pw) = creds.password {
-        if !has_password {
-            parts.push(format!("password={pw}"));
-        }
-    }
-    Ok(parts.join(" "))
-}
 
 pub(crate) struct PostgresGuardRuntime {
     task_runtime: Mutex<tokio::runtime::Runtime>,
@@ -141,13 +96,12 @@ pub(crate) fn tick_postgres_guard(
     runtime: &PostgresGuardRuntime,
     ctx: &DbGuardContext,
     guard: &DbGuardEntry,
+    effective_mode: DbGuardMode,
     tick_interval_secs: i64,
 ) -> Result<()> {
-    let poll_dsn =
-        build_connect_dsn(&guard.connection_ref).unwrap_or_else(|_| guard.connection_ref.clone());
-
+    let connection = ResolvedPostgresConnection::resolve(&guard.connection_ref)?;
     if guard.tables_csv.trim() == "*" {
-        if let Err(err) = reconcile_wildcard_delete_triggers(runtime, ctx, guard, &poll_dsn) {
+        if let Err(err) = reconcile_wildcard_delete_triggers(runtime, ctx, guard, &connection) {
             tracing::warn!(
                 "postgres wildcard trigger reconcile failed for {}: {}",
                 guard.name,
@@ -157,6 +111,26 @@ pub(crate) fn tick_postgres_guard(
         }
     }
 
+    ensure_postgres_baseline(ctx, guard, &connection)?;
+
+    // Respect configured guard mode: in schema_polling mode we intentionally skip
+    // row-level trigger counters and only rely on schema/DDL signal paths.
+    if effective_mode == DbGuardMode::SchemaPolling {
+        emit_postgres_tick_event(ctx, guard, &connection, true);
+        return Ok(());
+    }
+
+    run_delete_counter_checks(runtime, ctx, guard, &connection, tick_interval_secs)?;
+    process_ddl_recovery(runtime, ctx, guard, &connection)?;
+    emit_postgres_tick_event(ctx, guard, &connection, false);
+    Ok(())
+}
+
+fn ensure_postgres_baseline(
+    ctx: &DbGuardContext,
+    guard: &DbGuardEntry,
+    connection: &ResolvedPostgresConnection,
+) -> Result<()> {
     let baseline_interval = std::time::Duration::from_secs(
         ctx.config
             .db_guard
@@ -171,220 +145,208 @@ pub(crate) fn tick_postgres_guard(
         .map(|elapsed| elapsed.to_std().unwrap_or_default() >= baseline_interval)
         .unwrap_or(true);
 
-    if needs_baseline {
-        let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
-        match recovery::write_postgres_schema_baseline(
-            &ctx.uhoh_dir,
-            &guard.name,
-            &guard.connection_ref,
-            &creds,
-            ctx.config.db_guard.recovery_retention_days,
-            ctx.config.db_guard.max_baseline_size_mb,
-        ) {
-            Ok(info) => {
-                let ts = chrono::Utc::now().to_rfc3339();
-                if let Err(err) = ctx.database.set_db_guard_baseline_time(&guard.name, &ts) {
-                    tracing::warn!(
-                        "failed to persist baseline timestamp for guard {}: {}",
-                        guard.name,
-                        err
-                    );
-                }
-                let mut event = new_event("db_guard", "postgres_baseline", "info");
-                event.guard_name = Some(guard.name.clone());
-                event.detail = Some(format!("artifact={}, blake3={}", info.path, info.blake3));
-                if let Err(err) = ctx.event_ledger.append(event) {
-                    tracing::error!("failed to append postgres_baseline event: {err}");
-                }
-            }
-            Err(err) => {
-                anyhow::bail!(
-                    "postgres baseline generation failed for {}: {}",
-                    guard.name,
-                    err
-                );
-            }
-        }
-    }
-
-    // Respect configured guard mode: in schema_polling mode we intentionally skip
-    // row-level trigger counters and only rely on schema/DDL signal paths.
-    if guard.mode.eq_ignore_ascii_case("schema_polling") {
-        let mut event = new_event("db_guard", "postgres_tick", "info");
-        event.guard_name = Some(guard.name.clone());
-        event.detail = Some(format!(
-            "mode={}, dsn_ref={}, row_counters=disabled",
-            guard.mode,
-            scrub_ref(&guard.connection_ref)
-        ));
-        if let Err(err) = ctx.event_ledger.append(event) {
-            tracing::error!("failed to append postgres_tick event: {err}");
-        }
+    if !needs_baseline {
         return Ok(());
     }
 
-    // Lightweight delete-counter polling (use resolved credentials).
+    let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
+    let info = recovery::write_postgres_schema_baseline(
+        &ctx.uhoh_dir,
+        &guard.name,
+        connection,
+        &creds,
+        ctx.config.db_guard.recovery_retention_days,
+        ctx.config.db_guard.max_baseline_size_mb,
+    )
+    .map_err(|err| {
+        anyhow::anyhow!(
+            "postgres baseline generation failed for {}: {}",
+            guard.name,
+            err
+        )
+    })?;
+
+    let ts = chrono::Utc::now().to_rfc3339();
+    if let Err(err) = ctx.database.set_db_guard_baseline_time(&guard.name, &ts) {
+        tracing::warn!(
+            "failed to persist baseline timestamp for guard {}: {}",
+            guard.name,
+            err
+        );
+    }
+    let mut event = new_event("db_guard", "postgres_baseline", "info");
+    event.guard_name = Some(guard.name.clone());
+    event.detail = Some(format!("artifact={}, blake3={}", info.path, info.blake3));
+    if let Err(err) = ctx.event_ledger.append(event) {
+        tracing::error!("failed to append postgres_baseline event: {err}");
+    }
+    Ok(())
+}
+
+fn run_delete_counter_checks(
+    runtime: &PostgresGuardRuntime,
+    ctx: &DbGuardContext,
+    guard: &DbGuardEntry,
+    connection: &ResolvedPostgresConnection,
+    tick_interval_secs: i64,
+) -> Result<()> {
     let poll_window_secs = tick_interval_secs.saturating_mul(2).max(1);
-    match poll_delete_count(runtime, &poll_dsn, poll_window_secs, &guard.tables_csv) {
-        Ok(deleted_rows) => {
-            let total_rows = match poll_total_row_count(runtime, &poll_dsn) {
-                Ok(total) => Some(total),
-                Err(err) => {
-                    tracing::warn!(
-                        "postgres total row count poll failed for {}: {}",
-                        guard.name,
-                        err
-                    );
-                    emit_degraded_event(ctx, &guard.name, "total_row_count_poll", &err);
-                    None
-                }
-            };
-            let pct = if total_rows.unwrap_or(0) > 0 {
-                deleted_rows as f64 / total_rows.unwrap_or(0) as f64
-            } else {
-                0.0
-            };
-            if deleted_rows >= ctx.config.db_guard.mass_delete_row_threshold as i64 {
-                let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
-                match recovery::write_postgres_schema_recovery(
-                    &ctx.uhoh_dir,
-                    &guard.name,
-                    &guard.connection_ref,
-                    &creds,
-                    "mass_delete",
-                    ctx.config.db_guard.encrypt_recovery,
-                    ctx.config.db_guard.recovery_retention_days,
-                    ctx.config.db_guard.max_recovery_file_mb,
-                ) {
-                    Ok(artifact) => emit_recovery_event(
-                        ctx,
-                        &guard.name,
-                        "mass_delete",
-                        serde_json::json!({
-                            "deleted_rows": deleted_rows,
-                            "artifact": artifact.path.clone(),
-                            "blake3": artifact.blake3.clone(),
-                        }),
-                        &artifact,
-                    ),
-                    Err(err) => {
-                        anyhow::bail!(
-                            "postgres mass-delete recovery write failed for {}: {}",
-                            guard.name,
-                            err
-                        )
-                    }
-                }
-            } else if pct >= ctx.config.db_guard.mass_delete_pct_threshold {
-                let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
-                match recovery::write_postgres_schema_recovery(
-                    &ctx.uhoh_dir,
-                    &guard.name,
-                    &guard.connection_ref,
-                    &creds,
-                    "mass_delete_pct",
-                    ctx.config.db_guard.encrypt_recovery,
-                    ctx.config.db_guard.recovery_retention_days,
-                    ctx.config.db_guard.max_recovery_file_mb,
-                ) {
-                    Ok(artifact) => emit_recovery_event(
-                        ctx,
-                        &guard.name,
-                        "mass_delete_pct",
-                        serde_json::json!({
-                            "deleted_rows": deleted_rows,
-                            "total_rows": total_rows,
-                            "deleted_ratio": pct,
-                            "artifact": artifact.path.clone(),
-                            "blake3": artifact.blake3.clone(),
-                        }),
-                        &artifact,
-                    ),
-                    Err(err) => {
-                        anyhow::bail!(
-                            "postgres mass-delete-pct recovery write failed for {}: {}",
-                            guard.name,
-                            err
-                        )
-                    }
-                }
-            }
-        }
-        Err(err) => {
-            anyhow::bail!(
+    let deleted_rows = poll_delete_count(runtime, connection, poll_window_secs, &guard.tables_csv)
+        .map_err(|err| {
+            anyhow::anyhow!(
                 "postgres delete count poll failed for {}: {}",
                 guard.name,
                 err
+            )
+        })?;
+    let total_rows = match poll_total_row_count(runtime, connection) {
+        Ok(total) => Some(total),
+        Err(err) => {
+            tracing::warn!(
+                "postgres total row count poll failed for {}: {}",
+                guard.name,
+                err
             );
+            emit_degraded_event(ctx, &guard.name, "total_row_count_poll", &err);
+            None
         }
+    };
+    let pct = if total_rows.unwrap_or(0) > 0 {
+        deleted_rows as f64 / total_rows.unwrap_or(0) as f64
+    } else {
+        0.0
+    };
+
+    if deleted_rows >= ctx.config.db_guard.mass_delete_row_threshold as i64 {
+        write_recovery_artifact(
+            ctx,
+            guard,
+            connection,
+            "mass_delete",
+            serde_json::json!({
+                "deleted_rows": deleted_rows,
+            }),
+            "postgres mass-delete recovery write failed",
+        )?;
+    } else if pct >= ctx.config.db_guard.mass_delete_pct_threshold {
+        write_recovery_artifact(
+            ctx,
+            guard,
+            connection,
+            "mass_delete_pct",
+            serde_json::json!({
+                "deleted_rows": deleted_rows,
+                "total_rows": total_rows,
+                "deleted_ratio": pct,
+            }),
+            "postgres mass-delete-pct recovery write failed",
+        )?;
     }
 
-    let listen_payloads = drain_listen_payloads(runtime, &poll_dsn)?;
-    let ddl_payloads = match poll_ddl_events(runtime, &poll_dsn, 64) {
+    Ok(())
+}
+
+fn process_ddl_recovery(
+    runtime: &PostgresGuardRuntime,
+    ctx: &DbGuardContext,
+    guard: &DbGuardEntry,
+    connection: &ResolvedPostgresConnection,
+) -> Result<()> {
+    let listen_payloads = drain_listen_payloads(runtime, connection)?;
+    let ddl_payloads = match poll_ddl_events(runtime, connection, 64) {
         Ok(payloads) => payloads,
         Err(err) => {
             emit_degraded_event(ctx, &guard.name, "ddl_event_poll", &err);
             Vec::new()
         }
     };
-    let mut payloads = Vec::new();
-    payloads.extend(listen_payloads);
-    payloads.extend(ddl_payloads);
-    if !payloads.is_empty() {
-        for payload in payloads {
-            let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
-            match recovery::write_postgres_schema_recovery(
-                &ctx.uhoh_dir,
-                &guard.name,
-                &guard.connection_ref,
-                &creds,
-                "ddl",
-                ctx.config.db_guard.encrypt_recovery,
-                ctx.config.db_guard.recovery_retention_days,
-                ctx.config.db_guard.max_recovery_file_mb,
-            ) {
-                Ok(artifact) => emit_recovery_event(
-                    ctx,
-                    &guard.name,
-                    "drop_table",
-                    serde_json::json!({
-                        "notify_payload": payload,
-                        "artifact": artifact.path.clone(),
-                        "blake3": artifact.blake3.clone(),
-                    }),
-                    &artifact,
-                ),
-                Err(err) => {
-                    anyhow::bail!(
-                        "postgres DDL recovery write failed for {}: {}",
-                        guard.name,
-                        err
-                    )
-                }
-            }
-        }
+
+    for payload in listen_payloads.into_iter().chain(ddl_payloads) {
+        write_recovery_artifact(
+            ctx,
+            guard,
+            connection,
+            "ddl",
+            serde_json::json!({
+                "notify_payload": payload,
+            }),
+            "postgres DDL recovery write failed",
+        )?;
     }
 
+    Ok(())
+}
+
+fn write_recovery_artifact(
+    ctx: &DbGuardContext,
+    guard: &DbGuardEntry,
+    connection: &ResolvedPostgresConnection,
+    label: &str,
+    detail: serde_json::Value,
+    error_prefix: &str,
+) -> Result<()> {
+    let creds = credentials::resolve_postgres_credentials(&guard.connection_ref)?;
+    let artifact = recovery::write_postgres_schema_recovery(
+        &ctx.uhoh_dir,
+        &guard.name,
+        connection,
+        &creds,
+        label,
+        ctx.config.db_guard.encrypt_recovery,
+        ctx.config.db_guard.recovery_retention_days,
+        ctx.config.db_guard.max_recovery_file_mb,
+    )
+    .map_err(|err| anyhow::anyhow!("{error_prefix} for {}: {}", guard.name, err))?;
+    let mut event_detail = detail;
+    if let Some(map) = event_detail.as_object_mut() {
+        map.insert(
+            "artifact".to_string(),
+            serde_json::json!(artifact.path.clone()),
+        );
+        map.insert(
+            "blake3".to_string(),
+            serde_json::json!(artifact.blake3.clone()),
+        );
+    }
+    emit_recovery_event(
+        ctx,
+        &guard.name,
+        if label == "ddl" { "drop_table" } else { label },
+        event_detail,
+        &artifact,
+    );
+    Ok(())
+}
+
+fn emit_postgres_tick_event(
+    ctx: &DbGuardContext,
+    guard: &DbGuardEntry,
+    connection: &ResolvedPostgresConnection,
+    row_counters_disabled: bool,
+) {
     let mut event = new_event("db_guard", "postgres_tick", "info");
     event.guard_name = Some(guard.name.clone());
-    event.detail = Some(format!(
-        "mode={}, dsn_ref={}",
-        guard.mode,
-        scrub_ref(&guard.connection_ref)
-    ));
+    event.detail = Some(if row_counters_disabled {
+        format!(
+            "mode={}, dsn_ref={}, row_counters=disabled",
+            guard.mode,
+            connection.scrubbed_ref()
+        )
+    } else {
+        format!("mode={}, dsn_ref={}", guard.mode, connection.scrubbed_ref())
+    });
     if let Err(err) = ctx.event_ledger.append(event) {
         tracing::error!("failed to append postgres_tick event: {err}");
     }
-    Ok(())
 }
 
 fn reconcile_wildcard_delete_triggers(
     runtime: &PostgresGuardRuntime,
     ctx: &DbGuardContext,
     guard: &DbGuardEntry,
-    poll_dsn: &str,
+    connection: &ResolvedPostgresConnection,
 ) -> Result<()> {
-    let current = fetch_current_schema_tables(runtime, poll_dsn)?;
+    let current = fetch_current_schema_tables(runtime, connection)?;
     if current.is_empty() {
         return Ok(());
     }
@@ -411,7 +373,7 @@ fn reconcile_wildcard_delete_triggers(
     }
 
     if !added.is_empty() {
-        install_delete_counter_triggers_for_tables(runtime, poll_dsn, &added)?;
+        install_delete_counter_triggers_for_tables(runtime, connection, &added)?;
         let mut event = new_event("db_guard", "postgres_wildcard_trigger_reconciled", "info");
         event.guard_name = Some(guard.name.clone());
         event.detail = Some(
@@ -442,11 +404,11 @@ fn reconcile_wildcard_delete_triggers(
 
 fn fetch_current_schema_tables(
     runtime: &PostgresGuardRuntime,
-    connection_ref: &str,
+    connection: &ResolvedPostgresConnection,
 ) -> Result<Vec<String>> {
-    let connection_ref = connection_ref.to_string();
+    let connection = connection.clone();
     runtime.run_task(async move {
-        let client = pg_connect_spawn(&connection_ref).await?;
+        let client = connect_postgres_client(&connection).await?;
         let rows = client
             .query(
                 "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = current_schema()",
@@ -463,16 +425,16 @@ fn fetch_current_schema_tables(
 
 fn install_delete_counter_triggers_for_tables(
     runtime: &PostgresGuardRuntime,
-    connection_ref: &str,
+    connection: &ResolvedPostgresConnection,
     tables: &[String],
 ) -> Result<()> {
     if tables.is_empty() {
         return Ok(());
     }
-    let connection_ref = connection_ref.to_string();
+    let connection = connection.clone();
     let tables = tables.to_vec();
     runtime.run_task(async move {
-        let client = pg_connect_spawn(&connection_ref).await?;
+        let client = connect_postgres_client(&connection).await?;
         for table in tables {
             install_delete_counter_trigger_sql(&client, &table).await?;
         }
@@ -523,14 +485,13 @@ async fn install_delete_counter_trigger_sql(
 }
 
 pub fn install_monitoring_infrastructure(
-    connection_ref: &str,
+    connection: &ResolvedPostgresConnection,
     tables_csv: &str,
 ) -> Result<Option<String>> {
-    let connection_ref =
-        build_connect_dsn(connection_ref).unwrap_or_else(|_| connection_ref.to_string());
+    let connection = connection.clone();
     let tables = parse_watched_tables(tables_csv);
     run_postgres_task(async move {
-        let client = pg_connect_spawn(&connection_ref).await?;
+        let client = connect_postgres_client(&connection).await?;
         client
             .batch_execute(
                 "
@@ -634,12 +595,14 @@ pub fn install_monitoring_infrastructure(
     })
 }
 
-pub fn drop_monitoring_infrastructure(connection_ref: &str, tables_csv: &str) -> Result<()> {
-    let connection_ref =
-        build_connect_dsn(connection_ref).unwrap_or_else(|_| connection_ref.to_string());
+pub fn drop_monitoring_infrastructure(
+    connection: &ResolvedPostgresConnection,
+    tables_csv: &str,
+) -> Result<()> {
+    let connection = connection.clone();
     let tables = parse_watched_tables(tables_csv);
     run_postgres_task(async move {
-        let client = pg_connect_spawn(&connection_ref).await?;
+        let client = connect_postgres_client(&connection).await?;
 
         if tables.is_empty() {
             client
@@ -716,11 +679,10 @@ pub fn drop_monitoring_infrastructure(connection_ref: &str, tables_csv: &str) ->
     })
 }
 
-pub fn test_monitoring_infrastructure(connection_ref: &str) -> Result<()> {
-    let connection_ref =
-        build_connect_dsn(connection_ref).unwrap_or_else(|_| connection_ref.to_string());
+pub fn test_monitoring_infrastructure(connection: &ResolvedPostgresConnection) -> Result<()> {
+    let connection = connection.clone();
     run_postgres_task(async move {
-        let client = pg_connect_spawn(&connection_ref).await?;
+        let client = connect_postgres_client(&connection).await?;
 
         match client
             .query_one("SELECT 1 FROM _uhoh_ddl_events LIMIT 1", &[])
@@ -750,12 +712,11 @@ pub fn test_monitoring_infrastructure(connection_ref: &str) -> Result<()> {
     })
 }
 
-pub fn execute_sql(connection_ref: &str, sql: &str) -> Result<()> {
-    let connection_ref =
-        build_connect_dsn(connection_ref).unwrap_or_else(|_| connection_ref.to_string());
+pub fn execute_sql(connection: &ResolvedPostgresConnection, sql: &str) -> Result<()> {
+    let connection = connection.clone();
     let sql = sql.to_string();
     run_postgres_task(async move {
-        let client = pg_connect_spawn(&connection_ref).await?;
+        let client = connect_postgres_client(&connection).await?;
         client
             .batch_execute(&sql)
             .await
@@ -771,8 +732,11 @@ pub(crate) fn reconcile_listen_workers(
 ) -> Result<()> {
     let required: HashSet<String> = guards
         .iter()
-        .filter(|g| g.engine == "postgres")
-        .map(|g| build_connect_dsn(&g.connection_ref).unwrap_or_else(|_| g.connection_ref.clone()))
+        .filter(|g| g.engine == crate::db::DbGuardEngine::Postgres)
+        .map(|g| ResolvedPostgresConnection::resolve(&g.connection_ref))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .map(|connection| connection.connect_dsn().to_string())
         .collect();
 
     let mut workers = runtime
@@ -820,14 +784,14 @@ pub(crate) fn reconcile_listen_workers(
 
 fn poll_delete_count(
     runtime: &PostgresGuardRuntime,
-    connection_ref: &str,
+    connection: &ResolvedPostgresConnection,
     window_seconds: i64,
     tables_csv: &str,
 ) -> Result<i64> {
     let tables_csv = tables_csv.to_string();
-    let connection_ref = connection_ref.to_string();
+    let connection = connection.clone();
     runtime.run_task(async move {
-        let client = pg_connect_spawn(&connection_ref).await?;
+        let client = connect_postgres_client(&connection).await?;
         // Keep helper tables bounded to avoid unbounded growth in monitored DBs.
         let _ = client
             .execute(
@@ -887,9 +851,13 @@ fn poll_delete_count(
     })
 }
 
-fn poll_total_row_count(runtime: &PostgresGuardRuntime, connection_ref: &str) -> Result<i64> {
+fn poll_total_row_count(
+    runtime: &PostgresGuardRuntime,
+    connection: &ResolvedPostgresConnection,
+) -> Result<i64> {
+    let connection = connection.clone();
     runtime.run_task(async move {
-        let client = pg_connect_spawn(connection_ref).await?;
+        let client = connect_postgres_client(&connection).await?;
 
         // Use pg_class for row estimates (fast, no table scan).
         // information_schema.tables does not have TABLE_ROWS in PostgreSQL.
@@ -912,19 +880,21 @@ fn poll_total_row_count(runtime: &PostgresGuardRuntime, connection_ref: &str) ->
 
 fn poll_ddl_events(
     runtime: &PostgresGuardRuntime,
-    connection_ref: &str,
+    connection: &ResolvedPostgresConnection,
     max_rows: i64,
 ) -> Result<Vec<String>> {
+    let connection_key = connection.connect_dsn().to_string();
     let last_seen_id = {
         let cache = runtime
             .ddl_cursor
             .lock()
             .map_err(|_| anyhow::anyhow!("Postgres DDL cursor lock poisoned"))?;
-        cache.get(connection_ref).copied().unwrap_or(0)
+        cache.get(&connection_key).copied().unwrap_or(0)
     };
 
+    let connection = connection.clone();
     let result = runtime.run_task(async move {
-        let client = pg_connect_spawn(connection_ref).await?;
+        let client = connect_postgres_client(&connection).await?;
 
         // Keep helper table bounded to avoid unbounded growth in monitored DBs.
         let _ = client
@@ -965,7 +935,7 @@ fn poll_ddl_events(
             .ddl_cursor
             .lock()
             .map_err(|_| anyhow::anyhow!("Postgres DDL cursor lock poisoned"))?;
-        cache.insert(connection_ref.to_string(), id);
+        cache.insert(connection_key, id);
         Ok(rows.into_iter().map(|(_, payload)| payload).collect())
     } else {
         Ok(Vec::new())
@@ -990,12 +960,28 @@ async fn run_listen_worker(
             return;
         }
 
-        let client = match pg_connect_spawn(&connection_ref).await {
+        let connection = match ResolvedPostgresConnection::resolve(&connection_ref) {
+            Ok(connection) => connection,
+            Err(err) => {
+                tracing::warn!(
+                    "postgres DDL poll connection setup failed for {}: {}",
+                    connection_ref,
+                    err
+                );
+                if sleep_or_cancel(backoff, &shutdown).await {
+                    return;
+                }
+                backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
+                continue;
+            }
+        };
+
+        let client = match connect_postgres_client(&connection).await {
             Ok(client) => client,
             Err(err) => {
                 tracing::warn!(
                     "postgres DDL poll connect failed for {}: {}",
-                    scrub_ref(&connection_ref),
+                    connection.scrubbed_ref(),
                     err
                 );
                 if sleep_or_cancel(backoff, &shutdown).await {
@@ -1049,7 +1035,7 @@ async fn run_listen_worker(
                         Err(err) => {
                             tracing::warn!(
                                 "postgres DDL poll failed for {}: {}",
-                                scrub_ref(&connection_ref),
+                                connection.scrubbed_ref(),
                                 credentials::scrub_error_message(&err.to_string())
                             );
                             break;
@@ -1068,13 +1054,13 @@ async fn run_listen_worker(
 
 fn drain_listen_payloads(
     runtime: &PostgresGuardRuntime,
-    connection_ref: &str,
+    connection: &ResolvedPostgresConnection,
 ) -> Result<Vec<String>> {
     let workers = runtime
         .ddl_poll_workers
         .lock()
         .map_err(|_| anyhow::anyhow!("Postgres DDL poll worker map lock poisoned"))?;
-    let Some(worker) = workers.get(connection_ref) else {
+    let Some(worker) = workers.get(connection.connect_dsn()) else {
         return Ok(Vec::new());
     };
     let mut pending = worker
@@ -1110,178 +1096,14 @@ where
     build_postgres_task_runtime()?.block_on(fut)
 }
 
-/// Certificate verifier that accepts any server certificate (for sslmode=require).
-#[derive(Debug)]
-struct NoVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-            rustls::SignatureScheme::ED25519,
-        ]
-    }
-}
-
-pub(crate) fn native_rustls_connector_for_sslmode(sslmode: &str) -> Result<MakeRustlsConnect> {
-    let config = match sslmode {
-        "verify-ca" | "verify-full" => {
-            let mut roots = RootCertStore::empty();
-            let native = rustls_native_certs::load_native_certs();
-            if !native.errors.is_empty() {
-                let first = &native.errors[0];
-                tracing::warn!("native certificate load issue: {first}");
-            }
-            for cert in native.certs {
-                if let Err(err) = roots.add(cert) {
-                    tracing::warn!("skipping invalid native certificate: {err}");
-                }
-            }
-            if roots.is_empty() {
-                anyhow::bail!("No trusted root certificates available for Postgres TLS connection")
-            }
-            rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth()
-        }
-        _ => {
-            // sslmode=require: encrypt but don't verify server certificate
-            rustls::ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerifier))
-                .with_no_client_auth()
-        }
-    };
-    Ok(MakeRustlsConnect::new(config))
-}
-
-pub(crate) async fn pg_connect_spawn(connection_ref: &str) -> Result<tokio_postgres::Client> {
-    if connection_requires_tls(connection_ref) {
-        let sslmode = extract_sslmode(connection_ref).unwrap_or("require");
-        let tls = native_rustls_connector_for_sslmode(sslmode)?;
-        let (client, connection) = tokio_postgres::connect(connection_ref, tls)
-            .await
-            .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        return Ok(client);
-    }
-
-    let (client, connection) = tokio_postgres::connect(connection_ref, NoTls)
-        .await
-        .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    Ok(client)
-}
-
-fn extract_sslmode(connection_ref: &str) -> Option<&'static str> {
-    if let Ok(url) = url::Url::parse(connection_ref) {
-        for (k, v) in url.query_pairs() {
-            if k.eq_ignore_ascii_case("sslmode") {
-                let mode = v.to_ascii_lowercase();
-                return Some(match mode.as_str() {
-                    "verify-ca" => "verify-ca",
-                    "verify-full" => "verify-full",
-                    _ => "require",
-                });
-            }
-        }
-    }
-    for part in connection_ref.split_whitespace() {
-        if let Some((k, v)) = part.split_once('=') {
-            if k.eq_ignore_ascii_case("sslmode") {
-                let mode = v.trim_matches('"').trim_matches('\'').to_ascii_lowercase();
-                return Some(match mode.as_str() {
-                    "verify-ca" => "verify-ca",
-                    "verify-full" => "verify-full",
-                    _ => "require",
-                });
-            }
-        }
-    }
-    None
-}
-
-fn scrub_ref(connection_ref: &str) -> String {
-    crate::db_guard::credentials::scrub_dsn(connection_ref)
-}
-
-pub(crate) fn connection_requires_tls(connection_ref: &str) -> bool {
-    if let Ok(url) = url::Url::parse(connection_ref) {
-        if matches!(url.scheme(), "postgres" | "postgresql") {
-            for (k, v) in url.query_pairs() {
-                if k.eq_ignore_ascii_case("sslmode") {
-                    let mode = v.to_ascii_lowercase();
-                    if mode == "require" || mode == "verify-ca" || mode == "verify-full" {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    // keyword-value DSN format, e.g. "host=... user=... sslmode=require"
-    for part in connection_ref.split_whitespace() {
-        if let Some((k, v)) = part.split_once('=') {
-            if k.eq_ignore_ascii_case("sslmode") {
-                let mode = v.trim_matches('"').trim_matches('\'').to_ascii_lowercase();
-                if mode == "require" || mode == "verify-ca" || mode == "verify-full" {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        build_connect_dsn, drain_listen_payloads, parse_watched_tables, reconcile_listen_workers,
-        run_postgres_task, PostgresGuardRuntime,
+        drain_listen_payloads, parse_watched_tables, reconcile_listen_workers, run_postgres_task,
+        PostgresGuardRuntime,
     };
     use crate::db::{DbGuardEngine, DbGuardEntry, DbGuardMode};
+    use crate::db_guard::postgres_connection::ResolvedPostgresConnection;
     use tokio_util::sync::CancellationToken;
 
     fn guard(name: &str, engine: DbGuardEngine, connection_ref: &str) -> DbGuardEntry {
@@ -1319,8 +1141,9 @@ mod tests {
         let runtime = PostgresGuardRuntime::new();
         let shutdown = CancellationToken::new();
         let postgres_guard = guard("pg", DbGuardEngine::Postgres, "host=localhost dbname=uhoh");
-        let dsn = build_connect_dsn(&postgres_guard.connection_ref)
-            .unwrap_or_else(|_| postgres_guard.connection_ref.clone());
+        let connection = ResolvedPostgresConnection::resolve(&postgres_guard.connection_ref)
+            .expect("resolve postgres connection");
+        let worker_key = connection.connect_dsn().to_string();
         let tokio_runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
 
         tokio_runtime.block_on(async {
@@ -1334,16 +1157,16 @@ mod tests {
 
             {
                 let workers = runtime.ddl_poll_workers.lock().unwrap();
-                let worker = workers.get(&dsn).expect("worker present");
+                let worker = workers.get(&worker_key).expect("worker present");
                 let mut queue = worker.queue.lock().unwrap();
                 queue.push("payload-a".to_string());
                 queue.push("payload-b".to_string());
             }
             assert_eq!(
-                drain_listen_payloads(&runtime, &dsn).expect("drain queue"),
+                drain_listen_payloads(&runtime, &connection).expect("drain queue"),
                 vec!["payload-a".to_string(), "payload-b".to_string()]
             );
-            assert!(drain_listen_payloads(&runtime, &dsn)
+            assert!(drain_listen_payloads(&runtime, &connection)
                 .expect("drain empty queue")
                 .is_empty());
 

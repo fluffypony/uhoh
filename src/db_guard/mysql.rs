@@ -3,8 +3,8 @@ use std::process::Command;
 use tempfile::NamedTempFile;
 use url::Url;
 
+use super::credentials::{load_encrypted_credentials, scrub_error_message, CredentialMaterial};
 use crate::db::DbGuardEntry;
-use crate::db_guard::CredentialMaterial;
 use crate::event_ledger::new_event;
 use crate::subsystem::DbGuardContext;
 
@@ -22,7 +22,7 @@ pub fn tick_mysql_guard(
 ) -> Result<()> {
     // Phase 1 schema polling mode: detect abrupt table/index shape changes and estimate row
     // count drops to surface catastrophic operations before full binlog support lands.
-    let stored_credentials = crate::db_guard::resolve_stored_credentials(&guard.connection_ref)?;
+    let stored_credentials = load_encrypted_credentials(&guard.connection_ref)?;
     let snapshot = match poll_schema_snapshot(
         &guard.connection_ref,
         stored_credentials.as_ref(),
@@ -213,7 +213,7 @@ fn poll_schema_snapshot(
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
             "mysql schema polling failed: {}",
-            crate::db_guard::scrub_error_message(stderr.trim())
+            scrub_error_message(stderr.trim())
         );
     }
 
