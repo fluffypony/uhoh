@@ -189,36 +189,19 @@ fn tool_create_snapshot(context: &McpToolContext, args: Value) -> Result<Value, 
 
     let project = resolve::resolve_project(&context.database, path.or(hash), None)
         .map_err(classify_lookup_error)?;
-    let project_path = Path::new(&project.current_path);
-
-    let info = crate::snapshot::create_snapshot(
+    let result = crate::project_service::create_project_snapshot(
         &context.uhoh_dir,
         &context.database,
         &context.config,
-        crate::snapshot::CreateSnapshotRequest {
-            project_hash: &project.hash,
-            project_path,
-            trigger: "mcp",
-            message,
-            changed_paths: None,
-        },
+        &project,
+        "mcp",
+        message,
     )
     .map_err(|e| McpToolError::internal(e.to_string()))?;
 
-    if let Some(snapshot_id) = info {
-        if let Some(tx) = &context.event_tx {
-            if let Ok(Some(rowid)) = context.database.latest_snapshot_rowid(&project.hash) {
-                if let Ok(Some(row)) = context.database.get_snapshot_by_rowid(rowid) {
-                    let _ = tx.send(ServerEvent::SnapshotCreated {
-                        project_hash: project.hash.clone(),
-                        snapshot_id: crate::cas::id_to_base58(snapshot_id),
-                        timestamp: row.timestamp,
-                        trigger: "mcp".to_string(),
-                        file_count: row.file_count as usize,
-                        message: message.map(str::to_string),
-                    });
-                }
-            }
+    if let Some(snapshot_id) = result.snapshot_id {
+        if let (Some(tx), Some(event)) = (&context.event_tx, result.snapshot_event) {
+            let _ = tx.send(event);
         }
         Ok(json!({
             "content": [{"type": "text", "text": format!("Snapshot created: {}", crate::cas::id_to_base58(snapshot_id))}],
@@ -299,21 +282,13 @@ fn tool_restore_snapshot(context: &McpToolContext, args: Value) -> Result<Value,
             .map_err(|e| McpToolError::invalid_params(e.to_string()))?;
     }
 
-    let outcome = crate::restore_runtime::restore_project(
+    let outcome = crate::project_service::restore_project_snapshot(
         &context.restore_runtime,
+        &context.config,
         &project,
-        crate::restore::RestoreRequest {
-            snapshot_id: &snapshot_id,
-            target_path,
-            dry_run,
-            force: true,
-            pre_restore_snapshot: Some(crate::restore::PreRestoreSnapshot {
-                trigger: "pre-restore",
-                message: Some(format!("Before restore to {snapshot_id}")),
-                config: &context.config,
-            }),
-            confirm_large_delete: None,
-        },
+        &snapshot_id,
+        dry_run,
+        target_path,
     )
     .map_err(classify_restore_error)?;
 

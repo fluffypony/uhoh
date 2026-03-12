@@ -21,6 +21,7 @@ pub mod mcp_tools;
 pub mod notifications;
 pub mod operations;
 pub mod platform;
+pub mod project_service;
 pub mod resolve;
 pub mod restore;
 pub mod restore_guards;

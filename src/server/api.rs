@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 
 use super::ApiState;
 use crate::resolve;
-use crate::restore_runtime;
 
 #[derive(Deserialize)]
 pub struct PaginationParams {
@@ -255,28 +254,57 @@ pub async fn get_snapshot_files(
 }
 
 fn build_file_tree(files: &[crate::db::FileEntryRow]) -> Value {
-    let mut root: BTreeMap<String, Value> = BTreeMap::new();
+    let mut root: BTreeMap<String, FileTreeNode> = BTreeMap::new();
     for file in files {
         let parts: Vec<&str> = file.path.split('/').collect();
-        insert_into_tree(
-            &mut root,
-            &parts,
-            &file.path,
-            &file.hash,
-            file.size,
-            file.is_symlink,
-        );
+        insert_into_tree(&mut root, &parts, file);
     }
-    json!(root.values().cloned().collect::<Vec<_>>())
+    Value::Array(root.into_values().map(FileTreeNode::into_value).collect())
+}
+
+enum FileTreeNode {
+    Directory(FileTreeDirectory),
+    File(FileTreeLeaf),
+}
+
+struct FileTreeDirectory {
+    name: String,
+    children: BTreeMap<String, FileTreeNode>,
+}
+
+struct FileTreeLeaf {
+    name: String,
+    path: String,
+    blob_hash: String,
+    size: u64,
+    is_symlink: bool,
+}
+
+impl FileTreeNode {
+    fn into_value(self) -> Value {
+        match self {
+            FileTreeNode::Directory(dir) => json!({
+                "type": "directory",
+                "name": dir.name,
+                "children": dir.children.into_values().map(FileTreeNode::into_value).collect::<Vec<_>>(),
+            }),
+            FileTreeNode::File(file) => json!({
+                "type": "file",
+                "name": file.name,
+                "path": file.path,
+                "blob_hash": file.blob_hash,
+                "size": file.size,
+                "is_binary": false,
+                "is_symlink": file.is_symlink,
+            }),
+        }
+    }
 }
 
 fn insert_into_tree(
-    tree: &mut BTreeMap<String, Value>,
+    tree: &mut BTreeMap<String, FileTreeNode>,
     parts: &[&str],
-    full_path: &str,
-    blob_hash: &str,
-    size: u64,
-    is_symlink: bool,
+    file: &crate::db::FileEntryRow,
 ) {
     if parts.is_empty() {
         return;
@@ -284,37 +312,26 @@ fn insert_into_tree(
     if parts.len() == 1 {
         tree.insert(
             parts[0].to_string(),
-            json!({
-                "type": "file",
-                "name": parts[0],
-                "path": full_path,
-                "blob_hash": blob_hash,
-                "size": size,
-                "is_binary": false,
-                "is_symlink": is_symlink,
+            FileTreeNode::File(FileTreeLeaf {
+                name: parts[0].to_string(),
+                path: file.path.clone(),
+                blob_hash: file.hash.clone(),
+                size: file.size,
+                is_symlink: file.is_symlink,
             }),
         );
         return;
     }
 
     let dir_name = parts[0].to_string();
-    let entry = tree
-        .entry(dir_name.clone())
-        .or_insert_with(|| json!({"type": "directory", "name": dir_name, "children": {}}));
-    if let Some(children) = entry.get_mut("children") {
-        if let Some(obj) = children.as_object_mut() {
-            let mut child_map: BTreeMap<String, Value> =
-                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            insert_into_tree(
-                &mut child_map,
-                &parts[1..],
-                full_path,
-                blob_hash,
-                size,
-                is_symlink,
-            );
-            *children = json!(child_map);
-        }
+    let entry = tree.entry(dir_name.clone()).or_insert_with(|| {
+        FileTreeNode::Directory(FileTreeDirectory {
+            name: dir_name,
+            children: BTreeMap::new(),
+        })
+    });
+    if let FileTreeNode::Directory(directory) = entry {
+        insert_into_tree(&mut directory.children, &parts[1..], file);
     }
 }
 
@@ -487,31 +504,18 @@ pub async fn create_snapshot(
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let project =
             resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::not_found)?;
-        let info = crate::snapshot::create_snapshot(
+        let result = crate::project_service::create_project_snapshot(
             &uhoh_dir,
             &db,
             &cfg,
-            crate::snapshot::CreateSnapshotRequest {
-                project_hash: &project.hash,
-                project_path: std::path::Path::new(&project.current_path),
-                trigger: "api",
-                message: message.as_deref(),
-                changed_paths: None,
-            },
+            &project,
+            "api",
+            message.as_deref(),
         )
         .map_err(ApiError::invalid_input)?;
-        if let Some(id) = info {
-            if let Some(rowid) = db.latest_snapshot_rowid(&project.hash)? {
-                if let Some(row) = db.get_snapshot_by_rowid(rowid)? {
-                    let _ = event_tx.send(crate::server::events::ServerEvent::SnapshotCreated {
-                        project_hash: project.hash.clone(),
-                        snapshot_id: crate::cas::id_to_base58(id),
-                        timestamp: row.timestamp,
-                        trigger: "api".to_string(),
-                        file_count: row.file_count as usize,
-                        message: message.clone(),
-                    });
-                }
+        if let Some(id) = result.snapshot_id {
+            if let Some(event) = result.snapshot_event {
+                let _ = event_tx.send(event);
             }
             Ok(json!({ "snapshot_id": crate::cas::id_to_base58(id) }))
         } else {
@@ -589,21 +593,13 @@ pub async fn restore_snapshot(
             resolve::validate_path_within_project(std::path::Path::new(&project.current_path), tp)?;
         }
 
-        let outcome = restore_runtime::restore_project(
+        let outcome = crate::project_service::restore_project_snapshot(
             &restore_runtime,
+            &cfg,
             &project,
-            crate::restore::RestoreRequest {
-                snapshot_id: &snap_id,
-                target_path: target_path_for_task.as_deref(),
-                dry_run,
-                force: true,
-                pre_restore_snapshot: Some(crate::restore::PreRestoreSnapshot {
-                    trigger: "pre-restore",
-                    message: Some(format!("Before restore to {snap_id}")),
-                    config: &cfg,
-                }),
-                confirm_large_delete: None,
-            },
+            &snap_id,
+            dry_run,
+            target_path_for_task.as_deref(),
         )?;
 
         Ok(json!({
