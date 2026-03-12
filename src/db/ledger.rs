@@ -59,13 +59,9 @@ impl<'r> TryFrom<&Row<'r>> for EventLedgerEntry {
         Ok(EventLedgerEntry {
             id: row.get(0)?,
             ts: row.get(1)?,
-            source: LedgerSource::parse(&source_raw)
-                .map(|value| value.as_str().to_string())
-                .unwrap_or(source_raw),
+            source: LedgerSource::parse(&source_raw).unwrap_or(LedgerSource::Daemon),
             event_type: row.get(3)?,
-            severity: LedgerSeverity::parse(&severity_raw)
-                .map(|value| value.as_str().to_string())
-                .unwrap_or(severity_raw),
+            severity: LedgerSeverity::parse(&severity_raw).unwrap_or(LedgerSeverity::Info),
             project_hash: row.get(5)?,
             agent_name: row.get(6)?,
             guard_name: row.get(7)?,

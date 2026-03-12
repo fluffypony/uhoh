@@ -682,7 +682,7 @@ async fn main() -> Result<()> {
             let mut filtered = Vec::new();
             for entry in events {
                 if let Some(ref src) = normalized_source {
-                    if !source_matches(src, &entry.source) {
+                    if !source_matches(src, entry.source) {
                         continue;
                     }
                 }
@@ -874,9 +874,9 @@ fn normalize_timeline_source(source: &str) -> Result<String> {
     Ok(normalized.to_string())
 }
 
-fn source_matches(requested: &str, event_source: &str) -> bool {
+fn source_matches(requested: &str, event_source: uhoh::db::LedgerSource) -> bool {
     match requested {
-        "db_guard" => event_source == "db_guard" || event_source == "db",
+        "db_guard" => event_source == "db_guard",
         "fs" => event_source == "fs",
         "agent" => event_source == "agent",
         _ => event_source == requested,

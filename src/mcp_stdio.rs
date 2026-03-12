@@ -14,19 +14,14 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
     let runtime_handle = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let runtime = crate::mcp_tools::McpRuntime {
-        tools: crate::mcp_tools::McpToolContext {
-            database: database_handle.clone(),
-            uhoh_dir: uhoh_dir.clone(),
-            config: config.clone(),
-            event_tx: None,
-            restore_runtime: crate::restore_runtime::RestoreRuntime::new(
-                database_handle,
-                uhoh_dir.clone(),
-            ),
-        },
-        executor: crate::mcp_tools::McpToolExecutor::Inline,
-    };
+    let application = crate::mcp_app::build_application(
+        database_handle,
+        uhoh_dir.clone(),
+        config.clone(),
+        None,
+        None,
+        crate::mcp_app::McpExecutor::Inline,
+    );
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
 
@@ -50,12 +45,12 @@ pub fn run_stdio_mcp(config: &Config) -> Result<()> {
             }
         };
 
-        match runtime_handle.block_on(crate::mcp_tools::handle_json_rpc_request(
-            runtime.clone(),
+        match runtime_handle.block_on(crate::mcp_app::handle_json_rpc_request(
+            application.clone(),
             request,
         )) {
-            crate::mcp_tools::McpTransportResponse::Notification => continue,
-            crate::mcp_tools::McpTransportResponse::Response(response) => {
+            crate::mcp_app::McpTransportResponse::Notification => continue,
+            crate::mcp_app::McpTransportResponse::Response(response) => {
                 writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
                 stdout.flush()?;
             }

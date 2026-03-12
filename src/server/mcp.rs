@@ -53,11 +53,9 @@ pub async fn handle_mcp(
             .into_response();
     }
 
-    match crate::mcp_tools::handle_json_rpc_request(state.runtime.clone(), request).await {
-        crate::mcp_tools::McpTransportResponse::Notification => {
-            StatusCode::ACCEPTED.into_response()
-        }
-        crate::mcp_tools::McpTransportResponse::Response(response) => {
+    match crate::mcp_app::handle_json_rpc_request(state.application.clone(), request).await {
+        crate::mcp_app::McpTransportResponse::Notification => StatusCode::ACCEPTED.into_response(),
+        crate::mcp_app::McpTransportResponse::Response(response) => {
             (StatusCode::OK, Json(response)).into_response()
         }
     }

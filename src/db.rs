@@ -100,9 +100,9 @@ pub struct CreateSnapshotRow<'a> {
 pub struct EventLedgerEntry {
     pub id: i64,
     pub ts: String,
-    pub source: String,
+    pub source: LedgerSource,
     pub event_type: String,
-    pub severity: String,
+    pub severity: LedgerSeverity,
     pub project_hash: Option<String>,
     pub agent_name: Option<String>,
     pub guard_name: Option<String>,
@@ -164,6 +164,18 @@ impl From<String> for LedgerSeverity {
     }
 }
 
+impl std::fmt::Display for LedgerSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<&str> for LedgerSeverity {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str().eq_ignore_ascii_case(other)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LedgerSource {
@@ -214,6 +226,18 @@ impl From<&str> for LedgerSource {
 impl From<String> for LedgerSource {
     fn from(value: String) -> Self {
         Self::from(value.as_str())
+    }
+}
+
+impl std::fmt::Display for LedgerSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<&str> for LedgerSource {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str().eq_ignore_ascii_case(other)
     }
 }
 
@@ -497,6 +521,19 @@ impl Database {
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         // All DDL uses CREATE TABLE/INDEX IF NOT EXISTS, safe to run every startup
         conn.execute_batch(include_str!("db/schema.sql"))?;
+        self.normalize_legacy_ledger_labels(&conn)?;
+        Ok(())
+    }
+
+    fn normalize_legacy_ledger_labels(&self, conn: &DbConn) -> Result<()> {
+        conn.execute(
+            "UPDATE event_ledger SET source = 'db_guard' WHERE source = 'db'",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE event_ledger SET severity = 'warn' WHERE severity = 'warning'",
+            [],
+        )?;
         Ok(())
     }
 

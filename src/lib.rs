@@ -14,6 +14,7 @@ pub mod gc;
 pub mod git;
 pub mod ignore_rules;
 pub mod marker;
+pub mod mcp_app;
 pub mod mcp_protocol;
 pub mod mcp_stdio;
 pub mod mcp_tools;

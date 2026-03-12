@@ -1,5 +1,4 @@
 use tempfile::TempDir;
-use uhoh::db::LedgerSource;
 
 #[cfg(unix)]
 #[test]
@@ -750,13 +749,62 @@ fn test_restore_sets_and_clears_restore_marker_file() {
 #[test]
 fn test_ledger_verify_tolerates_unknown_source_severity_strings() {
     let tmp = TempDir::new().unwrap();
-    let db = uhoh::db::Database::open(&tmp.path().join("test.db")).unwrap();
+    let db_path = tmp.path().join("test.db");
+    let db = uhoh::db::Database::open(&db_path).unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
 
-    let mut event = uhoh::event_ledger::new_event(LedgerSource::Agent, "manual_injected", "info");
-    event.detail = Some("seed".to_string());
-    event.source = "legacy_source".into();
-    event.severity = "legacy_severity".into();
-    let id = db.insert_event_ledger(&event).unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    let detail = Some("seed".to_string());
+    conn.execute(
+        "INSERT INTO event_ledger (
+            ts, source, event_type, severity, project_hash, agent_name, guard_name,
+            path, detail, pre_state_ref, post_state_ref, prev_hash, causal_parent, resolved
+        ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, ?5, NULL, NULL, '', NULL, 0)",
+        rusqlite::params![
+            ts,
+            "legacy_source",
+            "manual_injected",
+            "legacy_severity",
+            detail
+        ],
+    )
+    .unwrap();
+    let id = conn.last_insert_rowid();
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"");
+    hasher.update(&[0u8]);
+    hasher.update(id.to_string().as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(ts.as_bytes());
+    hasher.update(&[0u8]);
+    hasher.update(b"legacy_source");
+    hasher.update(&[0u8]);
+    hasher.update(b"manual_injected");
+    hasher.update(&[0u8]);
+    hasher.update(b"legacy_severity");
+    hasher.update(&[0u8]);
+    hasher.update(b"");
+    hasher.update(&[0u8]);
+    hasher.update(b"");
+    hasher.update(&[0u8]);
+    hasher.update(b"");
+    hasher.update(&[0u8]);
+    hasher.update(b"");
+    hasher.update(&[0u8]);
+    hasher.update(b"seed");
+    hasher.update(&[0u8]);
+    hasher.update(b"");
+    hasher.update(&[0u8]);
+    hasher.update(b"");
+    hasher.update(&[0u8]);
+    hasher.update(b"");
+    let chain_hash = hasher.finalize().to_hex().to_string();
+    conn.execute(
+        "UPDATE event_ledger SET prev_hash = ?1 WHERE id = ?2",
+        rusqlite::params![chain_hash, id],
+    )
+    .unwrap();
 
     let (count, broken) = db.verify_event_ledger_chain().unwrap();
     assert_eq!(count, 1);

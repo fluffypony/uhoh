@@ -54,7 +54,7 @@ pub struct HealthState {
 #[derive(Clone)]
 pub struct McpState {
     pub port: u16,
-    pub runtime: crate::mcp_tools::McpRuntime,
+    pub application: crate::mcp_app::McpApplication,
 }
 
 #[derive(Clone)]
@@ -93,21 +93,14 @@ impl FromRef<AppState> for McpState {
     fn from_ref(input: &AppState) -> Self {
         Self {
             port: input.config.server.port,
-            runtime: crate::mcp_tools::McpRuntime {
-                tools: crate::mcp_tools::McpToolContext {
-                    database: input.database.clone(),
-                    uhoh_dir: input.uhoh_dir.clone(),
-                    config: input.config.clone(),
-                    event_tx: Some(input.event_tx.clone()),
-                    restore_runtime: crate::restore_runtime::RestoreRuntime::new(
-                        input.database.clone(),
-                        input.uhoh_dir.clone(),
-                    )
-                    .with_event_tx(input.event_tx.clone())
-                    .with_coordinator(input.restore_coordinator.clone()),
-                },
-                executor: crate::mcp_tools::McpToolExecutor::SpawnBlocking,
-            },
+            application: crate::mcp_app::build_application(
+                input.database.clone(),
+                input.uhoh_dir.clone(),
+                input.config.clone(),
+                Some(input.event_tx.clone()),
+                Some(input.restore_coordinator.clone()),
+                crate::mcp_app::McpExecutor::SpawnBlocking,
+            ),
         }
     }
 }

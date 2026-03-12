@@ -6,9 +6,7 @@ use serde_json::{json, Value};
 use crate::config::Config;
 use crate::db::Database;
 use crate::event_ledger::{new_event, EventLedger};
-use crate::mcp_protocol::{
-    dispatch_protocol_request, JsonRpcRequest, JsonRpcResponse, ProtocolAction,
-};
+use crate::mcp_protocol::JsonRpcResponse;
 use crate::resolve;
 use crate::server::events::ServerEvent;
 use tokio::sync::broadcast;
@@ -63,28 +61,10 @@ pub struct McpToolContext {
     pub restore_runtime: crate::restore_runtime::RestoreRuntime,
 }
 
-#[derive(Clone, Copy)]
-pub enum McpToolExecutor {
-    Inline,
-    SpawnBlocking,
-}
-
-#[derive(Clone)]
-pub struct McpRuntime {
-    pub tools: McpToolContext,
-    pub executor: McpToolExecutor,
-}
-
-pub enum McpTransportResponse {
-    Notification,
-    Response(JsonRpcResponse),
-}
-
 /// Shared MCP tool definitions used by both HTTP and STDIO transports.
 ///
-/// Tool behavior and JSON-RPC response shaping are centralized in this module.
-/// Transport adapters in `server/mcp.rs` and `mcp_stdio.rs` should only differ in
-/// I/O concerns and async/sync execution boundaries.
+/// Tool behavior is centralized here, while `mcp_app` owns JSON-RPC protocol
+/// dispatch and execution so the transport adapters stay thin.
 pub fn tool_definitions() -> serde_json::Value {
     json!({
         "tools": [
@@ -199,44 +179,6 @@ pub fn tools_call_response(
     match dispatch_tool_call(context, &tool_name, args) {
         Ok(value) => JsonRpcResponse::success(id, value),
         Err(err) => JsonRpcResponse::error_with_data(id, err.code, err.message, err.data),
-    }
-}
-
-pub async fn handle_json_rpc_request(
-    runtime: McpRuntime,
-    request: JsonRpcRequest,
-) -> McpTransportResponse {
-    match dispatch_protocol_request(request) {
-        ProtocolAction::Notification => McpTransportResponse::Notification,
-        ProtocolAction::Response(response) => McpTransportResponse::Response(response),
-        ProtocolAction::ToolsList { id } => McpTransportResponse::Response(tools_list_response(id)),
-        ProtocolAction::ToolsCall { id, params } => {
-            let response = handle_tools_call(runtime, id, params).await;
-            McpTransportResponse::Response(response)
-        }
-    }
-}
-
-async fn handle_tools_call(
-    runtime: McpRuntime,
-    id: Option<Value>,
-    params: Option<Value>,
-) -> JsonRpcResponse {
-    match runtime.executor {
-        McpToolExecutor::Inline => tools_call_response(&runtime.tools, id, params),
-        McpToolExecutor::SpawnBlocking => {
-            let request_id = id.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                tools_call_response(&runtime.tools, id, params)
-            })
-            .await;
-            match result {
-                Ok(response) => response,
-                Err(err) => {
-                    JsonRpcResponse::error(request_id, -32000, format!("Internal error: {err}"))
-                }
-            }
-        }
     }
 }
 
