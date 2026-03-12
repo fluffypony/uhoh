@@ -36,12 +36,21 @@ pub struct AgentSubsystem {
     proxy_next_retry: Option<std::time::Instant>,
     background_failures: std::sync::Arc<std::sync::atomic::AtomicU64>,
     intercept_task: Option<tokio::task::JoinHandle<Result<()>>>,
-    fanotify_task: Option<tokio::task::JoinHandle<()>>,
+    fanotify_task: Option<tokio::task::JoinHandle<Result<()>>>,
     proxy_task: Option<tokio::task::JoinHandle<Result<()>>>,
     proxy_shutdown: Option<CancellationToken>,
     #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+    fanotify_failures: u32,
+    #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+    fanotify_next_retry: Option<std::time::Instant>,
+    #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+    fanotify_disabled_reason: Option<String>,
+    #[cfg(all(target_os = "linux", feature = "audit-trail"))]
     fanotify_roots: Vec<std::path::PathBuf>,
 }
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+const FANOTIFY_MAX_FAILURES: u32 = 5;
 
 impl AgentSubsystem {
     pub fn new() -> Self {
@@ -59,6 +68,12 @@ impl AgentSubsystem {
             fanotify_task: None,
             proxy_task: None,
             proxy_shutdown: None,
+            #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+            fanotify_failures: 0,
+            #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+            fanotify_next_retry: None,
+            #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+            fanotify_disabled_reason: None,
             #[cfg(all(target_os = "linux", feature = "audit-trail"))]
             fanotify_roots: Vec::new(),
         }
@@ -113,7 +128,7 @@ impl Subsystem for AgentSubsystem {
                     }
                     last_agent_names = agents.iter().map(|a| a.name.clone()).collect();
 
-                    self.poll_background_tasks().await;
+                    self.poll_background_tasks(&ctx).await;
                     if self
                         .background_failures
                         .load(std::sync::atomic::Ordering::Relaxed)
@@ -152,6 +167,13 @@ impl Subsystem for AgentSubsystem {
     fn health_check(&self) -> SubsystemHealth {
         if let Some(message) = &self.fatal_error {
             return SubsystemHealth::Failed(message.clone());
+        }
+        #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+        if let Some(message) = &self.fanotify_disabled_reason {
+            return SubsystemHealth::DegradedWithAudit {
+                message: message.clone(),
+                source: AuditSource::None,
+            };
         }
         if self.healthy {
             if self.fanotify_started {
@@ -204,7 +226,53 @@ impl AgentSubsystem {
         }
     }
 
-    async fn poll_background_tasks(&mut self) {
+    #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+    fn handle_fanotify_failure(&mut self, ctx: &AgentContext, message: String) {
+        let mut event = new_event("agent", "fanotify_monitor_degraded", "warn");
+        event.detail = Some(message.clone());
+        if let Err(err) = ctx.event_ledger.append(event) {
+            tracing::error!("failed to append fanotify_monitor_degraded event: {err}");
+        }
+
+        self.healthy = false;
+        self.fanotify_started = false;
+
+        let permanent = message.contains("requires CAP_SYS_ADMIN")
+            || message.contains("kernel >= 5.1")
+            || message.contains("unsupported")
+            || message.contains("requires Linux + audit-trail feature");
+        if permanent {
+            self.fanotify_failures = FANOTIFY_MAX_FAILURES;
+            self.fanotify_next_retry = None;
+            self.fanotify_disabled_reason = Some(message.clone());
+            tracing::warn!("fanotify monitor disabled: {message}");
+            return;
+        }
+
+        self.fanotify_failures = self.fanotify_failures.saturating_add(1);
+        if self.fanotify_failures >= FANOTIFY_MAX_FAILURES {
+            self.fanotify_next_retry = None;
+            self.fanotify_disabled_reason = Some(message.clone());
+            tracing::warn!(
+                "fanotify monitor disabled after {} failures: {}",
+                self.fanotify_failures,
+                message
+            );
+            return;
+        }
+
+        let backoff_secs = (2u64).pow(self.fanotify_failures.min(6));
+        self.fanotify_next_retry =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(backoff_secs));
+        self.fanotify_disabled_reason = None;
+        tracing::warn!(
+            "fanotify monitor failed; retrying in {}s: {}",
+            backoff_secs,
+            message
+        );
+    }
+
+    async fn poll_background_tasks(&mut self, _ctx: &AgentContext) {
         let intercept_finished = self
             .intercept_task
             .as_ref()
@@ -242,10 +310,13 @@ impl AgentSubsystem {
             .map(|task| task.is_finished())
             .unwrap_or(false)
         {
-            if let Some(task) = self.fanotify_task.take() {
-                if let Err(err) = task.await {
-                    self.record_background_failure(format!("fanotify task panicked: {err}"));
-                }
+            if let Some(message) =
+                Self::poll_result_task(&mut self.fanotify_task, "fanotify monitor").await
+            {
+                #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+                self.handle_fanotify_failure(_ctx, message);
+                #[cfg(not(all(target_os = "linux", feature = "audit-trail")))]
+                self.record_background_failure(message);
             }
             self.fanotify_started = false;
         }
@@ -300,6 +371,9 @@ impl AgentSubsystem {
                     task.abort();
                 }
                 self.fanotify_started = false;
+                self.fanotify_failures = 0;
+                self.fanotify_next_retry = None;
+                self.fanotify_disabled_reason = None;
                 self.fanotify_roots.clear();
             } else {
                 let roots_changed = self.fanotify_roots != normalized;
@@ -312,18 +386,20 @@ impl AgentSubsystem {
                 }
 
                 if !self.fanotify_started {
+                    if self.fanotify_disabled_reason.is_some() {
+                        return Ok(());
+                    }
+                    if let Some(retry_at) = self.fanotify_next_retry {
+                        if std::time::Instant::now() < retry_at {
+                            return Ok(());
+                        }
+                    }
                     self.fanotify_started = true;
                     let ctx_cl = ctx.clone();
                     let agents_cl = agents.to_vec();
                     let roots_cl = self.fanotify_roots.clone();
-                    let failures = self.background_failures.clone();
                     self.fanotify_task = Some(tokio::task::spawn_blocking(move || {
-                        if let Err(err) = fanotify::run_permission_monitor_with_roots(
-                            &ctx_cl, &agents_cl, &roots_cl,
-                        ) {
-                            failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            tracing::debug!("fanotify monitor unavailable: {err}");
-                        }
+                        fanotify::run_permission_monitor_with_roots(&ctx_cl, &agents_cl, &roots_cl)
                     }));
                 }
             }

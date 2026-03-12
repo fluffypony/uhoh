@@ -323,7 +323,7 @@ fn test_compaction_preserves_pinned() {
     }
 
     let cfg = uhoh::config::CompactionConfig::default();
-    let _ = uhoh::compaction::compact_project(&database, "proj", &cfg).unwrap();
+    let _ = uhoh::storage::compaction::compact_project(&database, "proj", &cfg).unwrap();
 
     let snaps = database.list_snapshots("proj").unwrap();
     let pinned_rowid = pin_rowid.unwrap();
@@ -486,7 +486,7 @@ fn test_emergency_snapshot_retained_within_window() {
         .unwrap();
 
     let cfg = uhoh::config::CompactionConfig::default();
-    let _ = uhoh::compaction::compact_project(&db, "emrg3", &cfg).unwrap();
+    let _ = uhoh::storage::compaction::compact_project(&db, "emrg3", &cfg).unwrap();
 
     let snaps = db.list_snapshots("emrg3").unwrap();
     assert!(
@@ -543,7 +543,7 @@ fn test_emergency_snapshot_pruned_after_window() {
         keep_daily_days: 0,
         keep_weekly_beyond: false,
     };
-    let _ = uhoh::compaction::compact_project(&db, "emrg4", &cfg).unwrap();
+    let _ = uhoh::storage::compaction::compact_project(&db, "emrg4", &cfg).unwrap();
 
     let snaps = db.list_snapshots("emrg4").unwrap();
     assert!(
@@ -601,7 +601,7 @@ fn test_predecessor_protection_in_compaction() {
         keep_daily_days: 0,
         keep_weekly_beyond: false,
     };
-    let _ = uhoh::compaction::compact_project(&db, "emrg5", &cfg).unwrap();
+    let _ = uhoh::storage::compaction::compact_project(&db, "emrg5", &cfg).unwrap();
 
     let snaps = db.list_snapshots("emrg5").unwrap();
     assert!(

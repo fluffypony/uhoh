@@ -70,7 +70,9 @@ impl DaemonMaintenanceSubsystem {
                     let mut freed = 0u64;
                     if let Some(d) = db {
                         let project = &projects[idx % projects.len()];
-                        if let Ok(f) = crate::compaction::compact_project(&d, &project.hash, &cfg) {
+                        if let Ok(f) =
+                            crate::storage::compaction::compact_project(&d, &project.hash, &cfg)
+                        {
                             freed = freed.saturating_add(f);
                         }
                     }
