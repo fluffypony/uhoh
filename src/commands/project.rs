@@ -20,7 +20,26 @@ use super::shared::{
 pub fn add(uhoh: &Path, database: &db::Database, path: Option<String>) -> Result<()> {
     maybe_start_daemon(uhoh)?;
     let project_path = resolve_project_path(path)?;
+    register_project(uhoh, database, project_path)
+}
 
+pub fn zero_verb(uhoh: &Path, database: &db::Database) -> Result<()> {
+    let cwd = dunce::canonicalize(std::env::current_dir()?)?;
+
+    if let Some(project) = database.find_project_by_path(&cwd)? {
+        print_zero_verb_status(database, &project.hash)?;
+        return Ok(());
+    }
+
+    maybe_start_daemon(uhoh)?;
+    register_project(uhoh, database, cwd)
+}
+
+fn register_project(
+    uhoh: &Path,
+    database: &db::Database,
+    project_path: std::path::PathBuf,
+) -> Result<()> {
     if uhoh.starts_with(&project_path) {
         anyhow::bail!(
             "Refusing to watch parent directory '{}' because it contains {}",
@@ -56,6 +75,17 @@ pub fn add(uhoh: &Path, database: &db::Database, path: Option<String>) -> Result
     database.add_project(&project_hash, &canonical.to_string_lossy())?;
     println!("Registered: {}", canonical.display());
 
+    create_initial_snapshot(uhoh, database, &project_hash, &canonical)?;
+    println!("Initial snapshot created.");
+    Ok(())
+}
+
+fn create_initial_snapshot(
+    uhoh: &Path,
+    database: &db::Database,
+    project_hash: &str,
+    project_path: &Path,
+) -> Result<()> {
     let cfg = config::Config::load(&uhoh.join("config.toml"))?;
     let snapshot_runtime = snapshot::SnapshotRuntime::from_config(&cfg);
     snapshot::create_snapshot(
@@ -63,14 +93,32 @@ pub fn add(uhoh: &Path, database: &db::Database, path: Option<String>) -> Result
         database,
         &snapshot_runtime,
         snapshot::CreateSnapshotRequest {
-            project_hash: &project_hash,
-            project_path: &canonical,
+            project_hash,
+            project_path,
             trigger: "manual",
             message: Some("Initial snapshot"),
             changed_paths: None,
         },
     )?;
-    println!("Initial snapshot created.");
+    Ok(())
+}
+
+fn print_zero_verb_status(database: &db::Database, project_hash: &str) -> Result<()> {
+    let snaps = database.list_snapshots(project_hash)?;
+    println!("uhoh is active in this directory.");
+    if let Some(latest) = snaps.first() {
+        println!(
+            "Latest snapshot: {} ({})",
+            cas::id_to_base58(latest.snapshot_id),
+            latest.timestamp
+        );
+        println!("Total snapshots: {}", snaps.len());
+    } else {
+        println!("No snapshots yet.");
+    }
+    println!("\nTo undo the last AI operation: uhoh undo");
+    println!("To restore a snapshot:         uhoh restore <id>");
+    println!("To see recent changes:         uhoh log");
     Ok(())
 }
 
