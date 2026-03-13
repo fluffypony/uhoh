@@ -87,7 +87,7 @@ impl SidecarManager {
         self.lock_state().is_some()
     }
 
-    pub fn get_or_spawn_port_with_ctx(
+    pub fn start_or_restart_port_with_ctx(
         &self,
         model_path: &Path,
         uhoh_dir: &Path,

@@ -1,10 +1,36 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::path::Path;
+
+use crate::config::AiConfig;
+
+const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024;
+const MAX_DIFF_FILES: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct FileChangeSummary {
     pub added: Vec<String>,
     pub deleted: Vec<String>,
     pub modified: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SummaryBlobRef<'a> {
+    pub hash: &'a str,
+    pub stored: bool,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SummaryDiffEntry<'a> {
+    pub path: &'a str,
+    pub previous: Option<SummaryBlobRef<'a>>,
+    pub current: Option<SummaryBlobRef<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedSummaryInput {
+    pub files: FileChangeSummary,
+    pub diff_text: String,
 }
 
 pub fn append_diff_chunk(
@@ -42,32 +68,173 @@ pub fn append_diff_chunk(
     *truncated = true;
 }
 
-/// Blocking generator that spawns the sidecar if needed and queries it for a short summary.
+pub fn prepare_summary_inputs(
+    blob_root: &Path,
+    ai_config: &AiConfig,
+    changes: &[SummaryDiffEntry<'_>],
+) -> PreparedSummaryInput {
+    let mut files = FileChangeSummary {
+        added: Vec::new(),
+        deleted: Vec::new(),
+        modified: Vec::new(),
+    };
+    let max_diff_chars = ai_config.max_context_tokens.saturating_mul(4);
+    let mut diff_text = String::new();
+    let mut diff_chars = 0usize;
+    let mut diff_truncated = false;
+    let mut diff_files = 0usize;
+
+    for change in changes {
+        match (change.previous, change.current) {
+            (None, Some(_)) => files.added.push(change.path.to_string()),
+            (Some(_), None) => files.deleted.push(change.path.to_string()),
+            (Some(previous), Some(current)) if previous.hash != current.hash => {
+                files.modified.push(change.path.to_string());
+                if diff_truncated || diff_files >= MAX_DIFF_FILES {
+                    continue;
+                }
+                diff_files += 1;
+                append_change_diff(
+                    blob_root,
+                    change.path,
+                    previous,
+                    current,
+                    max_diff_chars,
+                    &mut diff_text,
+                    &mut diff_chars,
+                    &mut diff_truncated,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    PreparedSummaryInput { files, diff_text }
+}
+
+fn append_change_diff(
+    blob_root: &Path,
+    path: &str,
+    previous: SummaryBlobRef<'_>,
+    current: SummaryBlobRef<'_>,
+    max_diff_chars: usize,
+    diff_text: &mut String,
+    diff_chars: &mut usize,
+    diff_truncated: &mut bool,
+) {
+    if !previous.stored || !current.stored || previous.hash.is_empty() || current.hash.is_empty() {
+        return;
+    }
+
+    if previous.size > MAX_AI_DIFF_FILE_SIZE || current.size > MAX_AI_DIFF_FILE_SIZE {
+        append_diff_chunk(
+            diff_text,
+            diff_chars,
+            max_diff_chars,
+            diff_truncated,
+            &format!("--- {path}\n[File too large for AI diff]\n"),
+        );
+        return;
+    }
+
+    let old = crate::cas::read_blob(blob_root, previous.hash)
+        .ok()
+        .flatten();
+    let new = crate::cas::read_blob(blob_root, current.hash)
+        .ok()
+        .flatten();
+    let (Some(old), Some(new)) = (old, new) else {
+        return;
+    };
+
+    let head_old = &old[..old.len().min(8192)];
+    let head_new = &new[..new.len().min(8192)];
+    if content_inspector::inspect(head_old).is_binary()
+        || content_inspector::inspect(head_new).is_binary()
+    {
+        append_diff_chunk(
+            diff_text,
+            diff_chars,
+            max_diff_chars,
+            diff_truncated,
+            &format!("--- {path}\n[Binary file]\n"),
+        );
+        return;
+    }
+
+    let (Ok(old_s), Ok(new_s)) = (String::from_utf8(old), String::from_utf8(new)) else {
+        return;
+    };
+
+    let diff = similar::TextDiff::from_lines(&old_s, &new_s);
+    append_diff_chunk(
+        diff_text,
+        diff_chars,
+        max_diff_chars,
+        diff_truncated,
+        &format!("--- a/{path}\n+++ b/{path}\n"),
+    );
+
+    for hunk in diff.unified_diff().context_radius(2).iter_hunks() {
+        if *diff_chars >= max_diff_chars {
+            append_diff_truncation_marker(diff_text, diff_truncated);
+            break;
+        }
+
+        append_diff_chunk(
+            diff_text,
+            diff_chars,
+            max_diff_chars,
+            diff_truncated,
+            &format!("{}\n", hunk.header()),
+        );
+
+        for change in hunk.iter_changes() {
+            if *diff_chars >= max_diff_chars {
+                append_diff_truncation_marker(diff_text, diff_truncated);
+                break;
+            }
+
+            let sign = match change.tag() {
+                similar::ChangeTag::Delete => '-',
+                similar::ChangeTag::Insert => '+',
+                similar::ChangeTag::Equal => ' ',
+            };
+            append_diff_chunk(
+                diff_text,
+                diff_chars,
+                max_diff_chars,
+                diff_truncated,
+                &format!("{}{}", sign, change),
+            );
+        }
+
+        if *diff_truncated {
+            break;
+        }
+    }
+}
+
+fn append_diff_truncation_marker(diff_text: &mut String, diff_truncated: &mut bool) {
+    if !*diff_truncated {
+        diff_text.push_str("\n[Diff truncated]\n");
+        *diff_truncated = true;
+    }
+}
+
+/// Blocking generator that starts or restarts the sidecar if needed and queries it for a short
+/// summary. `Ok(None)` means summary generation was intentionally skipped.
 pub fn generate_summary_blocking(
     uhoh_dir: &std::path::Path,
-    ai_config: &crate::config::AiConfig,
+    ai_config: &AiConfig,
     sidecar_manager: &crate::ai::sidecar::SidecarManager,
     diff_text: &str,
     files: &FileChangeSummary,
-) -> Result<String> {
-    // Cap to model/server safe upper bound to prevent runaway contexts
-    let capped_tokens = ai_config.max_context_tokens;
-    // Truncate diff to configured max context (rough 4 chars/token) with UTF-8 boundary safety
-    let max_chars = capped_tokens.saturating_mul(4);
-    let truncated = if diff_text.len() > max_chars {
-        let mut cut = max_chars;
-        while cut > 0 && !diff_text.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        &diff_text[..cut]
-    } else {
-        diff_text
-    };
-
+) -> Result<Option<String>> {
     // Choose a model tier using centralized selector
     let Some(model) = crate::ai::models::select_model(ai_config) else {
         tracing::warn!("No suitable AI model tier for available RAM; skipping summary generation");
-        return Ok(String::new());
+        return Ok(None);
     };
 
     // On Apple Silicon with MLX, skip GGUF download — MLX fetches its own model from HuggingFace.
@@ -78,28 +245,26 @@ pub fn generate_summary_blocking(
         // MLX doesn't use the local GGUF; provide the filename for sidecar mapping
         uhoh_dir.join("models").join(&model.filename)
     } else {
-        match crate::ai::models::ensure_model_downloaded(uhoh_dir, &model) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("Cannot download model {}: {}", model.name, e);
-                return Ok(String::new());
-            }
-        }
+        crate::ai::models::ensure_model_downloaded(uhoh_dir, &model)
+            .with_context(|| format!("Cannot download model {}", model.name))?
     };
 
     // Spawn or reuse sidecar
     // Pass through context size cap so sidecar uses a consistent ctx-size
-    let port = sidecar_manager.get_or_spawn_port_with_ctx(
+    let port = sidecar_manager.start_or_restart_port_with_ctx(
         &model_path,
         uhoh_dir,
         ai_config.idle_shutdown_secs,
-        capped_tokens as u64,
+        ai_config.max_context_tokens as u64,
     )?;
 
     // Build prompt
     let prompt = format!(
         "You are analyzing a code snapshot diff. Describe what changed in 1-2 sentences.\n\nFiles added: {}\nFiles deleted: {}\nFiles modified: {}\n\nDiff (possibly truncated):\n{}",
-        files.added.join(", "), files.deleted.join(", "), files.modified.join(", "), truncated
+        files.added.join(", "),
+        files.deleted.join(", "),
+        files.modified.join(", "),
+        diff_text
     );
 
     let resp: serde_json::Value =
@@ -122,12 +287,58 @@ pub fn generate_summary_blocking(
         .join()
         .map_err(|_| anyhow::anyhow!("HTTP join error"))??;
 
-    Ok(resp["choices"][0]["message"]["content"]
+    let summary = resp["choices"][0]["message"]["content"]
         .as_str()
-        .unwrap_or("")
-        .to_string())
+        .context("AI summary response missing text content")?
+        .trim();
+    if summary.is_empty() {
+        anyhow::bail!("AI summary response was empty");
+    }
+
+    Ok(Some(summary.to_string()))
 }
 
 // Removed async generate_summary variant to avoid duplication and drift. The
 // blocking variant is used consistently; async callers should spawn it in a
 // blocking task if needed.
+
+#[cfg(test)]
+mod tests {
+    use super::{prepare_summary_inputs, SummaryBlobRef, SummaryDiffEntry};
+    use crate::cas;
+
+    #[test]
+    fn diff_truncation_marker_appears_once_when_budget_is_exceeded() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blob_root = temp.path().join("blobs");
+        let old = "alpha\n".repeat(64);
+        let new = "beta\n".repeat(64);
+        let (old_hash, _) = cas::store_blob(&blob_root, old.as_bytes()).expect("store old blob");
+        let (new_hash, _) = cas::store_blob(&blob_root, new.as_bytes()).expect("store new blob");
+
+        let mut config = crate::config::Config::default();
+        config.ai.max_context_tokens = 8;
+
+        let prepared = prepare_summary_inputs(
+            &blob_root,
+            &config.ai,
+            &[SummaryDiffEntry {
+                path: "src/lib.rs",
+                previous: Some(SummaryBlobRef {
+                    hash: &old_hash,
+                    stored: true,
+                    size: old.len() as u64,
+                }),
+                current: Some(SummaryBlobRef {
+                    hash: &new_hash,
+                    stored: true,
+                    size: new.len() as u64,
+                }),
+            }],
+        );
+
+        assert!(prepared.diff_text.contains("[Diff truncated]"));
+        assert_eq!(prepared.diff_text.matches("[Diff truncated]").count(), 1);
+        assert_eq!(prepared.files.modified, vec!["src/lib.rs".to_string()]);
+    }
+}

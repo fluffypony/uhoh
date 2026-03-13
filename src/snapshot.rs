@@ -719,9 +719,8 @@ fn run_snapshot_post_commit(
         project_hash,
         prev_files,
         rowid,
-        &scan.new_files,
+        &scan.files_for_manifest,
         &scan.deleted_for_manifest,
-        &scan.current_hashes,
     );
 
     let id_str = cas::id_to_base58(snapshot_id);
@@ -786,9 +785,8 @@ fn schedule_ai_summary(
     project_hash: &str,
     prev_files: &HashMap<String, CachedFileState>,
     rowid: i64,
-    new_files: &[String],
+    current_files: &[crate::db::SnapFileEntry],
     deleted_for_manifest: &[DeletedManifestEntry],
-    current_hashes: &HashMap<String, (String, bool)>,
 ) {
     if !ai::should_run_ai(&runtime.settings().ai) {
         let _ = database.enqueue_ai_summary(rowid, project_hash);
@@ -798,187 +796,68 @@ fn schedule_ai_summary(
     let uhoh_dir_cl = uhoh_dir.to_path_buf();
     let db_handle = database.clone_handle();
     let runtime = runtime.clone();
-    let files_added: Vec<String> = new_files
-        .iter()
-        .filter(|path| !prev_files.contains_key(*path))
-        .cloned()
-        .collect();
-    let files_modified: Vec<String> = new_files
-        .iter()
-        .filter(|path| prev_files.contains_key(*path))
-        .cloned()
-        .collect();
-    let files_deleted: Vec<String> = deleted_for_manifest
-        .iter()
-        .map(|(path, _, _, _, _)| path.clone())
-        .collect();
-    let diff_chunks = build_ai_diff_chunks(
-        uhoh_dir,
-        runtime.settings(),
-        prev_files,
-        current_hashes,
-        &files_modified,
-    );
+    let project_hash = project_hash.to_string();
+    let blob_root = uhoh_dir.join("blobs");
+    let mut changes = Vec::with_capacity(current_files.len() + deleted_for_manifest.len());
+
+    for file in current_files {
+        let previous =
+            prev_files
+                .get(&file.path)
+                .map(|previous| crate::ai::summary::SummaryBlobRef {
+                    hash: &previous.hash,
+                    stored: previous.stored,
+                    size: previous.size,
+                });
+        let current = Some(crate::ai::summary::SummaryBlobRef {
+            hash: &file.hash,
+            stored: file.stored,
+            size: file.size,
+        });
+        if previous.is_none() || previous.is_some_and(|previous| previous.hash != file.hash) {
+            changes.push(crate::ai::summary::SummaryDiffEntry {
+                path: &file.path,
+                previous,
+                current,
+            });
+        }
+    }
+
+    for (path, hash, size, stored, _) in deleted_for_manifest {
+        changes.push(crate::ai::summary::SummaryDiffEntry {
+            path,
+            previous: Some(crate::ai::summary::SummaryBlobRef {
+                hash,
+                stored: *stored,
+                size: *size,
+            }),
+            current: None,
+        });
+    }
+
+    let prepared =
+        crate::ai::summary::prepare_summary_inputs(&blob_root, &runtime.settings().ai, &changes);
 
     std::thread::spawn(move || {
-        let files = crate::ai::summary::FileChangeSummary {
-            added: files_added,
-            deleted: files_deleted,
-            modified: files_modified,
-        };
         match crate::ai::summary::generate_summary_blocking(
             &uhoh_dir_cl,
             &runtime.settings().ai,
             runtime.sidecar_manager(),
-            &diff_chunks,
-            &files,
+            &prepared.diff_text,
+            &prepared.files,
         ) {
-            Ok(text) if !text.is_empty() => {
+            Ok(Some(text)) => {
                 let _ = db_handle.set_ai_summary(rowid, &text);
             }
-            Ok(_) => {}
-            Err(err) => tracing::warn!("AI summary generation failed: {}", err),
+            Ok(None) => {
+                let _ = db_handle.enqueue_ai_summary(rowid, &project_hash);
+            }
+            Err(err) => {
+                tracing::warn!("AI summary generation failed: {}", err);
+                let _ = db_handle.enqueue_ai_summary(rowid, &project_hash);
+            }
         }
     });
-}
-
-fn build_ai_diff_chunks(
-    uhoh_dir: &Path,
-    settings: &SnapshotSettings,
-    prev_files: &HashMap<String, CachedFileState>,
-    current_hashes: &HashMap<String, (String, bool)>,
-    files_modified: &[String],
-) -> String {
-    const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024;
-
-    let blob_root = uhoh_dir.join("blobs");
-    let max_diff_chars = settings.ai.max_context_tokens.saturating_mul(4);
-    let mut diff_chunks = String::new();
-    let mut diff_chars = 0usize;
-    let mut diff_truncated = false;
-
-    for path in files_modified.iter().take(10) {
-        if diff_chars >= max_diff_chars {
-            append_diff_truncation_marker(&mut diff_chunks, &mut diff_truncated);
-            break;
-        }
-
-        let Some(prev) = prev_files.get(path) else {
-            continue;
-        };
-        let Some((curr_hash, curr_stored)) = current_hashes.get(path) else {
-            continue;
-        };
-        if !prev.stored || !curr_stored || prev.hash.is_empty() || curr_hash.is_empty() {
-            continue;
-        }
-
-        if prev.size > MAX_AI_DIFF_FILE_SIZE {
-            let note = format!("--- {path}\n[File too large for AI diff]\n");
-            crate::ai::summary::append_diff_chunk(
-                &mut diff_chunks,
-                &mut diff_chars,
-                max_diff_chars,
-                &mut diff_truncated,
-                &note,
-            );
-            if diff_chars >= max_diff_chars {
-                append_diff_truncation_marker(&mut diff_chunks, &mut diff_truncated);
-                break;
-            }
-            continue;
-        }
-
-        let old = crate::cas::read_blob(&blob_root, &prev.hash).ok().flatten();
-        let new = crate::cas::read_blob(&blob_root, curr_hash).ok().flatten();
-        let (Some(old), Some(new)) = (old, new) else {
-            continue;
-        };
-
-        let head_old = &old[..old.len().min(8192)];
-        let head_new = &new[..new.len().min(8192)];
-        if content_inspector::inspect(head_old).is_binary()
-            || content_inspector::inspect(head_new).is_binary()
-        {
-            let note = format!("--- {path}\n[Binary file]\n");
-            crate::ai::summary::append_diff_chunk(
-                &mut diff_chunks,
-                &mut diff_chars,
-                max_diff_chars,
-                &mut diff_truncated,
-                &note,
-            );
-            if diff_chars >= max_diff_chars {
-                append_diff_truncation_marker(&mut diff_chunks, &mut diff_truncated);
-                break;
-            }
-            continue;
-        }
-
-        let (Ok(old_s), Ok(new_s)) = (String::from_utf8(old), String::from_utf8(new)) else {
-            continue;
-        };
-        let diff = similar::TextDiff::from_lines(&old_s, &new_s);
-        let header = format!("--- a/{path}\n+++ b/{path}\n");
-        crate::ai::summary::append_diff_chunk(
-            &mut diff_chunks,
-            &mut diff_chars,
-            max_diff_chars,
-            &mut diff_truncated,
-            &header,
-        );
-
-        for hunk in diff.unified_diff().context_radius(2).iter_hunks() {
-            if diff_chars >= max_diff_chars {
-                append_diff_truncation_marker(&mut diff_chunks, &mut diff_truncated);
-                break;
-            }
-
-            let hunk_header = format!("{}\n", hunk.header());
-            crate::ai::summary::append_diff_chunk(
-                &mut diff_chunks,
-                &mut diff_chars,
-                max_diff_chars,
-                &mut diff_truncated,
-                &hunk_header,
-            );
-            for change in hunk.iter_changes() {
-                if diff_chars >= max_diff_chars {
-                    append_diff_truncation_marker(&mut diff_chunks, &mut diff_truncated);
-                    break;
-                }
-                let sign = match change.tag() {
-                    similar::ChangeTag::Delete => '-',
-                    similar::ChangeTag::Insert => '+',
-                    similar::ChangeTag::Equal => ' ',
-                };
-                let line = format!("{}{}", sign, change);
-                crate::ai::summary::append_diff_chunk(
-                    &mut diff_chunks,
-                    &mut diff_chars,
-                    max_diff_chars,
-                    &mut diff_truncated,
-                    &line,
-                );
-            }
-            if diff_truncated {
-                break;
-            }
-        }
-
-        if diff_truncated {
-            break;
-        }
-    }
-
-    diff_chunks
-}
-
-fn append_diff_truncation_marker(diff_chunks: &mut String, diff_truncated: &mut bool) {
-    if !*diff_truncated {
-        diff_chunks.push_str("\n[Diff truncated]\n");
-        *diff_truncated = true;
-    }
 }
 
 pub fn mtime_to_millis(t: SystemTime) -> i64 {
@@ -1078,59 +957,6 @@ fn load_previous_snapshot_files(
         }
     }
     Ok(map)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-    use std::time::SystemTime;
-
-    use super::{build_ai_diff_chunks, CachedFileState, SnapshotSettings};
-    use crate::cas::{self, StorageMethod};
-    use crate::config::Config;
-
-    #[test]
-    fn ai_diff_truncation_marker_appears_once_when_budget_is_exceeded() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let old = "alpha\n".repeat(64);
-        let new = "beta\n".repeat(64);
-        let (old_hash, _) =
-            cas::store_blob(&temp.path().join("blobs"), old.as_bytes()).expect("store old blob");
-        let (new_hash, _) =
-            cas::store_blob(&temp.path().join("blobs"), new.as_bytes()).expect("store new blob");
-
-        let mut prev_files = HashMap::new();
-        prev_files.insert(
-            "src/lib.rs".to_string(),
-            CachedFileState {
-                hash: old_hash,
-                size: old.len() as u64,
-                mtime: SystemTime::UNIX_EPOCH,
-                stored: true,
-                executable: false,
-                storage_method: StorageMethod::Copy,
-                is_symlink: false,
-            },
-        );
-
-        let mut current_hashes = HashMap::new();
-        current_hashes.insert("src/lib.rs".to_string(), (new_hash, true));
-
-        let mut config = Config::default();
-        config.ai.max_context_tokens = 8;
-        let settings = SnapshotSettings::from_config(&config);
-
-        let diff = build_ai_diff_chunks(
-            temp.path(),
-            &settings,
-            &prev_files,
-            &current_hashes,
-            &["src/lib.rs".to_string()],
-        );
-
-        assert!(diff.contains("[Diff truncated]"));
-        assert_eq!(diff.matches("[Diff truncated]").count(), 1);
-    }
 }
 
 // Tree hash computation removed to reduce overhead; table preserved for potential future use.
