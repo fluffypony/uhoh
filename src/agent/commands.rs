@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::agent::{profiles, proxy, undo};
 use crate::cli::AgentAction;
 use crate::db::{self, Database};
 
@@ -15,7 +16,7 @@ pub fn handle_cli_action(uhoh_dir: &Path, database: &Database, action: &AgentAct
             if !Path::new(&resolved_profile).exists() {
                 anyhow::bail!("Agent profile not found: {resolved_profile}");
             }
-            let _ = crate::agent::load_agent_profile(Path::new(&resolved_profile))?;
+            let _ = profiles::load_agent_profile(Path::new(&resolved_profile))?;
             database.add_agent(name, &profile_path, None)?;
             println!("Added agent '{name}'");
         }
@@ -99,28 +100,28 @@ pub fn handle_cli_action(uhoh_dir: &Path, database: &Database, action: &AgentAct
                 }
                 let ledger_db = std::sync::Arc::new(database.clone_handle());
                 let ledger = crate::event_ledger::EventLedger::new(ledger_db);
-                crate::agent::resolve_event(database, &ledger, uhoh_dir, *id)?;
+                undo::resolve_event(database, &ledger, uhoh_dir, *id)?;
                 println!("Reverted event #{} and marked it as resolved", id);
             } else {
                 anyhow::bail!("Provide event id or --cascade");
             }
         }
         AgentAction::Approve => {
-            if crate::agent::approve_pending_actions(uhoh_dir, true)? > 0 {
+            if proxy::approve_pending_actions(uhoh_dir, true)? > 0 {
                 println!("Approved pending agent action");
             } else {
                 println!("No pending agent actions found");
             }
         }
         AgentAction::Deny => {
-            if crate::agent::deny_pending_actions(uhoh_dir)? > 0 {
+            if proxy::deny_pending_actions(uhoh_dir)? > 0 {
                 println!("Denied pending agent action(s)");
             } else {
                 println!("No pending agent actions found to deny");
             }
         }
         AgentAction::Resume => {
-            if crate::agent::approve_pending_actions(uhoh_dir, false)? > 0 {
+            if proxy::approve_pending_actions(uhoh_dir, false)? > 0 {
                 println!("Approved pending agent action(s); proxy resumed processing");
                 return Ok(());
             }
@@ -157,13 +158,11 @@ tool_call_format = "jsonl"
 
             let profile_path = Path::new(&agent.profile_path);
             if profile_path.exists() {
-                match crate::agent::load_agent_profile(profile_path) {
+                match profiles::load_agent_profile(profile_path) {
                     Ok(profile) => {
                         println!("  Profile: {} (OK)", profile_path.display());
                         if !profile.session_log_pattern.is_empty() {
-                            match crate::agent::resolve_session_log_path(
-                                &profile.session_log_pattern,
-                            ) {
+                            match profiles::resolve_session_log_path(&profile.session_log_pattern) {
                                 Ok(Some(path)) => {
                                     println!("  Session log: {} (found)", path.display())
                                 }

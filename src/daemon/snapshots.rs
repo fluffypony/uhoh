@@ -13,7 +13,7 @@ use crate::event_ledger::{new_event, EventLedger};
 use crate::events::{publish_event, ServerEvent};
 use crate::snapshot;
 
-use super::WatchEvent;
+use super::watcher::WatchEvent;
 
 #[derive(Debug)]
 enum SnapshotResult {
@@ -64,6 +64,21 @@ type SnapshotTaskResult = (
     bool,
 );
 
+#[derive(Default)]
+struct SnapshotExecutionPlan {
+    auto_requests: Vec<SnapshotSpawnRequest>,
+    emergency_requests: Vec<SnapshotSpawnRequest>,
+}
+
+struct SnapshotExecutionCtx<'a> {
+    uhoh_dir: &'a Path,
+    database: Arc<Database>,
+    states: &'a mut HashMap<String, ProjectDaemonState>,
+    config: &'a Config,
+    event_tx: &'a broadcast::Sender<ServerEvent>,
+    event_ledger: &'a EventLedger,
+}
+
 const MAX_DELETED_PATHS: usize = 100_000;
 const POST_RESTORE_GRACE_SECS: u64 = 10;
 
@@ -83,6 +98,11 @@ pub(super) struct ProjectDaemonState {
     pub(super) restore_completed_at: Option<Instant>,
 }
 
+#[derive(Debug, Default)]
+pub(super) struct MovedFolderRetryState {
+    attempts: HashMap<String, u32>,
+}
+
 pub(super) struct SnapshotProcessCtx<'a> {
     pub(super) uhoh_dir: &'a Path,
     pub(super) database: Arc<Database>,
@@ -92,6 +112,31 @@ pub(super) struct SnapshotProcessCtx<'a> {
     pub(super) event_ledger: &'a EventLedger,
     pub(super) restore_in_progress: &'a AtomicBool,
     pub(super) was_restoring_snapshot: &'a mut bool,
+}
+
+impl MovedFolderRetryState {
+    fn note_missing(&mut self, project_hash: &str) -> u32 {
+        let attempts = self.attempts.entry(project_hash.to_string()).or_insert(0);
+        *attempts = attempts.saturating_add(1);
+        *attempts
+    }
+
+    fn clear(&mut self, project_hash: &str) {
+        self.attempts.remove(project_hash);
+    }
+
+    fn retain_projects(&mut self, projects: &[ProjectEntry]) {
+        let active: HashSet<&str> = projects
+            .iter()
+            .map(|project| project.hash.as_str())
+            .collect();
+        self.attempts
+            .retain(|project_hash, _| active.contains(project_hash.as_str()));
+    }
+
+    fn should_scan(attempts: u32) -> bool {
+        attempts <= 20 || attempts % 20 == 0
+    }
 }
 
 pub(super) fn seed_project_state(
@@ -135,23 +180,20 @@ pub(super) fn should_skip_event_during_restore(
     restoring_hash: Option<&str>,
 ) -> bool {
     let event_path = match event {
-        WatchEvent::FileChanged(path)
-        | WatchEvent::FileDeleted(path)
-        | WatchEvent::Rescan(path) => Some(path),
+        WatchEvent::FileChanged(path) | WatchEvent::FileDeleted(path) => Some(path),
         WatchEvent::Overflow | WatchEvent::WatcherDied => None,
     };
     let (Some(project_hash), Some(path)) = (restoring_hash, event_path) else {
         return true;
     };
-    states
-        .iter()
-        .any(|(project_path, state)| state.hash == project_hash && path.starts_with(project_path))
+    states.iter().any(|(project_path, state)| {
+        state.hash == project_hash && path.starts_with(project_path.as_str())
+    })
 }
 
 pub(super) fn handle_watch_event(
     states: &mut HashMap<String, ProjectDaemonState>,
     event: &WatchEvent,
-    _config: &Config,
     uhoh_dir: &Path,
 ) {
     if let WatchEvent::Overflow = event {
@@ -173,9 +215,7 @@ pub(super) fn handle_watch_event(
     }
 
     let path = match event {
-        WatchEvent::FileChanged(path)
-        | WatchEvent::FileDeleted(path)
-        | WatchEvent::Rescan(path) => path,
+        WatchEvent::FileChanged(path) | WatchEvent::FileDeleted(path) => path,
         WatchEvent::Overflow | WatchEvent::WatcherDied => return,
     };
     let is_delete = matches!(event, WatchEvent::FileDeleted(_));
@@ -274,69 +314,27 @@ pub(super) async fn process_pending_snapshots(ctx: SnapshotProcessCtx<'_>) {
         now,
     );
 
-    let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let concurrency = std::cmp::max(1, (logical / 2).max(1));
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
-    let mut join: tokio::task::JoinSet<SnapshotTaskResult> = tokio::task::JoinSet::new();
-    let mut emergency_spawns = Vec::new();
-
-    for (project_path, state) in states.iter_mut() {
-        if state.pending_changes.is_empty() && state.deleted_paths.is_empty() {
-            continue;
-        }
-
-        if let Some(spawn) = evaluate_emergency_for_project(
-            project_path,
-            state,
-            database.as_ref(),
+    let plan = build_snapshot_execution_plan(
+        states,
+        database.as_ref(),
+        config,
+        event_tx,
+        event_ledger,
+        currently_restoring,
+        now,
+    );
+    execute_snapshot_plan(
+        SnapshotExecutionCtx {
+            uhoh_dir,
+            database,
+            states,
             config,
             event_tx,
             event_ledger,
-            currently_restoring,
-            now,
-        ) {
-            emergency_spawns.push(spawn);
-            continue;
-        }
-
-        if let Some(spawn) = build_auto_snapshot_request(project_path, state, config, now) {
-            spawn_snapshot_task(
-                &mut join,
-                semaphore.clone(),
-                uhoh_dir,
-                database.clone(),
-                config,
-                spawn,
-            )
-            .await;
-        }
-    }
-
-    for spawn in emergency_spawns {
-        spawn_snapshot_task(
-            &mut join,
-            semaphore.clone(),
-            uhoh_dir,
-            database.clone(),
-            config,
-            spawn,
-        )
-        .await;
-    }
-
-    while let Some(result) = join.join_next().await {
-        match result {
-            Ok(task_result) => apply_snapshot_result(
-                states,
-                database.as_ref(),
-                config,
-                event_tx,
-                event_ledger,
-                task_result,
-            ),
-            Err(err) => tracing::error!("Auto-snapshot task join failure: {:?}", err),
-        }
-    }
+        },
+        plan,
+    )
+    .await;
 }
 
 pub(super) fn check_moved_folders(
@@ -344,30 +342,19 @@ pub(super) fn check_moved_folders(
     database: &Database,
     watcher: &mut notify::RecommendedWatcher,
     states: &mut HashMap<String, ProjectDaemonState>,
+    retry_state: &mut MovedFolderRetryState,
 ) {
-    use once_cell::sync::Lazy;
-    use std::sync::Mutex;
-
-    static FAILURES: Lazy<Mutex<HashMap<String, u32>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-
-    let mut failures = match FAILURES.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            tracing::warn!("moved-folder failure tracker mutex poisoned, recovering state");
-            poisoned.into_inner()
-        }
-    };
+    retry_state.retain_projects(projects);
 
     for project in projects {
         let path = Path::new(&project.current_path);
         if path.exists() {
+            retry_state.clear(&project.hash);
             continue;
         }
 
-        let count = failures.entry(project.hash.clone()).or_insert(0);
-        *count = count.saturating_add(1);
-        let max_backoff = 20u32;
-        if *count > 20 && (*count % max_backoff) != 0 {
+        let attempts = retry_state.note_missing(&project.hash);
+        if !MovedFolderRetryState::should_scan(attempts) {
             continue;
         }
 
@@ -401,7 +388,7 @@ pub(super) fn check_moved_folders(
                     );
                 }
                 let _ = database.update_project_path(&project.hash, &new_path.to_string_lossy());
-                failures.remove(&project.hash);
+                retry_state.clear(&project.hash);
                 tracing::info!(
                     "Relocated project {} -> {}",
                     &project.hash[..project.hash.len().min(12)],
@@ -419,6 +406,114 @@ pub(super) fn check_moved_folders(
             );
             states.remove(&project.current_path);
         }
+    }
+}
+
+fn build_snapshot_execution_plan(
+    states: &mut HashMap<String, ProjectDaemonState>,
+    database: &Database,
+    config: &Config,
+    event_tx: &broadcast::Sender<ServerEvent>,
+    event_ledger: &EventLedger,
+    currently_restoring: bool,
+    now: Instant,
+) -> SnapshotExecutionPlan {
+    let mut plan = SnapshotExecutionPlan::default();
+
+    for (project_path, state) in states.iter_mut() {
+        if state.pending_changes.is_empty() && state.deleted_paths.is_empty() {
+            continue;
+        }
+
+        if let Some(request) = evaluate_emergency_for_project(
+            project_path,
+            state,
+            database,
+            config,
+            event_tx,
+            event_ledger,
+            currently_restoring,
+            now,
+        ) {
+            plan.emergency_requests.push(request);
+            continue;
+        }
+
+        if let Some(request) = build_auto_snapshot_request(project_path, state, config, now) {
+            plan.auto_requests.push(request);
+        }
+    }
+
+    plan
+}
+
+async fn execute_snapshot_plan(ctx: SnapshotExecutionCtx<'_>, plan: SnapshotExecutionPlan) {
+    let SnapshotExecutionCtx {
+        uhoh_dir,
+        database,
+        states,
+        config,
+        event_tx,
+        event_ledger,
+    } = ctx;
+
+    let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let concurrency = std::cmp::max(1, (logical / 2).max(1));
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let mut join: tokio::task::JoinSet<SnapshotTaskResult> = tokio::task::JoinSet::new();
+
+    schedule_snapshot_requests(
+        &mut join,
+        semaphore.clone(),
+        uhoh_dir,
+        database.clone(),
+        config,
+        plan.auto_requests,
+    )
+    .await;
+    schedule_snapshot_requests(
+        &mut join,
+        semaphore,
+        uhoh_dir,
+        database.clone(),
+        config,
+        plan.emergency_requests,
+    )
+    .await;
+
+    while let Some(result) = join.join_next().await {
+        match result {
+            Ok(task_result) => apply_snapshot_result(
+                states,
+                database.as_ref(),
+                config,
+                event_tx,
+                event_ledger,
+                task_result,
+            ),
+            Err(err) => tracing::error!("Auto-snapshot task join failure: {:?}", err),
+        }
+    }
+}
+
+async fn schedule_snapshot_requests(
+    join: &mut tokio::task::JoinSet<SnapshotTaskResult>,
+    semaphore: Arc<tokio::sync::Semaphore>,
+    uhoh_dir: &Path,
+    database: Arc<Database>,
+    config: &Config,
+    requests: Vec<SnapshotSpawnRequest>,
+) {
+    for request in requests {
+        spawn_snapshot_task(
+            join,
+            semaphore.clone(),
+            uhoh_dir,
+            database.clone(),
+            config,
+            request,
+        )
+        .await;
     }
 }
 
@@ -1009,4 +1104,40 @@ fn parse_emergency_message_opt(msg: &str) -> Option<(usize, u64, f64)> {
         0.0
     };
     Some((deleted, baseline, ratio))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MovedFolderRetryState;
+
+    #[test]
+    fn moved_folder_retry_state_backs_off_after_initial_burst() {
+        let mut retry_state = MovedFolderRetryState::default();
+        let mut should_scan = Vec::new();
+
+        for _ in 0..40 {
+            let attempts = retry_state.note_missing("project");
+            should_scan.push(MovedFolderRetryState::should_scan(attempts));
+        }
+
+        assert!(should_scan.iter().take(20).all(|value| *value));
+        assert!(!should_scan[20]);
+        assert!(should_scan[39]);
+    }
+
+    #[test]
+    fn moved_folder_retry_state_retain_projects_drops_stale_entries() {
+        let mut retry_state = MovedFolderRetryState::default();
+        retry_state.note_missing("keep");
+        retry_state.note_missing("drop");
+
+        retry_state.retain_projects(&[crate::db::ProjectEntry {
+            hash: "keep".to_string(),
+            current_path: "/tmp/keep".to_string(),
+            created_at: "now".to_string(),
+        }]);
+
+        assert_eq!(retry_state.attempts.len(), 1);
+        assert!(retry_state.attempts.contains_key("keep"));
+    }
 }

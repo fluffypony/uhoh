@@ -152,8 +152,8 @@ async fn main() -> Result<()> {
                 eprintln!("Warning: uhoh daemon is not running. Start it with `uhoh start` for full protection.");
             }
             if cfg.agent.mcp_proxy_enabled {
-                let proxy_token = uhoh::agent::ensure_proxy_token(&uhoh)?;
-                let auth_line = uhoh::agent::proxy_auth_handshake_line(&proxy_token);
+                let proxy_token = uhoh::agent::proxy::ensure_proxy_token(&uhoh)?;
+                let auth_line = uhoh::agent::proxy::auth_handshake_line(&proxy_token);
                 cmd.env(
                     "UHOH_MCP_PROXY_ADDR",
                     format!("127.0.0.1:{}", cfg.agent.mcp_proxy_port),
@@ -168,7 +168,7 @@ async fn main() -> Result<()> {
             }
 
             if cfg.agent.sandbox_enabled {
-                if !uhoh::agent::sandbox_supported() {
+                if !uhoh::agent::sandbox::sandbox_supported() {
                     anyhow::bail!(
                         "Sandbox requested in config but unsupported on this platform/build"
                     );
@@ -185,12 +185,13 @@ async fn main() -> Result<()> {
                                     dirs::home_dir().unwrap_or_default().display()
                                 )
                             });
-                        let profile =
-                            uhoh::agent::load_agent_profile(std::path::Path::new(&profile_path))
-                                .map_err(|e| {
-                                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                                })?;
-                        uhoh::agent::apply_landlock(&profile).map_err(|e| {
+                        let profile = uhoh::agent::profiles::load_agent_profile(
+                            std::path::Path::new(&profile_path),
+                        )
+                        .map_err(|e| {
+                            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                        })?;
+                        uhoh::agent::sandbox::apply_landlock(&profile).map_err(|e| {
                             std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
                         })?;
                         Ok(())

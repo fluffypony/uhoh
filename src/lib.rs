@@ -32,7 +32,6 @@ pub mod subsystem;
 pub mod transport_security;
 pub mod update;
 pub mod util;
-pub mod watcher;
 
 // Single source of truth for ~/.uhoh directory
 pub fn uhoh_dir() -> std::path::PathBuf {

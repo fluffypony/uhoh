@@ -42,90 +42,96 @@ impl Drop for FanotifyFd {
 }
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+struct EventRateLimiter {
+    max_per_sec: u64,
+    window_started_at: std::time::Instant,
+    seen_in_window: u64,
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+impl EventRateLimiter {
+    fn new(max_per_sec: u64) -> Self {
+        Self {
+            max_per_sec,
+            window_started_at: std::time::Instant::now(),
+            seen_in_window: 0,
+        }
+    }
+
+    fn allow_next(&mut self) -> bool {
+        if self.window_started_at.elapsed() >= std::time::Duration::from_secs(1) {
+            self.window_started_at = std::time::Instant::now();
+            self.seen_in_window = 0;
+        }
+        if self.seen_in_window >= self.max_per_sec {
+            return false;
+        }
+        self.seen_in_window = self.seen_in_window.saturating_add(1);
+        true
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+struct PendingAuditBatch {
+    items: VecDeque<PendingAudit>,
+    dropped: u64,
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+impl PendingAuditBatch {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            items: VecDeque::with_capacity(capacity),
+            dropped: 0,
+        }
+    }
+
+    fn push(&mut self, item: PendingAudit) {
+        self.items.push_back(item);
+    }
+
+    fn note_drop(&mut self) {
+        self.dropped = self.dropped.saturating_add(1);
+    }
+
+    fn maybe_flush(&mut self, ledger: &EventLedger) -> Result<()> {
+        if self.items.len() >= 6144 {
+            self.flush(ledger)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self, ledger: &EventLedger) -> Result<()> {
+        flush_batch(ledger, &mut self.items)
+    }
+
+    fn emit_overflow_if_needed(&mut self, ctx: &AgentContext) {
+        if self.dropped == 0 {
+            return;
+        }
+        let mut overflow = new_event("agent", "fanotify_overflow", "warn");
+        overflow.detail = Some(format!("dropped={}", self.dropped));
+        if let Err(err) = ctx.event_ledger.append(overflow) {
+            tracing::error!("failed to append fanotify overflow event: {err}");
+        }
+        self.dropped = 0;
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
 pub fn run_permission_monitor_with_roots(
     ctx: &AgentContext,
     _agents: &[AgentEntry],
     monitor_roots: &[PathBuf],
 ) -> Result<()> {
-    let monitor_roots: Vec<PathBuf> = if monitor_roots.is_empty() {
-        vec![std::env::current_dir()
-            .context("No monitor roots found and unable to resolve current directory")?]
-    } else {
-        monitor_roots.to_vec()
-    };
-    let fan_fd_raw = unsafe {
-        libc::fanotify_init(
-            (libc::FAN_CLASS_CONTENT
-                | libc::FAN_CLOEXEC
-                | libc::FAN_REPORT_FID
-                | libc::FAN_REPORT_DFID_NAME) as u32,
-            libc::O_RDONLY | libc::O_LARGEFILE,
-        )
-    };
-    if fan_fd_raw < 0 {
-        anyhow::bail!("fanotify_init failed (requires CAP_SYS_ADMIN and kernel >= 5.1)");
-    }
-    let fan_fd = FanotifyFd(fan_fd_raw);
+    let monitor_roots = normalize_monitor_roots(monitor_roots)?;
+    let fan_fd = init_fanotify()?;
+    mark_monitor_roots(fan_fd.0, &monitor_roots)?;
+    emit_monitor_started(ctx, &monitor_roots);
 
-    for monitor_root in &monitor_roots {
-        let cpath = CString::new(monitor_root.as_os_str().as_bytes().to_vec())
-            .context("Invalid monitor root path")?;
-        let mark_fd = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC)
-            .open(monitor_root)
-            .with_context(|| format!("Failed opening monitor root: {}", monitor_root.display()))?;
-        let mark_ok = unsafe {
-            libc::fanotify_mark(
-                fan_fd.0,
-                (libc::FAN_MARK_ADD | libc::FAN_MARK_MOUNT | libc::FAN_MARK_FILESYSTEM) as u32,
-                (libc::FAN_OPEN_PERM | libc::FAN_EVENT_ON_CHILD) as u64,
-                mark_fd.as_raw_fd(),
-                cpath.as_ptr(),
-            )
-        };
-        if mark_ok < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EINVAL) {
-                tracing::warn!(
-                    "FAN_MARK_FILESYSTEM unsupported, retrying with FAN_MARK_MOUNT only"
-                );
-                let fallback = unsafe {
-                    libc::fanotify_mark(
-                        fan_fd.0,
-                        (libc::FAN_MARK_ADD | libc::FAN_MARK_MOUNT) as u32,
-                        (libc::FAN_OPEN_PERM | libc::FAN_EVENT_ON_CHILD) as u64,
-                        mark_fd.as_raw_fd(),
-                        cpath.as_ptr(),
-                    )
-                };
-                if fallback < 0 {
-                    anyhow::bail!("fanotify_mark failed for {}", monitor_root.display());
-                }
-            } else {
-                anyhow::bail!("fanotify_mark failed for {}", monitor_root.display());
-            }
-        }
-    }
-
-    let mut event = new_event("agent", "fanotify_monitor_started", "info");
-    event.detail = Some(format!(
-        "roots={}",
-        monitor_roots
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(",")
-    ));
-    if let Err(err) = ctx.event_ledger.append(event) {
-        tracing::error!("failed to append fanotify_monitor_started event: {err}");
-    }
-
-    let mut batch: VecDeque<PendingAudit> = VecDeque::with_capacity(8192);
-    let mut dropped = 0u64;
-    let max_per_sec = ctx.config.agent.audit_max_events_per_second.max(1);
-    let mut sec_window_start = std::time::Instant::now();
-    let mut sec_count = 0u64;
+    let mut batch = PendingAuditBatch::with_capacity(8192);
+    let mut rate_limiter =
+        EventRateLimiter::new(ctx.config.agent.audit_max_events_per_second.max(1));
     let mut buf = vec![0u8; 8192];
     let mut pollfd = libc::pollfd {
         fd: fan_fd.0,
@@ -134,90 +140,23 @@ pub fn run_permission_monitor_with_roots(
     };
 
     loop {
-        let poll_ret = unsafe { libc::poll(&mut pollfd, 1, 1000) };
-        if poll_ret == 0 {
+        if !poll_for_events(&mut pollfd) {
             continue;
         }
-        if poll_ret < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                tracing::error!("fanotify poll error: {err}");
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+        let Some(nread) = read_fanotify_chunk(fan_fd.0, &mut buf, &ctx.event_ledger, &mut batch)?
+        else {
             continue;
-        }
-
-        let nread =
-            unsafe { libc::read(fan_fd.0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-        if nread < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                tracing::error!("fanotify read error: {err}");
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            flush_batch(ctx.event_ledger.clone(), &mut batch)?;
-            continue;
-        }
-        if nread == 0 {
-            flush_batch(ctx.event_ledger.clone(), &mut batch)?;
-            continue;
-        }
-        let mut offset = 0usize;
-        while offset + std::mem::size_of::<libc::fanotify_event_metadata>() <= nread as usize {
-            let metadata =
-                unsafe { &*(buf[offset..].as_ptr() as *const libc::fanotify_event_metadata) };
-            if metadata.vers as usize != libc::FANOTIFY_METADATA_VERSION {
-                break;
-            }
-            if (metadata.mask & libc::FAN_Q_OVERFLOW as u64) != 0 {
-                dropped = dropped.saturating_add(1);
-            }
-            if metadata.fd >= 0 && (metadata.mask & libc::FAN_OPEN_PERM as u64) != 0 {
-                let target_path = fd_path(metadata.fd);
-                if let Some(path) = target_path.as_ref() {
-                    if monitor_roots.iter().any(|root| path_within(root, path)) {
-                        if sec_window_start.elapsed() >= std::time::Duration::from_secs(1) {
-                            sec_window_start = std::time::Instant::now();
-                            sec_count = 0;
-                        }
-                        if sec_count >= max_per_sec {
-                            dropped = dropped.saturating_add(1);
-                        } else if let Err(err) = capture_preimage_from_fd(
-                            &ctx.uhoh_dir,
-                            path,
-                            metadata.fd,
-                            metadata.pid,
-                            &mut batch,
-                        ) {
-                            tracing::warn!("fanotify pre-image capture failed: {}", err);
-                        } else {
-                            sec_count = sec_count.saturating_add(1);
-                        }
-                    }
-                }
-                respond_allow(fan_fd.0, metadata.fd);
-            }
-            if metadata.fd >= 0 {
-                unsafe {
-                    libc::close(metadata.fd);
-                }
-            }
-            if metadata.event_len == 0 {
-                break;
-            }
-            offset += metadata.event_len as usize;
-            if batch.len() >= 6144 {
-                flush_batch(ctx.event_ledger.clone(), &mut batch)?;
-            }
-        }
-        if dropped > 0 {
-            let mut overflow = new_event("agent", "fanotify_overflow", "warn");
-            overflow.detail = Some(format!("dropped={dropped}"));
-            if let Err(err) = ctx.event_ledger.append(overflow) {
-                tracing::error!("failed to append fanotify overflow event: {err}");
-            }
-            dropped = 0;
-        }
+        };
+        process_event_metadata(
+            &ctx.uhoh_dir,
+            &ctx.event_ledger,
+            &monitor_roots,
+            fan_fd.0,
+            &buf[..nread],
+            &mut rate_limiter,
+            &mut batch,
+        )?;
+        batch.emit_overflow_if_needed(ctx);
     }
 }
 
@@ -237,6 +176,237 @@ struct PendingAudit {
     pre_state_ref: String,
     pid: i32,
     pid_start_time_ticks: u64,
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn normalize_monitor_roots(monitor_roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    if monitor_roots.is_empty() {
+        return Ok(vec![std::env::current_dir().context(
+            "No monitor roots found and unable to resolve current directory",
+        )?]);
+    }
+    Ok(monitor_roots.to_vec())
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn init_fanotify() -> Result<FanotifyFd> {
+    let fan_fd_raw = unsafe {
+        libc::fanotify_init(
+            (libc::FAN_CLASS_CONTENT
+                | libc::FAN_CLOEXEC
+                | libc::FAN_REPORT_FID
+                | libc::FAN_REPORT_DFID_NAME) as u32,
+            libc::O_RDONLY | libc::O_LARGEFILE,
+        )
+    };
+    if fan_fd_raw < 0 {
+        anyhow::bail!("fanotify_init failed (requires CAP_SYS_ADMIN and kernel >= 5.1)");
+    }
+    Ok(FanotifyFd(fan_fd_raw))
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn mark_monitor_roots(fan_fd: RawFd, monitor_roots: &[PathBuf]) -> Result<()> {
+    for monitor_root in monitor_roots {
+        let cpath = CString::new(monitor_root.as_os_str().as_bytes().to_vec())
+            .context("Invalid monitor root path")?;
+        let mark_fd = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(monitor_root)
+            .with_context(|| format!("Failed opening monitor root: {}", monitor_root.display()))?;
+        let mark_ok = unsafe {
+            libc::fanotify_mark(
+                fan_fd,
+                (libc::FAN_MARK_ADD | libc::FAN_MARK_MOUNT | libc::FAN_MARK_FILESYSTEM) as u32,
+                (libc::FAN_OPEN_PERM | libc::FAN_EVENT_ON_CHILD) as u64,
+                mark_fd.as_raw_fd(),
+                cpath.as_ptr(),
+            )
+        };
+        if mark_ok >= 0 {
+            continue;
+        }
+
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINVAL) {
+            tracing::warn!("FAN_MARK_FILESYSTEM unsupported, retrying with FAN_MARK_MOUNT only");
+            let fallback = unsafe {
+                libc::fanotify_mark(
+                    fan_fd,
+                    (libc::FAN_MARK_ADD | libc::FAN_MARK_MOUNT) as u32,
+                    (libc::FAN_OPEN_PERM | libc::FAN_EVENT_ON_CHILD) as u64,
+                    mark_fd.as_raw_fd(),
+                    cpath.as_ptr(),
+                )
+            };
+            if fallback >= 0 {
+                continue;
+            }
+        }
+
+        anyhow::bail!("fanotify_mark failed for {}", monitor_root.display());
+    }
+
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn emit_monitor_started(ctx: &AgentContext, monitor_roots: &[PathBuf]) {
+    let mut event = new_event("agent", "fanotify_monitor_started", "info");
+    event.detail = Some(format!(
+        "roots={}",
+        monitor_roots
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
+    if let Err(err) = ctx.event_ledger.append(event) {
+        tracing::error!("failed to append fanotify_monitor_started event: {err}");
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn poll_for_events(pollfd: &mut libc::pollfd) -> bool {
+    let poll_ret = unsafe { libc::poll(pollfd, 1, 1000) };
+    if poll_ret == 0 {
+        return false;
+    }
+    if poll_ret < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            tracing::error!("fanotify poll error: {err}");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return false;
+    }
+    true
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn read_fanotify_chunk(
+    fan_fd: RawFd,
+    buf: &mut [u8],
+    ledger: &EventLedger,
+    batch: &mut PendingAuditBatch,
+) -> Result<Option<usize>> {
+    let nread = unsafe { libc::read(fan_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    if nread < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            tracing::error!("fanotify read error: {err}");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        batch.flush(ledger)?;
+        return Ok(None);
+    }
+    if nread == 0 {
+        batch.flush(ledger)?;
+        return Ok(None);
+    }
+    Ok(Some(nread as usize))
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn process_event_metadata(
+    uhoh_dir: &Path,
+    event_ledger: &EventLedger,
+    monitor_roots: &[PathBuf],
+    fan_fd: RawFd,
+    bytes: &[u8],
+    rate_limiter: &mut EventRateLimiter,
+    batch: &mut PendingAuditBatch,
+) -> Result<()> {
+    let mut offset = 0usize;
+    while let Some(metadata) = next_event_metadata(bytes, &mut offset) {
+        handle_event_metadata(
+            uhoh_dir,
+            monitor_roots,
+            fan_fd,
+            metadata,
+            rate_limiter,
+            batch,
+        )?;
+        batch.maybe_flush(event_ledger)?;
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn next_event_metadata<'a>(
+    bytes: &'a [u8],
+    offset: &mut usize,
+) -> Option<&'a libc::fanotify_event_metadata> {
+    if *offset + std::mem::size_of::<libc::fanotify_event_metadata>() > bytes.len() {
+        return None;
+    }
+    let metadata = unsafe { &*(bytes[*offset..].as_ptr() as *const libc::fanotify_event_metadata) };
+    if metadata.vers as usize != libc::FANOTIFY_METADATA_VERSION || metadata.event_len == 0 {
+        return None;
+    }
+    *offset += metadata.event_len as usize;
+    Some(metadata)
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn handle_event_metadata(
+    uhoh_dir: &Path,
+    monitor_roots: &[PathBuf],
+    fan_fd: RawFd,
+    metadata: &libc::fanotify_event_metadata,
+    rate_limiter: &mut EventRateLimiter,
+    batch: &mut PendingAuditBatch,
+) -> Result<()> {
+    if (metadata.mask & libc::FAN_Q_OVERFLOW as u64) != 0 {
+        batch.note_drop();
+    }
+    if metadata.fd >= 0 && (metadata.mask & libc::FAN_OPEN_PERM as u64) != 0 {
+        handle_permission_event(
+            uhoh_dir,
+            monitor_roots,
+            fan_fd,
+            metadata,
+            rate_limiter,
+            batch,
+        )?;
+    }
+    close_metadata_fd(metadata.fd);
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn handle_permission_event(
+    uhoh_dir: &Path,
+    monitor_roots: &[PathBuf],
+    fan_fd: RawFd,
+    metadata: &libc::fanotify_event_metadata,
+    rate_limiter: &mut EventRateLimiter,
+    batch: &mut PendingAuditBatch,
+) -> Result<()> {
+    let target_path = fd_path(metadata.fd);
+    if let Some(path) = target_path.as_ref() {
+        if monitor_roots.iter().any(|root| path_within(root, path)) {
+            if !rate_limiter.allow_next() {
+                batch.note_drop();
+            } else if let Err(err) =
+                capture_preimage_from_fd(uhoh_dir, path, metadata.fd, metadata.pid, batch)
+            {
+                tracing::warn!("fanotify pre-image capture failed: {}", err);
+            }
+        }
+    }
+    respond_allow(fan_fd, metadata.fd);
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "audit-trail"))]
+fn close_metadata_fd(fd: RawFd) {
+    if fd >= 0 {
+        unsafe {
+            libc::close(fd);
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
@@ -264,7 +434,7 @@ fn capture_preimage_from_fd(
     path: &Path,
     event_fd: i32,
     pid: i32,
-    batch: &mut VecDeque<PendingAudit>,
+    batch: &mut PendingAuditBatch,
 ) -> Result<()> {
     if !path.is_file() {
         return Ok(());
@@ -296,7 +466,7 @@ fn capture_preimage_from_fd(
     let (hash, _) = crate::cas::store_blob(&uhoh_dir.join("blobs"), &bytes)?;
     let start_ticks = process_start_ticks(pid)
         .with_context(|| format!("failed to resolve process start ticks for pid {}", pid))?;
-    batch.push_back(PendingAudit {
+    batch.push(PendingAudit {
         path: path.to_path_buf(),
         pre_state_ref: hash,
         pid,
@@ -306,7 +476,7 @@ fn capture_preimage_from_fd(
 }
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
-fn flush_batch(ledger: EventLedger, batch: &mut VecDeque<PendingAudit>) -> Result<()> {
+fn flush_batch(ledger: &EventLedger, batch: &mut VecDeque<PendingAudit>) -> Result<()> {
     while let Some(item) = batch.pop_front() {
         let mut event = new_event("agent", "fanotify_preimage", "info");
         event.path = Some(item.path.display().to_string());
