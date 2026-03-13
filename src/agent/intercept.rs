@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 
-use crate::db::AgentEntry;
+use crate::db::{AgentEntry, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::AgentContext;
 
@@ -193,7 +193,11 @@ async fn process_jsonl_event(
         }
     }
 
-    let mut ledger_event = new_event("agent", "session_tool_call", "info");
+    let mut ledger_event = new_event(
+        LedgerSource::Agent,
+        "session_tool_call",
+        LedgerSeverity::Info,
+    );
     ledger_event.agent_name = Some(agent.name.clone());
     ledger_event.path = target_path;
     ledger_event.pre_state_ref = pre_state_ref;

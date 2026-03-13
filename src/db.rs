@@ -211,18 +211,6 @@ impl FromStr for LedgerSeverity {
     }
 }
 
-impl From<&str> for LedgerSeverity {
-    fn from(value: &str) -> Self {
-        Self::parse(value).unwrap_or(LedgerSeverity::Info)
-    }
-}
-
-impl From<String> for LedgerSeverity {
-    fn from(value: String) -> Self {
-        Self::from(value.as_str())
-    }
-}
-
 impl std::fmt::Display for LedgerSeverity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -277,18 +265,6 @@ impl FromStr for LedgerSource {
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         Self::parse(value).ok_or(())
-    }
-}
-
-impl From<&str> for LedgerSource {
-    fn from(value: &str) -> Self {
-        Self::parse(value).unwrap_or(LedgerSource::Daemon)
-    }
-}
-
-impl From<String> for LedgerSource {
-    fn from(value: String) -> Self {
-        Self::from(value.as_str())
     }
 }
 
@@ -584,19 +560,6 @@ impl Database {
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         // All DDL uses CREATE TABLE/INDEX IF NOT EXISTS, safe to run every startup
         conn.execute_batch(include_str!("db/schema.sql"))?;
-        self.normalize_legacy_ledger_labels(&conn)?;
-        Ok(())
-    }
-
-    fn normalize_legacy_ledger_labels(&self, conn: &DbConn) -> Result<()> {
-        conn.execute(
-            "UPDATE event_ledger SET source = 'db_guard' WHERE source = 'db'",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE event_ledger SET severity = 'warn' WHERE severity = 'warning'",
-            [],
-        )?;
         Ok(())
     }
 

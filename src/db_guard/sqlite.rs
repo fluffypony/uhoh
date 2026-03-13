@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::db::{DbGuardEntry, LedgerSeverity};
+use crate::db::{DbGuardEntry, LedgerSeverity, LedgerSource};
 use crate::db_guard::recovery;
 use crate::event_ledger::new_event;
 use crate::subsystem::DbGuardContext;
@@ -22,7 +22,7 @@ pub fn tick_sqlite_guard(
     conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
     let data_version: i64 = conn.query_row("PRAGMA data_version", [], |row| row.get(0))?;
     let detail = serde_json::json!({"data_version": data_version}).to_string();
-    let mut event = new_event("db_guard", "sqlite_tick", "info");
+    let mut event = new_event(LedgerSource::DbGuard, "sqlite_tick", LedgerSeverity::Info);
     event.guard_name = Some(guard.name.clone());
     event.path = Some(path.clone());
     event.detail = Some(detail);
@@ -83,7 +83,11 @@ pub fn tick_sqlite_guard(
                 err
             );
         }
-        let mut baseline_event = new_event("db_guard", "sqlite_baseline", "info");
+        let mut baseline_event = new_event(
+            LedgerSource::DbGuard,
+            "sqlite_baseline",
+            LedgerSeverity::Info,
+        );
         baseline_event.guard_name = Some(guard.name.clone());
         baseline_event.path = Some(path.clone());
         baseline_event.detail = Some(

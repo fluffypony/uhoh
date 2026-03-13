@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, Mutex};
 
-use crate::config::NotificationsConfig;
-use crate::events::ServerEvent;
+use crate::config::{NotificationsConfig, WebhookEventKind};
+use crate::events::{ServerEvent, ServerEventKind};
 
 #[derive(Clone)]
 pub struct NotificationPipeline {
@@ -41,7 +41,7 @@ impl NotificationPipeline {
     }
 
     async fn process_event(&self, event: ServerEvent) {
-        let event_type = event.kind();
+        let event_kind = event.kind();
         let summary = event.summary();
         // Include project/guard/agent identifiers in dedupe key to prevent
         // one project's alert from suppressing another's during cooldown
@@ -51,7 +51,7 @@ impl NotificationPipeline {
         }
 
         if self.cfg.desktop {
-            let title = if event_type == "emergency_delete_detected" {
+            let title = if event_kind.is_emergency() {
                 "uhoh EMERGENCY"
             } else {
                 "uhoh"
@@ -60,14 +60,15 @@ impl NotificationPipeline {
         }
 
         if !self.cfg.webhook_url.trim().is_empty()
-            && self
-                .cfg
-                .webhook_events
-                .iter()
-                .any(|v| v.as_str().eq_ignore_ascii_case(&event_type))
+            && Self::webhook_kind(&event_kind).is_some_and(|kind| {
+                self.cfg
+                    .webhook_events
+                    .iter()
+                    .any(|configured| configured == &kind)
+            })
         {
             let payload = serde_json::json!({
-                "event_type": event_type,
+                "event_type": event_kind.as_str(),
                 "summary": summary,
                 "event": event,
             });
@@ -100,7 +101,28 @@ impl NotificationPipeline {
                 event_type,
                 ..
             } => format!("agent_alert:{agent_name}:{event_type}"),
-            other => other.kind(),
+            other => other.kind().as_str().to_string(),
+        }
+    }
+
+    fn webhook_kind(kind: &ServerEventKind) -> Option<WebhookEventKind> {
+        match kind {
+            ServerEventKind::DbGuard(event_type) => match event_type.as_str() {
+                "mass_delete" => Some(WebhookEventKind::MassDelete),
+                "mass_delete_pct" => Some(WebhookEventKind::MassDeletePct),
+                "drop_table" => Some(WebhookEventKind::DropTable),
+                "drop_column" => Some(WebhookEventKind::DropColumn),
+                "truncate" => Some(WebhookEventKind::Truncate),
+                _ => None,
+            },
+            ServerEventKind::Agent(event_type) if event_type == "dangerous_agent_action" => {
+                Some(WebhookEventKind::DangerousAgentAction)
+            }
+            ServerEventKind::MlxUpdateFailed => Some(WebhookEventKind::MlxUpdateFailed),
+            ServerEventKind::EmergencyDeleteDetected => {
+                Some(WebhookEventKind::EmergencyDeleteDetected)
+            }
+            _ => None,
         }
     }
 

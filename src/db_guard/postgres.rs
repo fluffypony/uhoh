@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::postgres_connection::{connect_postgres_client, ResolvedPostgresConnection};
 use super::{credentials, recovery};
-use crate::db::{DbGuardEntry, DbGuardMode};
+use crate::db::{DbGuardEntry, DbGuardMode, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::DbGuardContext;
 
@@ -68,7 +68,7 @@ fn emit_recovery_event(
     detail: serde_json::Value,
     artifact: &recovery::ArtifactInfo,
 ) {
-    let mut event = new_event("db_guard", event_type, "critical");
+    let mut event = new_event(LedgerSource::DbGuard, event_type, LedgerSeverity::Critical);
     event.guard_name = Some(guard_name.to_string());
     event.detail = Some(detail.to_string());
     event.pre_state_ref = Some(artifact.blake3.clone());
@@ -78,7 +78,11 @@ fn emit_recovery_event(
 }
 
 fn emit_degraded_event(ctx: &DbGuardContext, guard_name: &str, step: &str, err: &anyhow::Error) {
-    let mut event = new_event("db_guard", "postgres_optional_step_degraded", "warn");
+    let mut event = new_event(
+        LedgerSource::DbGuard,
+        "postgres_optional_step_degraded",
+        LedgerSeverity::Warn,
+    );
     event.guard_name = Some(guard_name.to_string());
     event.detail = Some(
         serde_json::json!({
@@ -174,7 +178,11 @@ fn ensure_postgres_baseline(
             err
         );
     }
-    let mut event = new_event("db_guard", "postgres_baseline", "info");
+    let mut event = new_event(
+        LedgerSource::DbGuard,
+        "postgres_baseline",
+        LedgerSeverity::Info,
+    );
     event.guard_name = Some(guard.name.clone());
     event.detail = Some(format!("artifact={}, blake3={}", info.path, info.blake3));
     if let Err(err) = ctx.event_ledger.append(event) {
@@ -324,7 +332,7 @@ fn emit_postgres_tick_event(
     connection: &ResolvedPostgresConnection,
     row_counters_disabled: bool,
 ) {
-    let mut event = new_event("db_guard", "postgres_tick", "info");
+    let mut event = new_event(LedgerSource::DbGuard, "postgres_tick", LedgerSeverity::Info);
     event.guard_name = Some(guard.name.clone());
     event.detail = Some(if row_counters_disabled {
         format!(
@@ -374,7 +382,11 @@ fn reconcile_wildcard_delete_triggers(
 
     if !added.is_empty() {
         install_delete_counter_triggers_for_tables(runtime, connection, &added)?;
-        let mut event = new_event("db_guard", "postgres_wildcard_trigger_reconciled", "info");
+        let mut event = new_event(
+            LedgerSource::DbGuard,
+            "postgres_wildcard_trigger_reconciled",
+            LedgerSeverity::Info,
+        );
         event.guard_name = Some(guard.name.clone());
         event.detail = Some(
             serde_json::json!({

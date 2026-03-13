@@ -1,7 +1,10 @@
 use std::path::Path;
 
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::db::{LedgerSeverity, LedgerSource};
 use crate::event_ledger::{new_event, EventLedger};
 use crate::events::publish_event;
 use crate::project_service::RestoreProjectError;
@@ -11,6 +14,100 @@ use crate::runtime_bundle::RuntimeBundle;
 use super::protocol::JsonRpcResponse;
 
 const PRE_NOTIFY_TOOL_NAME: &str = "uhoh_pre_notify";
+
+#[derive(Debug, Clone, Copy)]
+pub enum McpToolName {
+    CreateSnapshot,
+    ListSnapshots,
+    RestoreSnapshot,
+    PreNotify,
+}
+
+impl McpToolName {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "create_snapshot" => Some(Self::CreateSnapshot),
+            "list_snapshots" => Some(Self::ListSnapshots),
+            "restore_snapshot" => Some(Self::RestoreSnapshot),
+            PRE_NOTIFY_TOOL_NAME => Some(Self::PreNotify),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcpToolCall {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectSelectorArgs {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    project_hash: Option<String>,
+}
+
+impl ProjectSelectorArgs {
+    fn selection(&self) -> Option<&str> {
+        self.path.as_deref().or(self.project_hash.as_deref())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateSnapshotArgs {
+    #[serde(flatten)]
+    project: ProjectSelectorArgs,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListSnapshotsArgs {
+    #[serde(flatten)]
+    project: ProjectSelectorArgs,
+    #[serde(default = "default_snapshot_list_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreSnapshotArgs {
+    snapshot_id: String,
+    #[serde(flatten)]
+    project: ProjectSelectorArgs,
+    #[serde(default = "default_restore_dry_run")]
+    dry_run: bool,
+    #[serde(default)]
+    confirm: bool,
+    #[serde(default)]
+    target_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreNotifyArgs {
+    agent: String,
+    action: String,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+fn default_snapshot_list_limit() -> usize {
+    20
+}
+
+fn default_restore_dry_run() -> bool {
+    true
+}
 
 #[derive(Debug, Clone)]
 pub struct McpToolError {
@@ -65,6 +162,7 @@ pub fn tool_definitions() -> serde_json::Value {
                 "description": "Create a manual snapshot of a project.",
                 "inputSchema": {
                     "type": "object",
+                    "additionalProperties": false,
                     "properties": {
                         "path": { "type": "string" },
                         "project_hash": { "type": "string" },
@@ -77,6 +175,7 @@ pub fn tool_definitions() -> serde_json::Value {
                 "description": "List snapshots for a project.",
                 "inputSchema": {
                     "type": "object",
+                    "additionalProperties": false,
                     "properties": {
                         "path": { "type": "string" },
                         "project_hash": { "type": "string" },
@@ -90,6 +189,7 @@ pub fn tool_definitions() -> serde_json::Value {
                 "description": "Restore to a previous snapshot. Defaults to dry run.",
                 "inputSchema": {
                     "type": "object",
+                    "additionalProperties": false,
                     "properties": {
                         "snapshot_id": { "type": "string" },
                         "path": { "type": "string" },
@@ -109,6 +209,7 @@ pub fn tool_definitions() -> serde_json::Value {
                 "description": "Cooperative pre-action notification for agent actions.",
                 "inputSchema": {
                     "type": "object",
+                    "additionalProperties": false,
                     "properties": {
                         "agent": { "type": "string" },
                         "action": { "type": "string" },
@@ -121,36 +222,24 @@ pub fn tool_definitions() -> serde_json::Value {
     })
 }
 
-pub fn parse_mcp_tool_call(params: Option<Value>) -> Result<(String, Value), McpToolError> {
+pub fn parse_mcp_tool_call(params: Option<Value>) -> Result<(McpToolName, Value), McpToolError> {
     let params = params.ok_or_else(|| McpToolError::invalid_params("Missing params"))?;
-    let tool_name = params
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if tool_name.is_empty() {
-        return Err(McpToolError::invalid_params("Missing tool name"));
-    }
-    let args = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    Ok((tool_name, args))
+    let RawMcpToolCall { name, arguments } = parse_tool_args(params)?;
+    let tool_name = McpToolName::parse(&name)
+        .ok_or_else(|| McpToolError::invalid_params(format!("Unknown tool: {name}")))?;
+    Ok((tool_name, arguments))
 }
 
 pub fn dispatch_mcp_tool_call(
     context: &RuntimeBundle,
-    tool_name: &str,
+    tool_name: McpToolName,
     args: Value,
 ) -> Result<Value, McpToolError> {
     match tool_name {
-        "create_snapshot" => tool_create_snapshot(context, args),
-        "list_snapshots" => tool_list_snapshots(context, args),
-        "restore_snapshot" => tool_restore_snapshot(context, args),
-        PRE_NOTIFY_TOOL_NAME => handle_pre_notify_tool_call(context, args),
-        _ => Err(McpToolError::invalid_params(format!(
-            "Unknown tool: {tool_name}"
-        ))),
+        McpToolName::CreateSnapshot => tool_create_snapshot(context, parse_tool_args(args)?),
+        McpToolName::ListSnapshots => tool_list_snapshots(context, parse_tool_args(args)?),
+        McpToolName::RestoreSnapshot => tool_restore_snapshot(context, parse_tool_args(args)?),
+        McpToolName::PreNotify => handle_pre_notify_tool_call(context, parse_tool_args(args)?),
     }
 }
 
@@ -168,19 +257,18 @@ pub fn mcp_tool_call_response(
         Err(err) => return JsonRpcResponse::error_with_data(id, err.code, err.message, err.data),
     };
 
-    match dispatch_mcp_tool_call(context, &tool_name, args) {
+    match dispatch_mcp_tool_call(context, tool_name, args) {
         Ok(value) => JsonRpcResponse::success(id, value),
         Err(err) => JsonRpcResponse::error_with_data(id, err.code, err.message, err.data),
     }
 }
 
-fn tool_create_snapshot(context: &RuntimeBundle, args: Value) -> Result<Value, McpToolError> {
-    let path = args.get("path").and_then(|v| v.as_str());
-    let hash = args.get("project_hash").and_then(|v| v.as_str());
-    let message = args.get("message").and_then(|v| v.as_str());
-
+fn tool_create_snapshot(
+    context: &RuntimeBundle,
+    args: CreateSnapshotArgs,
+) -> Result<Value, McpToolError> {
     let database = context.database();
-    let project = resolve::resolve_project(database.as_ref(), path.or(hash), None)
+    let project = resolve::resolve_project(database.as_ref(), args.project.selection(), None)
         .map_err(classify_lookup_error)?;
     let result = crate::project_service::create_project_snapshot(
         context.uhoh_dir(),
@@ -188,7 +276,7 @@ fn tool_create_snapshot(context: &RuntimeBundle, args: Value) -> Result<Value, M
         &context.snapshot_runtime(),
         &project,
         "mcp",
-        message,
+        args.message.as_deref(),
     )
     .map_err(|e| McpToolError::internal(e.to_string()))?;
 
@@ -207,17 +295,15 @@ fn tool_create_snapshot(context: &RuntimeBundle, args: Value) -> Result<Value, M
     }
 }
 
-fn tool_list_snapshots(context: &RuntimeBundle, args: Value) -> Result<Value, McpToolError> {
-    let path = args.get("path").and_then(|v| v.as_str());
-    let hash = args.get("project_hash").and_then(|v| v.as_str());
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
+fn tool_list_snapshots(
+    context: &RuntimeBundle,
+    args: ListSnapshotsArgs,
+) -> Result<Value, McpToolError> {
     let database = context.database();
-    let project = resolve::resolve_project(database.as_ref(), path.or(hash), None)
+    let project = resolve::resolve_project(database.as_ref(), args.project.selection(), None)
         .map_err(classify_lookup_error)?;
     let snapshots = database
-        .list_snapshots_paginated(&project.hash, limit, offset)
+        .list_snapshots_paginated(&project.hash, args.limit, args.offset)
         .map_err(|e| McpToolError::internal(e.to_string()))?;
 
     let list: Vec<Value> = snapshots
@@ -243,35 +329,21 @@ fn tool_list_snapshots(context: &RuntimeBundle, args: Value) -> Result<Value, Mc
     }))
 }
 
-fn tool_restore_snapshot(context: &RuntimeBundle, args: Value) -> Result<Value, McpToolError> {
-    let snapshot_id = args
-        .get("snapshot_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| McpToolError::invalid_params("Missing snapshot_id"))?
-        .to_string();
-    let dry_run = args
-        .get("dry_run")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let confirm = args
-        .get("confirm")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !dry_run && !confirm {
+fn tool_restore_snapshot(
+    context: &RuntimeBundle,
+    args: RestoreSnapshotArgs,
+) -> Result<Value, McpToolError> {
+    if !args.dry_run && !args.confirm {
         return Err(McpToolError::invalid_params(
             "Non-dry-run restore requires confirm: true",
         ));
     }
 
-    let path = args.get("path").and_then(|v| v.as_str());
-    let hash = args.get("project_hash").and_then(|v| v.as_str());
-    let target_path = args.get("target_path").and_then(|v| v.as_str());
-
     let database = context.database();
-    let project = resolve::resolve_project(database.as_ref(), path.or(hash), None)
+    let project = resolve::resolve_project(database.as_ref(), args.project.selection(), None)
         .map_err(classify_lookup_error)?;
 
-    if let Some(tp) = target_path {
+    if let Some(tp) = args.target_path.as_deref() {
         resolve::validate_path_within_project(Path::new(&project.current_path), tp)
             .map_err(|e| McpToolError::invalid_params(e.to_string()))?;
     }
@@ -280,19 +352,19 @@ fn tool_restore_snapshot(context: &RuntimeBundle, args: Value) -> Result<Value, 
         &context.restore_runtime(),
         &context.snapshot_runtime(),
         &project,
-        &snapshot_id,
-        dry_run,
-        target_path,
+        &args.snapshot_id,
+        args.dry_run,
+        args.target_path.as_deref(),
     )
     .map_err(classify_restore_error)?;
 
     Ok(json!({
-        "content": [{"type":"text", "text": if dry_run {
-            format!("Dry run complete for snapshot {snapshot_id}")
+        "content": [{"type":"text", "text": if args.dry_run {
+            format!("Dry run complete for snapshot {}", args.snapshot_id)
         } else if outcome.applied {
-            format!("Snapshot {snapshot_id} restored")
+            format!("Snapshot {} restored", args.snapshot_id)
         } else {
-            format!("Restore for snapshot {snapshot_id} was not applied")
+            format!("Restore for snapshot {} was not applied", args.snapshot_id)
         }}],
         "restored": outcome.applied,
         "dry_run": outcome.dry_run,
@@ -305,19 +377,12 @@ fn tool_restore_snapshot(context: &RuntimeBundle, args: Value) -> Result<Value, 
 
 fn handle_pre_notify_tool_call(
     context: &RuntimeBundle,
-    args: Value,
+    args: PreNotifyArgs,
 ) -> Result<Value, McpToolError> {
-    let agent = required_string_field(&args, "agent")?.to_string();
-    let action = required_string_field(&args, "action")?.to_string();
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let mut event = new_event("agent", "pre_notify", "info");
-    event.agent_name = Some(agent);
-    event.path = path;
-    event.detail = Some(format!("action={action}"));
+    let mut event = new_event(LedgerSource::Agent, "pre_notify", LedgerSeverity::Info);
+    event.agent_name = Some(args.agent);
+    event.path = args.path;
+    event.detail = Some(format!("action={}", args.action));
 
     let database = context.database();
     let ledger = if let Some(tx) = context.event_tx() {
@@ -335,11 +400,9 @@ fn handle_pre_notify_tool_call(
     }))
 }
 
-fn required_string_field<'a>(args: &'a Value, field: &str) -> Result<&'a str, McpToolError> {
-    args.get(field)
-        .ok_or_else(|| McpToolError::invalid_params(format!("Missing {field}")))?
-        .as_str()
-        .ok_or_else(|| McpToolError::invalid_params(format!("{field} must be a string")))
+fn parse_tool_args<T: DeserializeOwned>(value: Value) -> Result<T, McpToolError> {
+    serde_json::from_value(value)
+        .map_err(|err| McpToolError::invalid_params(format!("Invalid arguments: {err}")))
 }
 
 fn classify_lookup_error(err: anyhow::Error) -> McpToolError {

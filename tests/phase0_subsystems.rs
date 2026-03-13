@@ -7,7 +7,7 @@ use anyhow::Result;
 use std::process::Command as TestCommand;
 use tempfile::TempDir;
 
-use uhoh::db::{Database, NewEventLedgerEntry};
+use uhoh::db::{Database, LedgerSeverity, LedgerSource, NewEventLedgerEntry};
 use uhoh::event_ledger::{new_event, EventLedger};
 use uhoh::subsystem::{Subsystem, SubsystemContext, SubsystemHealth, SubsystemManager};
 
@@ -54,12 +54,12 @@ fn temp_db() -> (TempDir, Arc<Database>) {
 }
 
 fn event(
-    source: &str,
+    source: LedgerSource,
     event_type: &str,
     path: Option<&str>,
     causal_parent: Option<i64>,
 ) -> NewEventLedgerEntry {
-    let mut e = new_event(source, event_type, "info");
+    let mut e = new_event(source, event_type, LedgerSeverity::Info);
     e.path = path.map(str::to_string);
     e.causal_parent = causal_parent;
     e
@@ -111,14 +111,24 @@ fn event_ledger_trace_and_resolve_roundtrip() {
     let (_tmp, db) = temp_db();
     let ledger = EventLedger::new(db.clone());
 
-    let _ = ledger.append(event("agent", "tool_call", Some("src/lib.rs"), None));
+    let _ = ledger.append(event(
+        LedgerSource::Agent,
+        "tool_call",
+        Some("src/lib.rs"),
+        None,
+    ));
     let root = db
         .event_ledger_recent(None, None, None, None, 10)
         .unwrap()
         .first()
         .map(|e| e.id)
         .unwrap();
-    let _ = ledger.append(event("fs", "file_write", Some("src/lib.rs"), Some(root)));
+    let _ = ledger.append(event(
+        LedgerSource::Fs,
+        "file_write",
+        Some("src/lib.rs"),
+        Some(root),
+    ));
     let child = db
         .event_ledger_recent(None, None, None, None, 10)
         .unwrap()
@@ -142,14 +152,24 @@ fn event_ledger_descendant_ids_returns_causal_descendants() {
     let (_tmp, db) = temp_db();
 
     let root = db
-        .insert_event_ledger(&event("agent", "root", Some("src/lib.rs"), None))
+        .insert_event_ledger(&event(
+            LedgerSource::Agent,
+            "root",
+            Some("src/lib.rs"),
+            None,
+        ))
         .unwrap();
     let child = db
-        .insert_event_ledger(&event("agent", "child", Some("src/lib.rs"), Some(root)))
+        .insert_event_ledger(&event(
+            LedgerSource::Agent,
+            "child",
+            Some("src/lib.rs"),
+            Some(root),
+        ))
         .unwrap();
     let grandchild = db
         .insert_event_ledger(&event(
-            "agent",
+            LedgerSource::Agent,
             "grandchild",
             Some("src/lib.rs"),
             Some(child),
@@ -167,10 +187,15 @@ fn make_cli_home_with_events() -> (TempDir, i64, i64) {
     std::fs::create_dir_all(&uhoh_dir).unwrap();
 
     let db = Database::open(&uhoh_dir.join("uhoh.db")).unwrap();
-    let root_event = event("agent", "pre_notify", Some("src/lib.rs"), None);
+    let root_event = event(LedgerSource::Agent, "pre_notify", Some("src/lib.rs"), None);
     let root = db.insert_event_ledger(&root_event).unwrap();
     let child = db
-        .insert_event_ledger(&event("fs", "file_write", Some("src/lib.rs"), Some(root)))
+        .insert_event_ledger(&event(
+            LedgerSource::Fs,
+            "file_write",
+            Some("src/lib.rs"),
+            Some(root),
+        ))
         .unwrap();
 
     (home, root, child)
@@ -182,15 +207,15 @@ fn make_cli_home_with_timeline_events() -> TempDir {
     std::fs::create_dir_all(&uhoh_dir).unwrap();
 
     let db = Database::open(&uhoh_dir.join("uhoh.db")).unwrap();
-    let mut fs_event = event("fs", "file_write", Some("src/lib.rs"), None);
+    let mut fs_event = event(LedgerSource::Fs, "file_write", Some("src/lib.rs"), None);
     fs_event.detail = Some("timeline-fs".to_string());
     db.insert_event_ledger(&fs_event).unwrap();
 
-    let mut db_event = event("db_guard", "drop_table", Some("users"), None);
+    let mut db_event = event(LedgerSource::DbGuard, "drop_table", Some("users"), None);
     db_event.detail = Some("timeline-db".to_string());
     db.insert_event_ledger(&db_event).unwrap();
 
-    let mut agent_event = event("agent", "tool_call", Some("src/main.rs"), None);
+    let mut agent_event = event(LedgerSource::Agent, "tool_call", Some("src/main.rs"), None);
     agent_event.detail = Some("timeline-agent".to_string());
     db.insert_event_ledger(&agent_event).unwrap();
 
@@ -290,7 +315,12 @@ fn event_ledger_append_falls_back_to_direct_insert_when_flusher_not_started() {
     let ledger = EventLedger::new(db.clone());
 
     let event_id = ledger
-        .append(event("agent", "pre_notify", Some("src/lib.rs"), None))
+        .append(event(
+            LedgerSource::Agent,
+            "pre_notify",
+            Some("src/lib.rs"),
+            None,
+        ))
         .expect("append should succeed");
     assert!(event_id > 0);
 

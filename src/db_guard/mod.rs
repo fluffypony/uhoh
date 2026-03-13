@@ -13,7 +13,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::{DbGuardEngine, DbGuardEntry, DbGuardMode};
+use crate::db::{DbGuardEngine, DbGuardEntry, DbGuardMode, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::{DbGuardContext, Subsystem, SubsystemContext, SubsystemHealth};
 
@@ -109,7 +109,11 @@ impl Subsystem for DbGuardSubsystem {
                     // Log newly registered guards
                     for guard in &guards {
                         if !last_guard_names.contains(&guard.name) {
-                            let mut event = new_event("db_guard", "guard_started", "info");
+                            let mut event = new_event(
+                                LedgerSource::DbGuard,
+                                "guard_started",
+                                LedgerSeverity::Info,
+                            );
                             event.guard_name = Some(guard.name.clone());
                             event.detail = Some(format!("engine={}, mode={}", guard.engine, guard.mode));
                             if let Err(err) = ctx.event_ledger.append(event) {
@@ -236,7 +240,11 @@ impl DbGuardSubsystem {
             }
 
             if guard.mode != effective_mode {
-                let mut event = new_event("db_guard", "guard_mode_normalized", "info");
+                let mut event = new_event(
+                    LedgerSource::DbGuard,
+                    "guard_mode_normalized",
+                    LedgerSeverity::Info,
+                );
                 event.guard_name = Some(guard.name.clone());
                 event.detail = Some(format!(
                     "engine={}, configured_mode={}, effective_mode={}",
@@ -287,7 +295,11 @@ impl DbGuardSubsystem {
             self.last_failure = Some(format!("db guard tick failed for {}: {}", guard.name, err));
         }
 
-        let mut event = new_event("db_guard", "guard_tick_failed", "warn");
+        let mut event = new_event(
+            LedgerSource::DbGuard,
+            "guard_tick_failed",
+            LedgerSeverity::Warn,
+        );
         event.guard_name = Some(guard.name.clone());
         event.detail = Some(err.to_string());
         if let Err(append_err) = ctx.event_ledger.append(event) {

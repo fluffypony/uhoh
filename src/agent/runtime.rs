@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::AgentEntry;
+use crate::db::{AgentEntry, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::{AgentContext, AuditSource, Subsystem, SubsystemContext, SubsystemHealth};
 
@@ -98,7 +98,11 @@ impl AgentSubsystem {
             if last_agent_names.contains(&agent.name) {
                 continue;
             }
-            let mut event = new_event("agent", "agent_registered", "info");
+            let mut event = new_event(
+                LedgerSource::Agent,
+                "agent_registered",
+                LedgerSeverity::Info,
+            );
             event.agent_name = Some(agent.name.clone());
             event.detail = Some(format!("profile={}", agent.profile_path));
             if let Err(err) = ctx.event_ledger.append(event) {
@@ -374,7 +378,11 @@ impl AgentSubsystem {
 
     #[cfg(all(target_os = "linux", feature = "audit-trail"))]
     fn handle_fanotify_failure(&mut self, ctx: &AgentContext, message: String) {
-        let mut event = new_event("agent", "fanotify_monitor_degraded", "warn");
+        let mut event = new_event(
+            LedgerSource::Agent,
+            "fanotify_monitor_degraded",
+            LedgerSeverity::Warn,
+        );
         event.detail = Some(message.clone());
         if let Err(err) = ctx.event_ledger.append(event) {
             tracing::error!("failed to append fanotify_monitor_degraded event: {err}");

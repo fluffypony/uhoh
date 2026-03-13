@@ -112,20 +112,12 @@ pub fn verify(database: &db::Database) -> Result<()> {
 
 fn normalize_timeline_source(source: &str) -> Result<LedgerSource> {
     let source = source.trim().to_ascii_lowercase();
-    let normalized = match source.as_str() {
-        "fs" | "filesystem" => LedgerSource::Fs,
-        "db" | "db_guard" | "database" => LedgerSource::DbGuard,
-        "agent" => LedgerSource::Agent,
-        "daemon" => LedgerSource::Daemon,
-        "mlx" => LedgerSource::Mlx,
-        _ => {
-            anyhow::bail!(
-                "Invalid --source '{}'. Expected one of: fs, db_guard, agent, daemon, mlx",
-                source
-            )
-        }
-    };
-    Ok(normalized)
+    LedgerSource::parse(&source).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid --source '{}'. Expected one of: fs, db_guard, agent, daemon, mlx",
+            source
+        )
+    })
 }
 
 fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
@@ -164,4 +156,21 @@ fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
     };
 
     Ok(chrono::Utc::now() - delta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_timeline_source;
+    use crate::db::LedgerSource;
+
+    #[test]
+    fn timeline_source_requires_canonical_names() {
+        assert_eq!(
+            normalize_timeline_source("db_guard").unwrap(),
+            LedgerSource::DbGuard
+        );
+        assert_eq!(normalize_timeline_source("fs").unwrap(), LedgerSource::Fs);
+        assert!(normalize_timeline_source("db").is_err());
+        assert!(normalize_timeline_source("filesystem").is_err());
+    }
 }

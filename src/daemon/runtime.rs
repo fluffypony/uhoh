@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::config::Config;
-use crate::db::{Database, ProjectEntry};
+use crate::db::{Database, LedgerSeverity, LedgerSource, ProjectEntry};
 use crate::event_ledger::{new_event, EventLedger};
 use crate::events::{publish_event, ServerEvent};
 use crate::notifications::NotificationPipeline;
@@ -547,7 +547,11 @@ async fn run_tick_maintenance(ctx: TickMaintenanceCtx<'_>) -> TickOutcome {
                 config_path.display(),
                 err
             );
-            let mut event = new_event("daemon", "config_reload_failed", "warn");
+            let mut event = new_event(
+                LedgerSource::Daemon,
+                "config_reload_failed",
+                LedgerSeverity::Warn,
+            );
             event.detail = Some(format!("path={}, error={}", config_path.display(), err));
             if let Err(append_err) = event_ledger.append(event) {
                 tracing::error!("failed to append config_reload_failed event: {append_err}");

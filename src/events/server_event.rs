@@ -2,6 +2,42 @@ use serde::Serialize;
 
 use crate::db::LedgerSeverity;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ServerEventKind {
+    SnapshotCreated,
+    SnapshotRestored,
+    AiSummaryCompleted,
+    SidecarUpdated,
+    MlxUpdateStatus,
+    MlxUpdateFailed,
+    DbGuard(String),
+    Agent(String),
+    ProjectAdded,
+    ProjectRemoved,
+    EmergencyDeleteDetected,
+}
+
+impl ServerEventKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::SnapshotCreated => "snapshot_created",
+            Self::SnapshotRestored => "snapshot_restored",
+            Self::AiSummaryCompleted => "ai_summary_completed",
+            Self::SidecarUpdated => "sidecar_updated",
+            Self::MlxUpdateStatus => "mlx_update_status",
+            Self::MlxUpdateFailed => "mlx_update_failed",
+            Self::DbGuard(event_type) | Self::Agent(event_type) => event_type.as_str(),
+            Self::ProjectAdded => "project_added",
+            Self::ProjectRemoved => "project_removed",
+            Self::EmergencyDeleteDetected => "emergency_delete_detected",
+        }
+    }
+
+    pub fn is_emergency(&self) -> bool {
+        matches!(self, Self::EmergencyDeleteDetected)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
@@ -68,19 +104,23 @@ pub enum ServerEvent {
 }
 
 impl ServerEvent {
-    pub fn kind(&self) -> String {
+    pub fn kind(&self) -> ServerEventKind {
         match self {
-            ServerEvent::SnapshotCreated { .. } => "snapshot_created".to_string(),
-            ServerEvent::SnapshotRestored { .. } => "snapshot_restored".to_string(),
-            ServerEvent::AiSummaryCompleted { .. } => "ai_summary_completed".to_string(),
-            ServerEvent::SidecarUpdated { .. } => "sidecar_updated".to_string(),
-            ServerEvent::MlxUpdateStatus { .. } => "mlx_update_status".to_string(),
-            ServerEvent::MlxUpdateFailed { .. } => "mlx_update_failed".to_string(),
-            ServerEvent::DbGuardAlert { event_type, .. } => event_type.clone(),
-            ServerEvent::AgentAlert { event_type, .. } => event_type.clone(),
-            ServerEvent::ProjectAdded { .. } => "project_added".to_string(),
-            ServerEvent::ProjectRemoved { .. } => "project_removed".to_string(),
-            ServerEvent::EmergencyDeleteDetected { .. } => "emergency_delete_detected".to_string(),
+            ServerEvent::SnapshotCreated { .. } => ServerEventKind::SnapshotCreated,
+            ServerEvent::SnapshotRestored { .. } => ServerEventKind::SnapshotRestored,
+            ServerEvent::AiSummaryCompleted { .. } => ServerEventKind::AiSummaryCompleted,
+            ServerEvent::SidecarUpdated { .. } => ServerEventKind::SidecarUpdated,
+            ServerEvent::MlxUpdateStatus { .. } => ServerEventKind::MlxUpdateStatus,
+            ServerEvent::MlxUpdateFailed { .. } => ServerEventKind::MlxUpdateFailed,
+            ServerEvent::DbGuardAlert { event_type, .. } => {
+                ServerEventKind::DbGuard(event_type.clone())
+            }
+            ServerEvent::AgentAlert { event_type, .. } => {
+                ServerEventKind::Agent(event_type.clone())
+            }
+            ServerEvent::ProjectAdded { .. } => ServerEventKind::ProjectAdded,
+            ServerEvent::ProjectRemoved { .. } => ServerEventKind::ProjectRemoved,
+            ServerEvent::EmergencyDeleteDetected { .. } => ServerEventKind::EmergencyDeleteDetected,
         }
     }
 
@@ -179,7 +219,7 @@ mod tests {
             project_hash: "abc".to_string(),
             path: "/tmp/demo".to_string(),
         };
-        assert_eq!(ev.kind(), "project_added");
+        assert_eq!(ev.kind().as_str(), "project_added");
 
         let ev = ServerEvent::DbGuardAlert {
             guard_name: "g".to_string(),
@@ -187,6 +227,6 @@ mod tests {
             severity: LedgerSeverity::Critical,
             detail: "{}".to_string(),
         };
-        assert_eq!(ev.kind(), "mass_delete");
+        assert_eq!(ev.kind().as_str(), "mass_delete");
     }
 }

@@ -40,14 +40,14 @@ impl EventLedger {
 }
 
 pub fn new_event(
-    source: impl Into<LedgerSource>,
+    source: LedgerSource,
     event_type: &str,
-    severity: impl Into<LedgerSeverity>,
+    severity: LedgerSeverity,
 ) -> NewEventLedgerEntry {
     NewEventLedgerEntry {
-        source: source.into(),
+        source,
         event_type: event_type.to_string(),
-        severity: severity.into(),
+        severity,
         project_hash: None,
         agent_name: None,
         guard_name: None,

@@ -4,7 +4,7 @@ use tempfile::NamedTempFile;
 use url::Url;
 
 use super::credentials::{load_encrypted_credentials, scrub_error_message, CredentialMaterial};
-use crate::db::DbGuardEntry;
+use crate::db::{DbGuardEntry, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::DbGuardContext;
 
@@ -30,7 +30,11 @@ pub fn tick_mysql_guard(
     ) {
         Ok(snapshot) => snapshot,
         Err(e) => {
-            let mut event = new_event("db_guard", "mysql_poll_failed", "warn");
+            let mut event = new_event(
+                LedgerSource::DbGuard,
+                "mysql_poll_failed",
+                LedgerSeverity::Warn,
+            );
             event.guard_name = Some(guard.name.clone());
             event.detail = Some(format!("poll_error={e}"));
             if let Err(err) = ctx.event_ledger.append(event) {
@@ -50,11 +54,11 @@ pub fn tick_mysql_guard(
                 .map(|previous| snapshot.table_count < previous)
                 .unwrap_or(false)
             {
-                ("drop_table", "critical")
+                ("drop_table", LedgerSeverity::Critical)
             } else {
-                ("schema_change", "warn")
+                ("schema_change", LedgerSeverity::Warn)
             };
-            let mut event = new_event("db_guard", event_type, severity);
+            let mut event = new_event(LedgerSource::DbGuard, event_type, severity);
             event.guard_name = Some(guard.name.clone());
             event.detail = Some(
                 serde_json::json!({
@@ -84,7 +88,11 @@ pub fn tick_mysql_guard(
         if deleted >= ctx.config.db_guard.mass_delete_row_threshold as i64
             || pct >= ctx.config.db_guard.mass_delete_pct_threshold
         {
-            let mut event = new_event("db_guard", "mass_delete", "critical");
+            let mut event = new_event(
+                LedgerSource::DbGuard,
+                "mass_delete",
+                LedgerSeverity::Critical,
+            );
             event.guard_name = Some(guard.name.clone());
             event.detail = Some(
                 serde_json::json!({
@@ -105,7 +113,7 @@ pub fn tick_mysql_guard(
     state.last_row_total = Some(snapshot.row_total);
     state.last_table_count = Some(snapshot.table_count);
 
-    let mut heartbeat = new_event("db_guard", "mysql_tick", "info");
+    let mut heartbeat = new_event(LedgerSource::DbGuard, "mysql_tick", LedgerSeverity::Info);
     heartbeat.guard_name = Some(guard.name.clone());
     heartbeat.detail = Some(
         serde_json::json!({

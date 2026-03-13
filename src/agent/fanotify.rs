@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
-use crate::db::AgentEntry;
+use crate::db::{AgentEntry, LedgerSeverity, LedgerSource};
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use crate::event_ledger::new_event;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
@@ -109,7 +109,11 @@ impl PendingAuditBatch {
         if self.dropped == 0 {
             return;
         }
-        let mut overflow = new_event("agent", "fanotify_overflow", "warn");
+        let mut overflow = new_event(
+            LedgerSource::Agent,
+            "fanotify_overflow",
+            LedgerSeverity::Warn,
+        );
         overflow.detail = Some(format!("dropped={}", self.dropped));
         if let Err(err) = ctx.event_ledger.append(overflow) {
             tracing::error!("failed to append fanotify overflow event: {err}");
@@ -253,7 +257,11 @@ fn mark_monitor_roots(fan_fd: RawFd, monitor_roots: &[PathBuf]) -> Result<()> {
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 fn emit_monitor_started(ctx: &AgentContext, monitor_roots: &[PathBuf]) {
-    let mut event = new_event("agent", "fanotify_monitor_started", "info");
+    let mut event = new_event(
+        LedgerSource::Agent,
+        "fanotify_monitor_started",
+        LedgerSeverity::Info,
+    );
     event.detail = Some(format!(
         "roots={}",
         monitor_roots
@@ -478,7 +486,11 @@ fn capture_preimage_from_fd(
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 fn flush_batch(ledger: &EventLedger, batch: &mut VecDeque<PendingAudit>) -> Result<()> {
     while let Some(item) = batch.pop_front() {
-        let mut event = new_event("agent", "fanotify_preimage", "info");
+        let mut event = new_event(
+            LedgerSource::Agent,
+            "fanotify_preimage",
+            LedgerSeverity::Info,
+        );
         event.path = Some(item.path.display().to_string());
         event.pre_state_ref = Some(item.pre_state_ref.clone());
         let session_id = format!("pid:{}:{}", item.pid, item.pid_start_time_ticks);

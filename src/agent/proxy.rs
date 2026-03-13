@@ -7,6 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use zeroize::Zeroize;
 
+use crate::db::{LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::AgentContext;
 use tokio_util::sync::CancellationToken;
@@ -21,7 +22,11 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
         .await
         .with_context(|| format!("Failed to bind MCP proxy listener on {addr}"))?;
 
-    let mut event = new_event("agent", "mcp_proxy_started", "info");
+    let mut event = new_event(
+        LedgerSource::Agent,
+        "mcp_proxy_started",
+        LedgerSeverity::Info,
+    );
     event.detail = Some(format!("addr={addr}"));
     if let Err(err) = ctx.event_ledger.append(event) {
         tracing::error!("failed to append mcp_proxy_started event: {err}");
@@ -37,7 +42,11 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
                     .ok()
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                let mut event = new_event("agent", "mcp_proxy_client_connected", "info");
+                let mut event = new_event(
+                    LedgerSource::Agent,
+                    "mcp_proxy_client_connected",
+                    LedgerSeverity::Info,
+                );
                 event.detail = Some(format!("peer={peer}"));
                 if let Err(err) = ctx.event_ledger.append(event) {
                     tracing::error!("failed to append mcp_proxy_client_connected event: {err}");
@@ -56,7 +65,11 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
                     )
                     .await
                     {
-                        let mut event = new_event("agent", "mcp_proxy_connection_failed", "warn");
+                        let mut event = new_event(
+                            LedgerSource::Agent,
+                            "mcp_proxy_connection_failed",
+                            LedgerSeverity::Warn,
+                        );
                         event.detail = Some(format!("peer={}, error={}", addr, e));
                         if let Err(err) = event_ledger.append(event) {
                             tracing::error!(
@@ -67,7 +80,11 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
                 });
             }
             Err(e) => {
-                let mut event = new_event("agent", "mcp_proxy_accept_failed", "warn");
+                let mut event = new_event(
+                    LedgerSource::Agent,
+                    "mcp_proxy_accept_failed",
+                    LedgerSeverity::Warn,
+                );
                 event.detail = Some(e.to_string());
                 if let Err(err) = ctx.event_ledger.append(event) {
                     tracing::error!("failed to append mcp_proxy_accept_failed event: {err}");
@@ -244,7 +261,11 @@ async fn intercept_tool_call(
         let challenge = random_hex(16);
         let approval_hmac =
             build_approval_response(&ensure_proxy_token(uhoh_dir)?, &approval_id, &challenge);
-        let mut danger = new_event("agent", "dangerous_agent_action", "critical");
+        let mut danger = new_event(
+            LedgerSource::Agent,
+            "dangerous_agent_action",
+            LedgerSeverity::Critical,
+        );
         danger.path = path.clone();
         danger.pre_state_ref = pre_state_ref.clone();
         danger.detail = Some(
@@ -291,7 +312,11 @@ async fn intercept_tool_call(
                 ApprovalDecision::TimedOut => {
                     // Timeout: auto-resume the action (matching documented behavior)
                     // and log a timeout event for audit purposes.
-                    let mut timeout_event = new_event("agent", "dangerous_action_timeout", "warn");
+                    let mut timeout_event = new_event(
+                        LedgerSource::Agent,
+                        "dangerous_action_timeout",
+                        LedgerSeverity::Warn,
+                    );
                     timeout_event.path = path.clone();
                     timeout_event.detail = Some(
                         serde_json::json!({
@@ -313,7 +338,11 @@ async fn intercept_tool_call(
                     // Fall through to proceed with the call
                 }
                 ApprovalDecision::Denied => {
-                    let mut block_event = new_event("agent", "dangerous_action_denied", "warn");
+                    let mut block_event = new_event(
+                        LedgerSource::Agent,
+                        "dangerous_action_denied",
+                        LedgerSeverity::Warn,
+                    );
                     block_event.path = path.clone();
                     block_event.detail = Some(
                         serde_json::json!({
@@ -336,7 +365,7 @@ async fn intercept_tool_call(
         }
     }
 
-    let mut event = new_event("agent", "tool_call", "info");
+    let mut event = new_event(LedgerSource::Agent, "tool_call", LedgerSeverity::Info);
     event.path = path;
     event.pre_state_ref = pre_state_ref;
     event.detail = Some(
@@ -529,7 +558,11 @@ async fn wait_for_approval(
                 let _ = std::fs::remove_file(&approved);
                 continue;
             }
-            let mut event = new_event("agent", "dangerous_action_approved", "info");
+            let mut event = new_event(
+                LedgerSource::Agent,
+                "dangerous_action_approved",
+                LedgerSeverity::Info,
+            );
             event.detail = Some(
                 serde_json::json!({
                     "approval_id": approval_id,

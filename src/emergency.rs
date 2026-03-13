@@ -180,11 +180,11 @@ pub fn evaluate_emergency(input: EmergencyEvalInput<'_>) -> EmergencyEvaluation 
     }
 }
 
-pub fn severity_for_ratio(ratio: f64) -> &'static str {
+pub fn severity_for_ratio(ratio: f64) -> crate::db::LedgerSeverity {
     if ratio >= 0.5 {
-        "critical"
+        crate::db::LedgerSeverity::Critical
     } else {
-        "warn"
+        crate::db::LedgerSeverity::Warn
     }
 }
 
@@ -282,14 +282,14 @@ mod tests {
 
     #[test]
     fn test_severity_critical() {
-        assert_eq!(severity_for_ratio(0.5), "critical");
-        assert_eq!(severity_for_ratio(0.9), "critical");
+        assert_eq!(severity_for_ratio(0.5), crate::db::LedgerSeverity::Critical);
+        assert_eq!(severity_for_ratio(0.9), crate::db::LedgerSeverity::Critical);
     }
 
     #[test]
     fn test_severity_warn() {
-        assert_eq!(severity_for_ratio(0.3), "warn");
-        assert_eq!(severity_for_ratio(0.49), "warn");
+        assert_eq!(severity_for_ratio(0.3), crate::db::LedgerSeverity::Warn);
+        assert_eq!(severity_for_ratio(0.49), crate::db::LedgerSeverity::Warn);
     }
 
     #[test]

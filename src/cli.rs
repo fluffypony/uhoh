@@ -166,7 +166,7 @@ pub enum Commands {
     },
 
     Timeline {
-        /// Filter by event source (`fs`, `db`, `agent`)
+        /// Filter by event source (`fs`, `db_guard`, `agent`)
         #[arg(long)]
         source: Option<String>,
         /// Relative lookback window (examples: `30m`, `1h`, `2d`)
