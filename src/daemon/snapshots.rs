@@ -589,7 +589,7 @@ fn update_restore_state(
     now: Instant,
 ) -> bool {
     let currently_restoring = restore_in_progress.load(std::sync::atomic::Ordering::SeqCst)
-        || crate::restore_runtime::restore_marker_active(uhoh_dir);
+        || crate::restore::restore_marker_active(uhoh_dir);
     if *was_restoring_snapshot && !currently_restoring {
         mark_restore_completed(states, database, now);
         tracing::debug!("Restore completed (detected in snapshot processor), grace period started");

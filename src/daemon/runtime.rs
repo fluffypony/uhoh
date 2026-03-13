@@ -115,7 +115,7 @@ struct ForegroundDaemonRuntime {
     database: Arc<Database>,
     sidecar_manager: crate::ai::sidecar::SidecarManager,
     server_event_tx: broadcast::Sender<ServerEvent>,
-    restore_coordinator: crate::restore_runtime::RestoreCoordinator,
+    restore_coordinator: crate::restore::RestoreCoordinator,
     restore_in_progress: Arc<AtomicBool>,
     event_ledger: EventLedger,
     subsystem_manager: Arc<Mutex<SubsystemManager>>,
@@ -140,7 +140,7 @@ impl ForegroundDaemonRuntime {
         database: Arc<Database>,
     ) -> Result<Self> {
         let (server_event_tx, _) = broadcast::channel::<ServerEvent>(4096);
-        let restore_coordinator = crate::restore_runtime::RestoreCoordinator::new();
+        let restore_coordinator = crate::restore::RestoreCoordinator::new();
         let restore_in_progress = restore_coordinator.in_progress_flag();
         let event_ledger =
             EventLedger::new(database.clone()).with_event_publisher(server_event_tx.clone());
@@ -417,7 +417,7 @@ async fn start_server(
     database: &Arc<Database>,
     uhoh_dir: &Path,
     server_event_tx: &broadcast::Sender<ServerEvent>,
-    restore_coordinator: &crate::restore_runtime::RestoreCoordinator,
+    restore_coordinator: &crate::restore::RestoreCoordinator,
     sidecar_manager: crate::ai::sidecar::SidecarManager,
     subsystem_manager: &Arc<Mutex<SubsystemManager>>,
 ) -> Result<Option<tokio::task::JoinHandle<()>>> {

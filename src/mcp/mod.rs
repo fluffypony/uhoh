@@ -8,5 +8,5 @@ pub use application::{
     build_application, handle_json_rpc_request, McpApplication, McpTransportResponse,
 };
 pub use http::McpHttpState;
-pub use protocol::{dispatch_protocol_request, JsonRpcRequest, JsonRpcResponse, ProtocolAction};
+pub use protocol::JsonRpcRequest;
 pub use stdio::run_stdio_server;

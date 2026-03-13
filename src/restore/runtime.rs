@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
+use super::guards::{RestoreBusyError, RestoreFlagGuard, RestoreLockGuard};
+use super::{RestoreOutcome, RestoreRequest, RESTORE_IN_PROGRESS_FILE};
 use crate::db::{Database, ProjectEntry};
 use crate::events::{publish_event, ServerEvent};
-use crate::restore::{RestoreOutcome, RestoreRequest, RESTORE_IN_PROGRESS_FILE};
-use crate::restore_guards::{RestoreBusyError, RestoreFlagGuard, RestoreLockGuard};
 
 #[derive(Clone, Default)]
 pub struct RestoreCoordinator {
@@ -51,22 +51,21 @@ pub struct RestoreRuntime {
 }
 
 impl RestoreRuntime {
-    pub fn new(database: Arc<Database>, uhoh_dir: PathBuf) -> Self {
+    pub fn new(
+        database: Arc<Database>,
+        uhoh_dir: PathBuf,
+        coordinator: RestoreCoordinator,
+    ) -> Self {
         Self {
             database,
             uhoh_dir,
             event_tx: None,
-            coordinator: RestoreCoordinator::new(),
+            coordinator,
         }
     }
 
     pub fn with_event_tx(mut self, event_tx: broadcast::Sender<ServerEvent>) -> Self {
         self.event_tx = Some(event_tx);
-        self
-    }
-
-    pub fn with_coordinator(mut self, coordinator: RestoreCoordinator) -> Self {
-        self.coordinator = coordinator;
         self
     }
 }
@@ -124,7 +123,7 @@ impl Drop for RestoreMarkerGuard {
     }
 }
 
-pub fn restore_project(
+pub fn restore_project_with_runtime(
     runtime: &RestoreRuntime,
     project: &ProjectEntry,
     request: RestoreRequest<'_>,
@@ -132,8 +131,7 @@ pub fn restore_project(
     let _guards = runtime
         .coordinator
         .begin(&runtime.uhoh_dir, &project.hash, request.dry_run)?;
-    let outcome =
-        crate::restore::apply_restore(&runtime.uhoh_dir, &runtime.database, project, request)?;
+    let outcome = super::apply_restore(&runtime.uhoh_dir, &runtime.database, project, request)?;
 
     if !outcome.dry_run && outcome.applied {
         if let Some(event_tx) = &runtime.event_tx {

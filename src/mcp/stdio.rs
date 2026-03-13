@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::db::Database;
+use crate::restore::RestoreCoordinator;
 use crate::runtime_bundle::{RuntimeBundle, RuntimeBundleConfig};
 
 use super::{JsonRpcRequest, McpTransportResponse};
@@ -21,7 +22,7 @@ pub fn run_stdio_server(uhoh_dir: &Path) -> Result<()> {
         uhoh_dir: uhoh_dir.to_path_buf(),
         config,
         event_tx: None,
-        restore_coordinator: None,
+        restore_coordinator: RestoreCoordinator::new(),
         sidecar_manager: None,
     });
     let application = super::build_application(runtime);

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::db::Database;
-use crate::restore_runtime::RestoreCoordinator;
+use crate::restore::RestoreCoordinator;
 
 use super::snapshots::{self, ProjectDaemonState};
 
@@ -108,8 +108,7 @@ impl WatcherRuntime {
         uhoh_dir: &Path,
         restore_coordinator: &RestoreCoordinator,
     ) {
-        let currently_restoring =
-            crate::restore_runtime::is_restore_active(restore_coordinator, uhoh_dir);
+        let currently_restoring = crate::restore::is_restore_active(restore_coordinator, uhoh_dir);
         if self.was_restoring && !currently_restoring {
             let now = Instant::now();
             snapshots::mark_restore_completed(project_states, database, now);
@@ -139,7 +138,7 @@ impl WatcherRuntime {
             return false;
         }
 
-        let restoring_hash = crate::restore_runtime::read_restoring_project_hash(uhoh_dir);
+        let restoring_hash = crate::restore::read_restoring_project_hash(uhoh_dir);
         snapshots::should_skip_event_during_restore(
             project_states,
             event,

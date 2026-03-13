@@ -7,7 +7,7 @@ use crate::ai::sidecar::SidecarManager;
 use crate::config::Config;
 use crate::db::Database;
 use crate::events::ServerEvent;
-use crate::restore_runtime::{RestoreCoordinator, RestoreRuntime};
+use crate::restore::{RestoreCoordinator, RestoreRuntime};
 use crate::snapshot::{SnapshotRuntime, SnapshotSettings};
 
 #[derive(Clone)]
@@ -27,7 +27,7 @@ pub struct RuntimeBundleConfig {
     pub uhoh_dir: PathBuf,
     pub config: Config,
     pub event_tx: Option<broadcast::Sender<ServerEvent>>,
-    pub restore_coordinator: Option<RestoreCoordinator>,
+    pub restore_coordinator: RestoreCoordinator,
     pub sidecar_manager: Option<SidecarManager>,
 }
 
@@ -42,12 +42,10 @@ impl RuntimeBundle {
             sidecar_manager,
         } = config;
 
-        let mut restore_runtime = RestoreRuntime::new(database.clone(), uhoh_dir.clone());
+        let mut restore_runtime =
+            RestoreRuntime::new(database.clone(), uhoh_dir.clone(), restore_coordinator);
         if let Some(tx) = event_tx.clone() {
             restore_runtime = restore_runtime.with_event_tx(tx);
-        }
-        if let Some(coordinator) = restore_coordinator {
-            restore_runtime = restore_runtime.with_coordinator(coordinator);
         }
 
         Self(Arc::new(RuntimeBundleInner {
@@ -72,24 +70,12 @@ impl RuntimeBundle {
         self.0.uhoh_dir.clone()
     }
 
-    pub fn config(&self) -> &Config {
-        &self.0.config
-    }
-
-    pub fn config_owned(&self) -> Config {
-        self.0.config.clone()
-    }
-
     pub fn event_tx(&self) -> Option<broadcast::Sender<ServerEvent>> {
         self.0.event_tx.clone()
     }
 
     pub fn restore_runtime(&self) -> RestoreRuntime {
         self.0.restore_runtime.clone()
-    }
-
-    pub fn sidecar_manager(&self) -> SidecarManager {
-        self.0.sidecar_manager.clone()
     }
 
     pub fn snapshot_runtime(&self) -> SnapshotRuntime {

@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use crate::db::{Database, ProjectEntry};
 use crate::events::ServerEvent;
-use crate::restore_runtime::RestoreRuntime;
+use crate::restore::{RestoreBusyError, RestoreRuntime};
 
 #[derive(Debug, Clone)]
 pub struct SnapshotCreateResult {
@@ -19,17 +19,6 @@ pub enum RestoreProjectError {
     Conflict(String),
     InvalidInput(String),
     Internal(anyhow::Error),
-}
-
-impl RestoreProjectError {
-    pub fn message(&self) -> String {
-        match self {
-            Self::NotFound(message) | Self::Conflict(message) | Self::InvalidInput(message) => {
-                message.clone()
-            }
-            Self::Internal(err) => err.to_string(),
-        }
-    }
 }
 
 impl fmt::Display for RestoreProjectError {
@@ -90,7 +79,7 @@ pub fn restore_project_snapshot(
     dry_run: bool,
     target_path: Option<&str>,
 ) -> std::result::Result<crate::restore::RestoreOutcome, RestoreProjectError> {
-    crate::restore_runtime::restore_project(
+    crate::restore::restore_project_with_runtime(
         restore_runtime,
         project,
         crate::restore::RestoreRequest {
@@ -141,7 +130,7 @@ fn classify_restore_error(err: anyhow::Error) -> RestoreProjectError {
         };
     }
 
-    if let Some(typed) = err.downcast_ref::<crate::restore_guards::RestoreBusyError>() {
+    if let Some(typed) = err.downcast_ref::<RestoreBusyError>() {
         return RestoreProjectError::Conflict(typed.to_string());
     }
 

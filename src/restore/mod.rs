@@ -2,6 +2,16 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
+
+pub(crate) mod guards;
+pub(crate) mod runtime;
+
+pub(crate) use self::guards::RestoreBusyError;
+pub(crate) use self::runtime::{
+    is_restore_active, read_restoring_project_hash, restore_marker_active,
+    restore_project_with_runtime, RestoreCoordinator, RestoreRuntime,
+};
 
 use crate::cas;
 use crate::db::{Database, ProjectEntry};
@@ -66,11 +76,12 @@ pub fn restore_project(
     project: &ProjectEntry,
     request: RestoreRequest<'_>,
 ) -> Result<RestoreOutcome> {
-    let runtime = crate::restore_runtime::RestoreRuntime::new(
-        std::sync::Arc::new(database.clone_handle()),
+    let runtime = RestoreRuntime::new(
+        Arc::new(database.clone_handle()),
         uhoh_dir.to_path_buf(),
+        RestoreCoordinator::new(),
     );
-    crate::restore_runtime::restore_project(&runtime, project, request)
+    restore_project_with_runtime(&runtime, project, request)
 }
 
 pub fn restore_symlink_target(content: &[u8], full_path: &Path) -> Result<()> {

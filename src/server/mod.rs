@@ -20,6 +20,7 @@ use tokio::sync::Mutex;
 use crate::config::ServerConfig;
 use crate::db::Database;
 use crate::events::ServerEvent;
+use crate::restore::RestoreCoordinator;
 use crate::runtime_bundle::{RuntimeBundle, RuntimeBundleConfig};
 use crate::subsystem::{SubsystemHealth, SubsystemManager};
 use crate::transport_security::TransportSecurityPolicy;
@@ -31,7 +32,7 @@ pub struct ServerBootstrap {
     pub database: Arc<Database>,
     pub uhoh_dir: PathBuf,
     pub event_tx: broadcast::Sender<ServerEvent>,
-    pub restore_coordinator: crate::restore_runtime::RestoreCoordinator,
+    pub restore_coordinator: RestoreCoordinator,
     pub sidecar_manager: crate::ai::sidecar::SidecarManager,
     pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
 }
@@ -120,7 +121,7 @@ pub async fn start_server(bootstrap: ServerBootstrap) -> Result<tokio::task::Joi
         uhoh_dir: uhoh_dir.clone(),
         config: full_config,
         event_tx: Some(event_tx.clone()),
-        restore_coordinator: Some(restore_coordinator),
+        restore_coordinator,
         sidecar_manager: Some(sidecar_manager),
     });
     let state = AppState {
@@ -350,7 +351,7 @@ mod tests {
             uhoh_dir: temp.path().to_path_buf(),
             config: config.clone(),
             event_tx: Some(event_tx.clone()),
-            restore_coordinator: Some(crate::restore_runtime::RestoreCoordinator::new()),
+            restore_coordinator: crate::restore::RestoreCoordinator::new(),
             sidecar_manager: None,
         });
         let state = AppState {
