@@ -46,6 +46,7 @@ pub fn config_action(uhoh: &Path, action: Option<ConfigAction>) -> Result<()> {
     let config_path = uhoh.join("config.toml");
     match action {
         Some(ConfigAction::Edit) => {
+            let _ = config::Config::load_or_initialize(&config_path)?;
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
             std::process::Command::new(&editor)
                 .arg(&config_path)

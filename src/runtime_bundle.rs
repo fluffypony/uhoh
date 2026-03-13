@@ -3,10 +3,12 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
+use crate::ai::sidecar::SidecarManager;
 use crate::config::Config;
 use crate::db::Database;
 use crate::events::ServerEvent;
 use crate::restore_runtime::{RestoreCoordinator, RestoreRuntime};
+use crate::snapshot::{SnapshotRuntime, SnapshotSettings};
 
 #[derive(Clone)]
 pub struct RuntimeBundle(Arc<RuntimeBundleInner>);
@@ -17,6 +19,7 @@ struct RuntimeBundleInner {
     config: Config,
     event_tx: Option<broadcast::Sender<ServerEvent>>,
     restore_runtime: RestoreRuntime,
+    sidecar_manager: SidecarManager,
 }
 
 pub struct RuntimeBundleConfig {
@@ -25,6 +28,7 @@ pub struct RuntimeBundleConfig {
     pub config: Config,
     pub event_tx: Option<broadcast::Sender<ServerEvent>>,
     pub restore_coordinator: Option<RestoreCoordinator>,
+    pub sidecar_manager: Option<SidecarManager>,
 }
 
 impl RuntimeBundle {
@@ -35,6 +39,7 @@ impl RuntimeBundle {
             config,
             event_tx,
             restore_coordinator,
+            sidecar_manager,
         } = config;
 
         let mut restore_runtime = RestoreRuntime::new(database.clone(), uhoh_dir.clone());
@@ -51,6 +56,7 @@ impl RuntimeBundle {
             config,
             event_tx,
             restore_runtime,
+            sidecar_manager: sidecar_manager.unwrap_or_default(),
         }))
     }
 
@@ -80,5 +86,16 @@ impl RuntimeBundle {
 
     pub fn restore_runtime(&self) -> RestoreRuntime {
         self.0.restore_runtime.clone()
+    }
+
+    pub fn sidecar_manager(&self) -> SidecarManager {
+        self.0.sidecar_manager.clone()
+    }
+
+    pub fn snapshot_runtime(&self) -> SnapshotRuntime {
+        SnapshotRuntime::new(
+            SnapshotSettings::from_config(&self.0.config),
+            self.0.sidecar_manager.clone(),
+        )
     }
 }

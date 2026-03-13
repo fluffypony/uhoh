@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::cas;
-use crate::config::Config;
+use crate::config::{AiConfig, CompactionConfig, Config, StorageConfig, WatchConfig};
 use crate::db::Database;
 use crate::ignore_rules;
 // use crate::db::SnapshotRow; // not used directly here
@@ -29,6 +29,58 @@ pub struct CreateSnapshotRequest<'a> {
     pub trigger: &'a str,
     pub message: Option<&'a str>,
     pub changed_paths: Option<&'a [PathBuf]>,
+}
+
+#[derive(Clone)]
+pub struct SnapshotSettings {
+    pub ai: AiConfig,
+    pub compaction: CompactionConfig,
+    pub storage: StorageConfig,
+    pub watch: WatchConfig,
+}
+
+impl SnapshotSettings {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            ai: config.ai.clone(),
+            compaction: config.compaction.clone(),
+            storage: config.storage.clone(),
+            watch: config.watch.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SnapshotRuntime {
+    settings: SnapshotSettings,
+    sidecar_manager: crate::ai::sidecar::SidecarManager,
+}
+
+impl SnapshotRuntime {
+    pub fn from_config(config: &Config) -> Self {
+        Self::new(
+            SnapshotSettings::from_config(config),
+            crate::ai::sidecar::SidecarManager::new(),
+        )
+    }
+
+    pub fn new(
+        settings: SnapshotSettings,
+        sidecar_manager: crate::ai::sidecar::SidecarManager,
+    ) -> Self {
+        Self {
+            settings,
+            sidecar_manager,
+        }
+    }
+
+    pub fn settings(&self) -> &SnapshotSettings {
+        &self.settings
+    }
+
+    pub fn sidecar_manager(&self) -> &crate::ai::sidecar::SidecarManager {
+        &self.sidecar_manager
+    }
 }
 
 type DeletedManifestEntry = (String, String, u64, bool, cas::StorageMethod);
@@ -62,7 +114,7 @@ struct SnapshotDecision {
 pub fn create_snapshot(
     uhoh_dir: &Path,
     database: &Database,
-    config: &Config,
+    runtime: &SnapshotRuntime,
     request: CreateSnapshotRequest<'_>,
 ) -> Result<Option<u64>> {
     let CreateSnapshotRequest {
@@ -72,11 +124,12 @@ pub fn create_snapshot(
         message,
         changed_paths,
     } = request;
+    let settings = runtime.settings();
     let blob_root = uhoh_dir.join("blobs");
     let prev_files = load_previous_snapshot_files(database, project_hash)?;
     let scan = collect_snapshot_scan(
         database,
-        config,
+        settings,
         project_path,
         changed_paths,
         &prev_files,
@@ -92,13 +145,13 @@ pub fn create_snapshot(
         message,
         scan.deleted_for_manifest.len(),
         prev_files.len(),
-        config,
+        settings,
     );
     let (rowid, snapshot_id) = persist_snapshot(database, project_hash, &decision, &scan)?;
     run_snapshot_post_commit(
         uhoh_dir,
         database,
-        config,
+        runtime,
         project_hash,
         &prev_files,
         rowid,
@@ -112,7 +165,7 @@ pub fn create_snapshot(
 
 fn collect_snapshot_scan(
     database: &Database,
-    config: &Config,
+    settings: &SnapshotSettings,
     project_path: &Path,
     changed_paths: Option<&[PathBuf]>,
     prev_files: &HashMap<String, CachedFileState>,
@@ -122,22 +175,27 @@ fn collect_snapshot_scan(
         if should_use_full_scan_for_changes(paths, project_path, prev_files) {
             return Ok(collect_full_scan(
                 database,
-                config,
+                settings,
                 project_path,
                 prev_files,
                 blob_root,
             ));
         }
-        if let Some(scan) =
-            collect_incremental_scan(database, config, project_path, paths, prev_files, blob_root)?
-        {
+        if let Some(scan) = collect_incremental_scan(
+            database,
+            settings,
+            project_path,
+            paths,
+            prev_files,
+            blob_root,
+        )? {
             return Ok(scan);
         }
     }
 
     Ok(collect_full_scan(
         database,
-        config,
+        settings,
         project_path,
         prev_files,
         blob_root,
@@ -171,7 +229,7 @@ fn should_use_full_scan_for_changes(
 
 fn collect_incremental_scan(
     database: &Database,
-    config: &Config,
+    settings: &SnapshotSettings,
     project_path: &Path,
     paths: &[PathBuf],
     prev_files: &HashMap<String, CachedFileState>,
@@ -194,7 +252,8 @@ fn collect_incremental_scan(
                     continue;
                 }
                 record_current_entry(
-                    database, config, blob_root, prev_files, rel_path, &abs_path, &meta, &mut scan,
+                    database, settings, blob_root, prev_files, rel_path, &abs_path, &meta,
+                    &mut scan,
                 );
                 inserted.insert(rel_path.clone());
             }
@@ -297,7 +356,7 @@ fn carry_forward_unchanged(
 
 fn collect_full_scan(
     database: &Database,
-    config: &Config,
+    settings: &SnapshotSettings,
     project_path: &Path,
     prev_files: &HashMap<String, CachedFileState>,
     blob_root: &Path,
@@ -307,7 +366,7 @@ fn collect_full_scan(
 
     for (rel_path, (abs_path, meta)) in &current_files {
         record_current_entry(
-            database, config, blob_root, prev_files, rel_path, abs_path, meta, &mut scan,
+            database, settings, blob_root, prev_files, rel_path, abs_path, meta, &mut scan,
         );
     }
 
@@ -382,7 +441,7 @@ fn collect_current_files(project_path: &Path) -> HashMap<String, (PathBuf, std::
 
 fn record_current_entry(
     database: &Database,
-    config: &Config,
+    settings: &SnapshotSettings,
     blob_root: &Path,
     prev_files: &HashMap<String, CachedFileState>,
     rel_path: &str,
@@ -407,7 +466,7 @@ fn record_current_entry(
         );
     } else {
         record_file_entry(
-            database, config, blob_root, prev_files, rel_path, abs_path, size, mtime, executable,
+            database, settings, blob_root, prev_files, rel_path, abs_path, size, mtime, executable,
             scan,
         );
     }
@@ -510,7 +569,7 @@ fn record_symlink_entry(
 
 fn record_file_entry(
     database: &Database,
-    config: &Config,
+    settings: &SnapshotSettings,
     blob_root: &Path,
     prev_files: &HashMap<String, CachedFileState>,
     rel_path: &str,
@@ -523,11 +582,11 @@ fn record_file_entry(
     match cas::store_blob_from_file(
         blob_root,
         abs_path,
-        config.storage.max_copy_blob_bytes,
-        config.storage.max_binary_blob_bytes,
-        config.storage.max_text_blob_bytes,
-        cfg!(feature = "compression") && config.storage.compress,
-        config.storage.compress_level,
+        settings.storage.max_copy_blob_bytes,
+        settings.storage.max_binary_blob_bytes,
+        settings.storage.max_text_blob_bytes,
+        cfg!(feature = "compression") && settings.storage.compress,
+        settings.storage.compress_level,
     ) {
         Ok((hash, stored_size, method, bytes_written)) => {
             let is_new_or_changed = prev_files
@@ -578,15 +637,15 @@ fn derive_snapshot_decision(
     message: Option<&str>,
     deleted_count: usize,
     prev_file_count: usize,
-    config: &Config,
+    settings: &SnapshotSettings,
 ) -> SnapshotDecision {
     let prev_count = prev_file_count as u64;
     let trigger = if trigger == "auto"
         && crate::emergency::exceeds_threshold(
             deleted_count,
             prev_count,
-            config.watch.emergency_delete_threshold,
-            config.watch.emergency_delete_min_files,
+            settings.watch.emergency_delete_threshold,
+            settings.watch.emergency_delete_min_files,
         ) {
         let ratio = crate::emergency::deletion_ratio(deleted_count, prev_count);
         tracing::warn!(
@@ -637,7 +696,7 @@ fn persist_snapshot(
 fn run_snapshot_post_commit(
     uhoh_dir: &Path,
     database: &Database,
-    config: &Config,
+    runtime: &SnapshotRuntime,
     project_hash: &str,
     prev_files: &HashMap<String, CachedFileState>,
     rowid: i64,
@@ -656,7 +715,7 @@ fn run_snapshot_post_commit(
     schedule_ai_summary(
         uhoh_dir,
         database,
-        config,
+        runtime,
         project_hash,
         prev_files,
         rowid,
@@ -676,7 +735,12 @@ fn run_snapshot_post_commit(
     );
 
     let total_project_size: u64 = scan.files_for_manifest.iter().map(|file| file.size).sum();
-    enforce_storage_limit(database, total_project_size, project_hash, config)
+    enforce_storage_limit(
+        database,
+        total_project_size,
+        project_hash,
+        runtime.settings(),
+    )
 }
 
 fn index_snapshot_for_search(
@@ -718,7 +782,7 @@ fn update_active_operation_snapshot(
 fn schedule_ai_summary(
     uhoh_dir: &Path,
     database: &Database,
-    config: &Config,
+    runtime: &SnapshotRuntime,
     project_hash: &str,
     prev_files: &HashMap<String, CachedFileState>,
     rowid: i64,
@@ -726,14 +790,14 @@ fn schedule_ai_summary(
     deleted_for_manifest: &[DeletedManifestEntry],
     current_hashes: &HashMap<String, (String, bool)>,
 ) {
-    if !ai::should_run_ai(&config.ai) {
+    if !ai::should_run_ai(&runtime.settings().ai) {
         let _ = database.enqueue_ai_summary(rowid, project_hash);
         return;
     }
 
     let uhoh_dir_cl = uhoh_dir.to_path_buf();
     let db_handle = database.clone_handle();
-    let cfg_cloned = config.clone();
+    let runtime = runtime.clone();
     let files_added: Vec<String> = new_files
         .iter()
         .filter(|path| !prev_files.contains_key(*path))
@@ -750,7 +814,7 @@ fn schedule_ai_summary(
         .collect();
     let diff_chunks = build_ai_diff_chunks(
         uhoh_dir,
-        &cfg_cloned,
+        runtime.settings(),
         prev_files,
         current_hashes,
         &files_modified,
@@ -764,7 +828,8 @@ fn schedule_ai_summary(
         };
         match crate::ai::summary::generate_summary_blocking(
             &uhoh_dir_cl,
-            &cfg_cloned,
+            &runtime.settings().ai,
+            runtime.sidecar_manager(),
             &diff_chunks,
             &files,
         ) {
@@ -779,7 +844,7 @@ fn schedule_ai_summary(
 
 fn build_ai_diff_chunks(
     uhoh_dir: &Path,
-    config: &Config,
+    settings: &SnapshotSettings,
     prev_files: &HashMap<String, CachedFileState>,
     current_hashes: &HashMap<String, (String, bool)>,
     files_modified: &[String],
@@ -787,7 +852,7 @@ fn build_ai_diff_chunks(
     const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024;
 
     let blob_root = uhoh_dir.join("blobs");
-    let max_diff_chars = config.ai.max_context_tokens.saturating_mul(4);
+    let max_diff_chars = settings.ai.max_context_tokens.saturating_mul(4);
     let mut diff_chunks = String::new();
     let mut diff_chars = 0usize;
     let mut diff_truncated = false;
@@ -941,11 +1006,11 @@ fn enforce_storage_limit(
     database: &Database,
     project_size: u64,
     project_hash: &str,
-    config: &Config,
+    settings: &SnapshotSettings,
 ) -> Result<()> {
     let max_blob_size = std::cmp::max(
-        (project_size as f64 * config.storage.storage_limit_fraction) as u64,
-        config.storage.storage_min_bytes,
+        (project_size as f64 * settings.storage.storage_limit_fraction) as u64,
+        settings.storage.storage_min_bytes,
     );
 
     let mut blob_size = database.total_blob_size_for_project(project_hash)?;
@@ -962,7 +1027,7 @@ fn enforce_storage_limit(
 
     // Delete oldest unpinned snapshots until under limit (approximate freed space)
     let emergency_retention =
-        chrono::Duration::hours(config.compaction.emergency_expire_hours as i64);
+        chrono::Duration::hours(settings.compaction.emergency_expire_hours as i64);
     let now = chrono::Utc::now();
     for snap in database.list_snapshots_oldest_first(project_hash)? {
         if blob_size <= max_blob_size {
@@ -1020,7 +1085,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::SystemTime;
 
-    use super::{build_ai_diff_chunks, CachedFileState};
+    use super::{build_ai_diff_chunks, CachedFileState, SnapshotSettings};
     use crate::cas::{self, StorageMethod};
     use crate::config::Config;
 
@@ -1053,10 +1118,11 @@ mod tests {
 
         let mut config = Config::default();
         config.ai.max_context_tokens = 8;
+        let settings = SnapshotSettings::from_config(&config);
 
         let diff = build_ai_diff_chunks(
             temp.path(),
-            &config,
+            &settings,
             &prev_files,
             &current_hashes,
             &["src/lib.rs".to_string()],

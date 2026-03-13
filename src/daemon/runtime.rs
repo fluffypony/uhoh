@@ -113,6 +113,7 @@ struct ForegroundDaemonRuntime {
     config_path: PathBuf,
     config: Config,
     database: Arc<Database>,
+    sidecar_manager: crate::ai::sidecar::SidecarManager,
     server_event_tx: broadcast::Sender<ServerEvent>,
     restore_coordinator: crate::restore_runtime::RestoreCoordinator,
     restore_in_progress: Arc<AtomicBool>,
@@ -143,8 +144,10 @@ impl ForegroundDaemonRuntime {
         let restore_in_progress = restore_coordinator.in_progress_flag();
         let event_ledger =
             EventLedger::new(database.clone()).with_event_publisher(server_event_tx.clone());
+        let sidecar_manager = crate::ai::sidecar::SidecarManager::new();
         let subsystem_manager = start_subsystems(
             &config,
+            sidecar_manager.clone(),
             &database,
             &event_ledger,
             &uhoh_dir,
@@ -159,6 +162,7 @@ impl ForegroundDaemonRuntime {
             &uhoh_dir,
             &server_event_tx,
             &restore_coordinator,
+            sidecar_manager.clone(),
             &subsystem_manager,
         )
         .await?;
@@ -191,6 +195,7 @@ impl ForegroundDaemonRuntime {
             config_path,
             config,
             database,
+            sidecar_manager,
             server_event_tx,
             restore_coordinator,
             restore_in_progress,
@@ -254,11 +259,15 @@ impl ForegroundDaemonRuntime {
     }
 
     async fn process_pending_snapshots(&mut self) {
+        let snapshot_runtime = crate::snapshot::SnapshotRuntime::new(
+            crate::snapshot::SnapshotSettings::from_config(&self.config),
+            self.sidecar_manager.clone(),
+        );
         snapshots::process_pending_snapshots(snapshots::SnapshotProcessCtx {
             uhoh_dir: &self.uhoh_dir,
             database: self.database.clone(),
             states: &mut self.project_states,
-            config: &self.config,
+            snapshot_runtime: &snapshot_runtime,
             event_tx: &self.server_event_tx,
             event_ledger: &self.event_ledger,
             restore_in_progress: &self.restore_in_progress,
@@ -315,7 +324,7 @@ impl ForegroundDaemonRuntime {
 
     async fn shutdown(&mut self) {
         tracing::info!("Shutdown signal received");
-        crate::ai::sidecar::shutdown_global_sidecar();
+        self.sidecar_manager.shutdown();
         if let Some(handle) = self.server_handle.take() {
             handle.abort();
         }
@@ -377,6 +386,7 @@ fn seed_project_states(
 
 async fn start_subsystems(
     config: &Config,
+    sidecar_manager: crate::ai::sidecar::SidecarManager,
     database: &Arc<Database>,
     event_ledger: &EventLedger,
     uhoh_dir: &Path,
@@ -385,7 +395,10 @@ async fn start_subsystems(
     let mut subsystem_manager = SubsystemManager::new(5, Duration::from_secs(600));
     subsystem_manager.register(Box::new(crate::db_guard::DbGuardSubsystem::new()));
     subsystem_manager.register(Box::new(crate::agent::AgentSubsystem::new()));
-    subsystem_manager.register(Box::new(DaemonMaintenanceSubsystem::new(config)));
+    subsystem_manager.register(Box::new(DaemonMaintenanceSubsystem::new(
+        config,
+        sidecar_manager,
+    )));
     let subsystem_manager = Arc::new(Mutex::new(subsystem_manager));
 
     let ctx = SubsystemContext {
@@ -405,6 +418,7 @@ async fn start_server(
     uhoh_dir: &Path,
     server_event_tx: &broadcast::Sender<ServerEvent>,
     restore_coordinator: &crate::restore_runtime::RestoreCoordinator,
+    sidecar_manager: crate::ai::sidecar::SidecarManager,
     subsystem_manager: &Arc<Mutex<SubsystemManager>>,
 ) -> Result<Option<tokio::task::JoinHandle<()>>> {
     if !config.server.enabled {
@@ -418,6 +432,7 @@ async fn start_server(
         uhoh_dir: uhoh_dir.to_path_buf(),
         event_tx: server_event_tx.clone(),
         restore_coordinator: restore_coordinator.clone(),
+        sidecar_manager,
         subsystem_manager: subsystem_manager.clone(),
     })
     .await

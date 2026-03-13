@@ -1,10 +1,29 @@
 use anyhow::Result;
 use std::time::Duration;
 
-use crate::config::Config;
+use crate::config::{AiConfig, CompactionConfig, Config, SidecarUpdateConfig, UpdateConfig};
 use crate::db::Database;
 use crate::events::{publish_event, ServerEvent};
-use crate::subsystem::{MaintenanceContext, Subsystem, SubsystemContext, SubsystemHealth};
+use crate::subsystem::{Subsystem, SubsystemContext, SubsystemHealth};
+
+#[derive(Clone)]
+struct MaintenanceSettings {
+    ai: AiConfig,
+    compaction: CompactionConfig,
+    sidecar_update: SidecarUpdateConfig,
+    update: UpdateConfig,
+}
+
+impl MaintenanceSettings {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            ai: config.ai.clone(),
+            compaction: config.compaction.clone(),
+            sidecar_update: config.sidecar_update.clone(),
+            update: config.update.clone(),
+        }
+    }
+}
 
 pub(super) struct DaemonMaintenanceSubsystem {
     compaction_index: usize,
@@ -13,12 +32,16 @@ pub(super) struct DaemonMaintenanceSubsystem {
     sidecar_check_interval: std::time::Duration,
     last_sidecar_check: Option<std::time::Instant>,
     vacuum_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    mlx_update_state: crate::ai::mlx::MlxAutoUpdateState,
+    sidecar_manager: crate::ai::sidecar::SidecarManager,
+    mlx_update_state: crate::ai::mlx_update::MlxAutoUpdateState,
     last_failure: Option<String>,
 }
 
 impl DaemonMaintenanceSubsystem {
-    pub(super) fn new(config: &Config) -> Self {
+    pub(super) fn new(
+        config: &Config,
+        sidecar_manager: crate::ai::sidecar::SidecarManager,
+    ) -> Self {
         Self {
             compaction_index: 0,
             last_backup: None,
@@ -30,12 +53,13 @@ impl DaemonMaintenanceSubsystem {
             ),
             last_sidecar_check: None,
             vacuum_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            mlx_update_state: crate::ai::mlx::MlxAutoUpdateState::default(),
+            sidecar_manager,
+            mlx_update_state: crate::ai::mlx_update::MlxAutoUpdateState::default(),
             last_failure: None,
         }
     }
 
-    async fn run_tick(&mut self, ctx: &MaintenanceContext) {
+    async fn run_tick(&mut self, ctx: &SubsystemContext, settings: &MaintenanceSettings) {
         let mut tick_failure: Option<String> = None;
         let db_projects = {
             let db = ctx.database.clone();
@@ -61,7 +85,7 @@ impl DaemonMaintenanceSubsystem {
         if !db_projects.is_empty() {
             let db_path = ctx.uhoh_dir.join("uhoh.db");
             let gc_uhoh_dir = ctx.uhoh_dir.clone();
-            let cfg = ctx.config.compaction.clone();
+            let cfg = settings.compaction.clone();
             let idx = self.compaction_index;
             let vacuum_flag = self.vacuum_in_flight.clone();
             let projects = db_projects.clone();
@@ -118,7 +142,7 @@ impl DaemonMaintenanceSubsystem {
         }
 
         self.backup_interval =
-            std::time::Duration::from_secs(ctx.config.update.check_interval_hours * 3600);
+            std::time::Duration::from_secs(settings.update.check_interval_hours * 3600);
         let do_backup = self
             .last_backup
             .map(|t| t.elapsed() >= self.backup_interval)
@@ -162,19 +186,20 @@ impl DaemonMaintenanceSubsystem {
 
         let mut tick_sys = sysinfo::System::new();
         tick_sys.refresh_memory();
-        if crate::ai::should_run_ai_with(&ctx.config.ai, &tick_sys) {
+        if crate::ai::should_run_ai_with(&settings.ai, &tick_sys) {
             crate::ai::queue::process_summary_queue(
                 &ctx.uhoh_dir,
                 &ctx.database,
-                &ctx.config,
+                &settings.ai,
+                &self.sidecar_manager,
                 &ctx.server_event_tx,
             )
             .await;
         }
 
         self.sidecar_check_interval =
-            std::time::Duration::from_secs(ctx.config.sidecar_update.check_interval_hours * 3600);
-        if ctx.config.sidecar_update.auto_update && ctx.config.ai.enabled {
+            std::time::Duration::from_secs(settings.sidecar_update.check_interval_hours * 3600);
+        if settings.sidecar_update.auto_update && settings.ai.enabled {
             let should_check = self
                 .last_sidecar_check
                 .map(|last| last.elapsed() >= self.sidecar_check_interval)
@@ -182,21 +207,21 @@ impl DaemonMaintenanceSubsystem {
             if should_check {
                 self.last_sidecar_check = Some(std::time::Instant::now());
                 let sidecar_dir = ctx.uhoh_dir.join("sidecar");
-                let repo = ctx.config.sidecar_update.llama_repo.clone();
-                let pin = ctx.config.sidecar_update.pin_version.clone();
+                let repo = settings.sidecar_update.llama_repo.clone();
+                let pin = settings.sidecar_update.pin_version.clone();
                 let event_tx = ctx.server_event_tx.clone();
+                let sidecar_manager = self.sidecar_manager.clone();
                 tokio::task::spawn_blocking(move || {
-                    let before = crate::ai::llama::read_manifest(&sidecar_dir).map(|m| m.version);
-                    match crate::ai::llama::run_update_check(
+                    let before =
+                        crate::ai::sidecar_update::read_manifest(&sidecar_dir).map(|m| m.version);
+                    match crate::ai::sidecar_update::run_update_check(
                         &sidecar_dir,
                         &repo,
                         pin.as_deref(),
-                        || {
-                            crate::ai::sidecar::shutdown_global_sidecar();
-                        },
+                        move || sidecar_manager.shutdown(),
                     ) {
                         Ok(true) => {
-                            let after = crate::ai::llama::read_manifest(&sidecar_dir)
+                            let after = crate::ai::sidecar_update::read_manifest(&sidecar_dir)
                                 .map(|m| m.version)
                                 .unwrap_or_else(|| "unknown".to_string());
                             publish_event(
@@ -214,11 +239,12 @@ impl DaemonMaintenanceSubsystem {
             }
         }
 
-        if let Err(err) = crate::ai::mlx::maybe_run_mlx_auto_update(
+        if let Err(err) = crate::ai::mlx_update::maybe_run_mlx_auto_update(
             &mut self.mlx_update_state,
-            &ctx.config.ai,
+            &settings.ai,
             &ctx.uhoh_dir,
             Some(&ctx.server_event_tx),
+            &self.sidecar_manager,
         )
         .await
         {
@@ -249,13 +275,13 @@ impl Subsystem for DaemonMaintenanceSubsystem {
         shutdown: tokio_util::sync::CancellationToken,
         ctx: SubsystemContext,
     ) -> Result<()> {
-        let ctx = ctx.maintenance_context();
         let mut tick_interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = tick_interval.tick() => {
-                    self.run_tick(&ctx).await;
+                    let settings = MaintenanceSettings::from_config(&ctx.config);
+                    self.run_tick(&ctx, &settings).await;
                 }
             }
         }
@@ -283,7 +309,8 @@ mod tests {
     use super::DaemonMaintenanceSubsystem;
     use crate::config::Config;
     use crate::db::Database;
-    use crate::subsystem::{MaintenanceContext, Subsystem, SubsystemHealth};
+    use crate::event_ledger::EventLedger;
+    use crate::subsystem::{Subsystem, SubsystemContext, SubsystemHealth};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -295,15 +322,18 @@ mod tests {
         config.ai.enabled = false;
         config.sidecar_update.auto_update = false;
 
-        let mut subsystem = DaemonMaintenanceSubsystem::new(&config);
-        let ctx = MaintenanceContext {
-            database,
+        let mut subsystem =
+            DaemonMaintenanceSubsystem::new(&config, crate::ai::sidecar::SidecarManager::new());
+        let ctx = SubsystemContext {
+            database: database.clone(),
+            event_ledger: EventLedger::new(database),
             config: config.clone(),
             uhoh_dir: temp.path().to_path_buf(),
             server_event_tx,
         };
 
-        subsystem.run_tick(&ctx).await;
+        let settings = super::MaintenanceSettings::from_config(&config);
+        subsystem.run_tick(&ctx, &settings).await;
 
         let backups = std::fs::read_dir(temp.path().join("backups"))
             .expect("backup dir")

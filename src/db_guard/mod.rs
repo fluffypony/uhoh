@@ -84,7 +84,6 @@ impl Subsystem for DbGuardSubsystem {
     }
 
     async fn run(&mut self, shutdown: CancellationToken, ctx: SubsystemContext) -> Result<()> {
-        let ctx = ctx.db_guard_context();
         self.shutdown = Some(shutdown.clone());
         if !ctx.config.db_guard.enabled {
             tracing::info!("db_guard disabled by config");

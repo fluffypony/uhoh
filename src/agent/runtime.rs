@@ -432,7 +432,6 @@ impl Subsystem for AgentSubsystem {
     }
 
     async fn run(&mut self, shutdown: CancellationToken, ctx: SubsystemContext) -> Result<()> {
-        let ctx = ctx.agent_context();
         if !ctx.config.agent.enabled {
             tracing::info!("agent monitor disabled by config");
             shutdown.cancelled().await;

@@ -185,7 +185,7 @@ fn tool_create_snapshot(context: &RuntimeBundle, args: Value) -> Result<Value, M
     let result = crate::project_service::create_project_snapshot(
         context.uhoh_dir(),
         database.as_ref(),
-        context.config(),
+        &context.snapshot_runtime(),
         &project,
         "mcp",
         message,
@@ -278,7 +278,7 @@ fn tool_restore_snapshot(context: &RuntimeBundle, args: Value) -> Result<Value, 
 
     let outcome = crate::project_service::restore_project_snapshot(
         &context.restore_runtime(),
-        context.config(),
+        &context.snapshot_runtime(),
         &project,
         &snapshot_id,
         dry_run,

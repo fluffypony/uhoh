@@ -57,10 +57,11 @@ pub fn add(uhoh: &Path, database: &db::Database, path: Option<String>) -> Result
     println!("Registered: {}", canonical.display());
 
     let cfg = config::Config::load(&uhoh.join("config.toml"))?;
+    let snapshot_runtime = snapshot::SnapshotRuntime::from_config(&cfg);
     snapshot::create_snapshot(
         uhoh,
         database,
-        &cfg,
+        &snapshot_runtime,
         snapshot::CreateSnapshotRequest {
             project_hash: &project_hash,
             project_path: &canonical,
@@ -189,10 +190,11 @@ pub fn commit(
         .context("Not registered")?;
     let trigger = trigger.unwrap_or_else(|| "manual".to_string());
     let cfg = config::Config::load(&uhoh.join("config.toml"))?;
+    let snapshot_runtime = snapshot::SnapshotRuntime::from_config(&cfg);
     snapshot::create_snapshot(
         uhoh,
         database,
-        &cfg,
+        &snapshot_runtime,
         snapshot::CreateSnapshotRequest {
             project_hash: &project.hash,
             project_path: &project_path,
@@ -215,6 +217,7 @@ pub fn restore_snapshot(
 ) -> Result<()> {
     let project = resolve_target_project(database, target.as_deref())?;
     let cfg = config::Config::load(&uhoh.join("config.toml"))?;
+    let snapshot_runtime = snapshot::SnapshotRuntime::from_config(&cfg);
     let pre_restore_message = format!("Before restore to {id}");
     let confirm_large_delete = |count| confirm_restore_delete(count);
     let outcome = restore::restore_project(
@@ -229,7 +232,7 @@ pub fn restore_snapshot(
             pre_restore_snapshot: Some(restore::PreRestoreSnapshot {
                 trigger: "pre-restore",
                 message: Some(pre_restore_message),
-                config: &cfg,
+                snapshot_runtime: &snapshot_runtime,
             }),
             confirm_large_delete: Some(&confirm_large_delete),
         },

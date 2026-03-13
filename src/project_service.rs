@@ -55,7 +55,7 @@ impl std::error::Error for RestoreProjectError {
 pub fn create_project_snapshot(
     uhoh_dir: &Path,
     database: &Database,
-    config: &crate::config::Config,
+    snapshot_runtime: &crate::snapshot::SnapshotRuntime,
     project: &ProjectEntry,
     trigger: &str,
     message: Option<&str>,
@@ -63,7 +63,7 @@ pub fn create_project_snapshot(
     let snapshot_id = crate::snapshot::create_snapshot(
         uhoh_dir,
         database,
-        config,
+        snapshot_runtime,
         crate::snapshot::CreateSnapshotRequest {
             project_hash: &project.hash,
             project_path: Path::new(&project.current_path),
@@ -84,7 +84,7 @@ pub fn create_project_snapshot(
 
 pub fn restore_project_snapshot(
     restore_runtime: &RestoreRuntime,
-    config: &crate::config::Config,
+    snapshot_runtime: &crate::snapshot::SnapshotRuntime,
     project: &ProjectEntry,
     snapshot_id: &str,
     dry_run: bool,
@@ -101,7 +101,7 @@ pub fn restore_project_snapshot(
             pre_restore_snapshot: Some(crate::restore::PreRestoreSnapshot {
                 trigger: "pre-restore",
                 message: Some(format!("Before restore to {snapshot_id}")),
-                config,
+                snapshot_runtime,
             }),
             confirm_large_delete: None,
         },

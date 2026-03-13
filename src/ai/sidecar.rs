@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
-use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -42,9 +41,7 @@ fn find_sidecar_binary(uhoh_dir: &Path) -> Result<PathBuf> {
     )
 }
 
-// ===== Persistent global sidecar with idle shutdown =====
-
-pub(crate) struct GlobalSidecar {
+struct ManagedSidecar {
     child: Child,
     port: u16,
     last_used: Instant,
@@ -53,194 +50,200 @@ pub(crate) struct GlobalSidecar {
     ctx_tokens: u64,
 }
 
-pub(crate) static GLOBAL_SIDECAR: Lazy<Mutex<Option<GlobalSidecar>>> =
-    Lazy::new(|| Mutex::new(None));
-static SIDECAR_IDLE_SECS: AtomicU64 = AtomicU64::new(300);
-static SIDECAR_MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
+struct SidecarManagerInner {
+    state: Mutex<Option<ManagedSidecar>>,
+    idle_secs: AtomicU64,
+    monitor_started: AtomicBool,
+}
 
-/// Lock the global sidecar state.
-///
-/// Uses `std::sync::Mutex` (not `tokio::sync::Mutex`) because all callers run from
-/// `spawn_blocking` threads — never from async task context. This is safe because
-/// blocking a dedicated threadpool thread doesn't stall the async runtime.
-/// On poisoning, the lock is recovered with a warning.
-fn lock_global_sidecar() -> std::sync::MutexGuard<'static, Option<GlobalSidecar>> {
-    match GLOBAL_SIDECAR.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            tracing::warn!("GLOBAL_SIDECAR mutex poisoned, recovering state");
-            poisoned.into_inner()
+impl Drop for SidecarManagerInner {
+    fn drop(&mut self) {
+        match self.state.get_mut() {
+            Ok(state) => shutdown_sidecar(state),
+            Err(poisoned) => shutdown_sidecar(poisoned.into_inner()),
         }
     }
 }
 
-pub fn sidecar_running() -> bool {
-    lock_global_sidecar().is_some()
+#[derive(Clone)]
+pub struct SidecarManager(Arc<SidecarManagerInner>);
+
+impl Default for SidecarManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-fn ensure_idle_monitor_thread() {
-    if SIDECAR_MONITOR_STARTED
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return;
+impl SidecarManager {
+    pub fn new() -> Self {
+        Self(Arc::new(SidecarManagerInner {
+            state: Mutex::new(None),
+            idle_secs: AtomicU64::new(300),
+            monitor_started: AtomicBool::new(false),
+        }))
     }
 
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(1));
-        let idle_secs = SIDECAR_IDLE_SECS.load(Ordering::SeqCst).max(60);
+    pub fn sidecar_running(&self) -> bool {
+        self.lock_state().is_some()
+    }
 
-        let mut kill = false;
+    pub fn get_or_spawn_port_with_ctx(
+        &self,
+        model_path: &Path,
+        uhoh_dir: &Path,
+        idle_shutdown_secs: u64,
+        ctx_tokens: u64,
+    ) -> Result<u16> {
+        let requested_model_path = model_path.to_path_buf();
+        let requested_backend = detect_backend(uhoh_dir)?;
+        let requested_backend_key = requested_backend.identity_key();
+
         {
-            let guard = lock_global_sidecar();
-            if let Some(ref gs) = *guard {
-                if gs.last_used.elapsed().as_secs() >= idle_secs {
-                    kill = true;
+            let mut guard = self.lock_state();
+            if let Some(ref mut sidecar) = *guard {
+                let config_matches = sidecar.model_path == requested_model_path
+                    && sidecar.backend_key == requested_backend_key
+                    && sidecar.ctx_tokens == ctx_tokens;
+                if !config_matches {
+                    shutdown_sidecar(&mut guard);
                 }
             }
         }
 
-        if kill {
-            let mut guard = lock_global_sidecar();
-            if let Some(mut gs) = guard.take() {
-                let _ = gs.child.kill();
-                let _ = gs.child.wait();
-            }
-        }
-    });
-}
-
-/// Get or spawn a persistent sidecar and return its port.
-pub fn get_or_spawn_port_with_ctx(
-    model_path: &Path,
-    uhoh_dir: &Path,
-    idle_shutdown_secs: u64,
-    ctx_tokens: u64,
-) -> Result<u16> {
-    let requested_model_path = model_path.to_path_buf();
-    let requested_backend = detect_backend(uhoh_dir)?;
-    let requested_backend_key = requested_backend.identity_key();
-
-    // If a sidecar is running with different model/backend/context config, restart it.
-    {
-        let mut guard = lock_global_sidecar();
-        if let Some(ref mut gs) = *guard {
-            let config_matches = gs.model_path == requested_model_path
-                && gs.backend_key == requested_backend_key
-                && gs.ctx_tokens == ctx_tokens;
-            if !config_matches {
-                let _ = gs.child.kill();
-                let _ = gs.child.wait();
-                *guard = None;
-            }
-        }
-    }
-
-    // Fast path: if child alive, update last_used and return
-    {
-        let mut guard = lock_global_sidecar();
-        if let Some(ref mut gs) = *guard {
-            // Try a non-blocking check by waiting with zero timeout
-            if let Ok(opt) = gs.child.try_wait() {
-                if opt.is_none() {
-                    gs.last_used = Instant::now();
-                    return Ok(gs.port);
-                }
-                // else: child exited, reset
-                *guard = None;
-            } else {
-                // assume dead and reset
-                *guard = None;
-            }
-        }
-    }
-
-    // Spawn new sidecar
-    let backend = requested_backend;
-    // Bind to port 0, read assigned port, release, and pass to subprocess.
-    // Inherent TOCTOU gap mitigated by retrying up to 5 times.
-    let (child, port) = {
-        let mut last_err: Option<anyhow::Error> = None;
-        let mut out: Option<(Child, u16)> = None;
-        for _ in 0..5 {
-            // Bind to port 0 to get an OS-assigned ephemeral port, then release.
-            // TOCTOU: another process could claim the port between release and sidecar bind.
-            // We retry up to 5 times to mitigate this. fd-passing would eliminate the race
-            // but llama-server/mlx_lm.server don't support it.
-            let ephemeral_port = match std::net::TcpListener::bind("127.0.0.1:0") {
-                Ok(listener) => {
-                    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
-                    drop(listener);
-                    port
-                }
-                Err(_) => {
-                    last_err = Some(anyhow::anyhow!("Failed to bind ephemeral port"));
-                    continue;
-                }
-            };
-            if ephemeral_port == 0 {
-                last_err = Some(anyhow::anyhow!("OS returned port 0"));
-                continue;
-            }
-            match spawn_backend(&backend, model_path, uhoh_dir, ephemeral_port, ctx_tokens) {
-                Ok((mut child, bound_port)) => {
-                    // Scale timeout based on model file size
-                    let model_size_gb = std::fs::metadata(model_path)
-                        .map(|m| m.len() / (1024 * 1024 * 1024))
-                        .unwrap_or(0);
-                    let timeout = Duration::from_secs(30 + model_size_gb);
-                    match wait_for_ready_blocking(bound_port, timeout, &mut child) {
-                        Ok(()) => {
-                            out = Some((child, bound_port));
-                            break;
-                        }
-                        Err(e) => {
-                            last_err = Some(e);
-                            let _ = child.kill();
-                            let _ = child.wait();
-                        }
+        {
+            let mut guard = self.lock_state();
+            if let Some(ref mut sidecar) = *guard {
+                if let Ok(status) = sidecar.child.try_wait() {
+                    if status.is_none() {
+                        sidecar.last_used = Instant::now();
+                        return Ok(sidecar.port);
                     }
-                }
-                Err(e) => {
-                    last_err = Some(e);
-                    continue;
+                    *guard = None;
+                } else {
+                    *guard = None;
                 }
             }
         }
-        match out {
-            Some(v) => v,
-            None => {
-                return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Failed to spawn sidecar")))
-            }
-        }
-    };
 
-    // Store globally and start idle watcher thread
-    {
-        let mut guard = lock_global_sidecar();
-        *guard = Some(GlobalSidecar {
-            child,
-            port,
-            last_used: Instant::now(),
-            model_path: requested_model_path,
-            backend_key: requested_backend_key,
-            ctx_tokens,
+        let backend = requested_backend;
+        let (child, port) = spawn_sidecar_process(&backend, model_path, uhoh_dir, ctx_tokens)?;
+
+        {
+            let mut guard = self.lock_state();
+            *guard = Some(ManagedSidecar {
+                child,
+                port,
+                last_used: Instant::now(),
+                model_path: requested_model_path,
+                backend_key: requested_backend_key,
+                ctx_tokens,
+            });
+        }
+
+        self.0
+            .idle_secs
+            .store(idle_shutdown_secs.max(60), Ordering::SeqCst);
+        self.ensure_idle_monitor_thread();
+        Ok(port)
+    }
+
+    pub fn shutdown(&self) {
+        let mut guard = self.lock_state();
+        shutdown_sidecar(&mut guard);
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, Option<ManagedSidecar>> {
+        match self.0.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("SidecarManager mutex poisoned, recovering state");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn ensure_idle_monitor_thread(&self) {
+        if self
+            .0
+            .monitor_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+
+        let manager = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let idle_secs = manager.0.idle_secs.load(Ordering::SeqCst).max(60);
+            let should_shutdown = {
+                let guard = manager.lock_state();
+                guard
+                    .as_ref()
+                    .map(|sidecar| sidecar.last_used.elapsed().as_secs() >= idle_secs)
+                    .unwrap_or(false)
+            };
+            if should_shutdown {
+                manager.shutdown();
+            }
         });
     }
-
-    let idle = idle_shutdown_secs.max(60);
-    SIDECAR_IDLE_SECS.store(idle, Ordering::SeqCst);
-    ensure_idle_monitor_thread();
-
-    Ok(port)
 }
 
-/// Shutdown and clean up the global sidecar if running.
-pub fn shutdown_global_sidecar() {
-    let mut guard = lock_global_sidecar();
-    if let Some(mut gs) = guard.take() {
-        let _ = gs.child.kill();
-        let _ = gs.child.wait();
+fn spawn_sidecar_process(
+    backend: &Backend,
+    model_path: &Path,
+    uhoh_dir: &Path,
+    ctx_tokens: u64,
+) -> Result<(Child, u16)> {
+    let mut last_err: Option<anyhow::Error> = None;
+    let mut out: Option<(Child, u16)> = None;
+    for _ in 0..5 {
+        let ephemeral_port = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => {
+                let port = listener.local_addr().map(|addr| addr.port()).unwrap_or(0);
+                drop(listener);
+                port
+            }
+            Err(_) => {
+                last_err = Some(anyhow::anyhow!("Failed to bind ephemeral port"));
+                continue;
+            }
+        };
+        if ephemeral_port == 0 {
+            last_err = Some(anyhow::anyhow!("OS returned port 0"));
+            continue;
+        }
+
+        match spawn_backend(backend, model_path, uhoh_dir, ephemeral_port, ctx_tokens) {
+            Ok((mut child, bound_port)) => {
+                let model_size_gb = std::fs::metadata(model_path)
+                    .map(|meta| meta.len() / (1024 * 1024 * 1024))
+                    .unwrap_or(0);
+                let timeout = Duration::from_secs(30 + model_size_gb);
+                match wait_for_ready_blocking(bound_port, timeout, &mut child) {
+                    Ok(()) => {
+                        out = Some((child, bound_port));
+                        break;
+                    }
+                    Err(err) => {
+                        last_err = Some(err);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+            }
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    out.ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("Failed to spawn sidecar")))
+}
+
+fn shutdown_sidecar(sidecar: &mut Option<ManagedSidecar>) {
+    if let Some(mut sidecar) = sidecar.take() {
+        let _ = sidecar.child.kill();
+        let _ = sidecar.child.wait();
     }
 }
 

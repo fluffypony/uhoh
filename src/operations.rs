@@ -71,6 +71,7 @@ pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) ->
             completed.label
         );
         let cfg = crate::config::Config::load(&uhoh_dir.join("config.toml"))?;
+        let snapshot_runtime = crate::snapshot::SnapshotRuntime::from_config(&cfg);
         crate::restore::restore_project(
             uhoh_dir,
             database,
@@ -83,7 +84,7 @@ pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) ->
                 pre_restore_snapshot: Some(crate::restore::PreRestoreSnapshot {
                     trigger: "pre-restore",
                     message: Some(format!("Before restore to {id_str}")),
-                    config: &cfg,
+                    snapshot_runtime: &snapshot_runtime,
                 }),
                 confirm_large_delete: None,
             },

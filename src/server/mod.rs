@@ -32,6 +32,7 @@ pub struct ServerBootstrap {
     pub uhoh_dir: PathBuf,
     pub event_tx: broadcast::Sender<ServerEvent>,
     pub restore_coordinator: crate::restore_runtime::RestoreCoordinator,
+    pub sidecar_manager: crate::ai::sidecar::SidecarManager,
     pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
 }
 
@@ -92,6 +93,7 @@ pub async fn start_server(bootstrap: ServerBootstrap) -> Result<tokio::task::Joi
         uhoh_dir,
         event_tx,
         restore_coordinator,
+        sidecar_manager,
         subsystem_manager,
     } = bootstrap;
     // Reuse existing token if present, only generate on first run
@@ -119,6 +121,7 @@ pub async fn start_server(bootstrap: ServerBootstrap) -> Result<tokio::task::Joi
         config: full_config,
         event_tx: Some(event_tx.clone()),
         restore_coordinator: Some(restore_coordinator),
+        sidecar_manager: Some(sidecar_manager),
     });
     let state = AppState {
         api: ApiState {
@@ -348,6 +351,7 @@ mod tests {
             config: config.clone(),
             event_tx: Some(event_tx.clone()),
             restore_coordinator: Some(crate::restore_runtime::RestoreCoordinator::new()),
+            sidecar_manager: None,
         });
         let state = AppState {
             api: ApiState {

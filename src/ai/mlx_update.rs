@@ -47,10 +47,11 @@ pub async fn maybe_run_mlx_auto_update(
     config: &AiConfig,
     uhoh_dir: &std::path::Path,
     event_tx: Option<&tokio::sync::broadcast::Sender<ServerEvent>>,
+    sidecar_manager: &crate::ai::sidecar::SidecarManager,
 ) -> Result<()> {
     // MLX only works on Apple Silicon macOS
     if cfg!(not(all(target_os = "macos", target_arch = "aarch64"))) {
-        let _ = (state, config, uhoh_dir, event_tx);
+        let _ = (state, config, uhoh_dir, event_tx, sidecar_manager);
         return Ok(());
     }
 
@@ -68,7 +69,7 @@ pub async fn maybe_run_mlx_auto_update(
     }
     ensure_venv(&venv_dir, &config.mlx).await?;
 
-    if crate::ai::sidecar::sidecar_running() {
+    if sidecar_manager.sidecar_running() {
         emit_mlx_failed(
             event_tx,
             "mlx_update_skipped",
@@ -95,7 +96,7 @@ pub async fn maybe_run_mlx_auto_update(
 }
 
 fn resolve_venv_path(cfg: &MlxConfig, uhoh_dir: &std::path::Path) -> PathBuf {
-    if let Some(rest) = cfg.mlx_path_from_home() {
+    if let Some(rest) = configured_venv_path(cfg) {
         return if rest.is_absolute() {
             rest
         } else {
@@ -103,6 +104,17 @@ fn resolve_venv_path(cfg: &MlxConfig, uhoh_dir: &std::path::Path) -> PathBuf {
         };
     }
     uhoh_dir.join("venv").join("mlx")
+}
+
+fn configured_venv_path(cfg: &MlxConfig) -> Option<PathBuf> {
+    let raw = cfg.venv_path.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(stripped) = raw.strip_prefix("~/") {
+        return dirs::home_dir().map(|home| home.join(stripped));
+    }
+    Some(PathBuf::from(raw))
 }
 
 async fn ensure_venv(venv_dir: &std::path::Path, cfg: &MlxConfig) -> Result<()> {
@@ -319,21 +331,4 @@ async fn rollback_to_version(
         anyhow::bail!("mlx-lm rollback failed");
     }
     Ok(())
-}
-
-trait MlxConfigExt {
-    fn mlx_path_from_home(&self) -> Option<PathBuf>;
-}
-
-impl MlxConfigExt for MlxConfig {
-    fn mlx_path_from_home(&self) -> Option<PathBuf> {
-        let raw = self.venv_path.trim();
-        if raw.is_empty() {
-            return None;
-        }
-        if let Some(stripped) = raw.strip_prefix("~/") {
-            return dirs::home_dir().map(|h| h.join(stripped));
-        }
-        Some(PathBuf::from(raw))
-    }
 }

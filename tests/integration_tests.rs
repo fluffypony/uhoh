@@ -350,12 +350,13 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
     db.add_project("emrg1", project_dir.to_str().unwrap())
         .unwrap();
     let cfg = uhoh::config::Config::default();
+    let snapshot_runtime = uhoh::snapshot::SnapshotRuntime::from_config(&cfg);
 
     // First snapshot captures all 20 files
     let snap1 = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        &cfg,
+        &snapshot_runtime,
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "emrg1",
             project_path: &project_dir,
@@ -376,7 +377,7 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
     let snap2 = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        &cfg,
+        &snapshot_runtime,
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "emrg1",
             project_path: &project_dir,
@@ -419,11 +420,12 @@ fn test_sub_threshold_no_emergency_upgrade() {
     db.add_project("emrg2", project_dir.to_str().unwrap())
         .unwrap();
     let cfg = uhoh::config::Config::default();
+    let snapshot_runtime = uhoh::snapshot::SnapshotRuntime::from_config(&cfg);
 
     let _ = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        &cfg,
+        &snapshot_runtime,
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "emrg2",
             project_path: &project_dir,
@@ -441,7 +443,7 @@ fn test_sub_threshold_no_emergency_upgrade() {
     let snap2 = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        &cfg,
+        &snapshot_runtime,
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "emrg2",
             project_path: &project_dir,
@@ -632,12 +634,13 @@ fn test_fast_path_directory_deletion_fallback() {
     db.add_project("dirtest", project_dir.to_str().unwrap())
         .unwrap();
     let cfg = uhoh::config::Config::default();
+    let snapshot_runtime = uhoh::snapshot::SnapshotRuntime::from_config(&cfg);
 
     // Take initial snapshot
     let _ = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        &cfg,
+        &snapshot_runtime,
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "dirtest",
             project_path: &project_dir,
@@ -656,7 +659,7 @@ fn test_fast_path_directory_deletion_fallback() {
     let snap2 = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        &cfg,
+        &snapshot_runtime,
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "dirtest",
             project_path: &project_dir,
@@ -698,12 +701,13 @@ fn test_restore_sets_and_clears_restore_marker_file() {
     db.add_project("restmark", project_dir.to_str().unwrap())
         .unwrap();
     let cfg = uhoh::config::Config::default();
+    let snapshot_runtime = uhoh::snapshot::SnapshotRuntime::from_config(&cfg);
 
     // Initial snapshot
     let snap = uhoh::snapshot::create_snapshot(
         &uhoh_dir,
         &db,
-        &cfg,
+        &snapshot_runtime,
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "restmark",
             project_path: &project_dir,
@@ -731,7 +735,7 @@ fn test_restore_sets_and_clears_restore_marker_file() {
             pre_restore_snapshot: Some(uhoh::restore::PreRestoreSnapshot {
                 trigger: "pre-restore",
                 message: Some(format!("Before restore to {snap_id}")),
-                config: &cfg,
+                snapshot_runtime: &snapshot_runtime,
             }),
             confirm_large_delete: None,
         },

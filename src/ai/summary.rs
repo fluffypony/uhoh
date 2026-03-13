@@ -45,12 +45,13 @@ pub fn append_diff_chunk(
 /// Blocking generator that spawns the sidecar if needed and queries it for a short summary.
 pub fn generate_summary_blocking(
     uhoh_dir: &std::path::Path,
-    config: &crate::config::Config,
+    ai_config: &crate::config::AiConfig,
+    sidecar_manager: &crate::ai::sidecar::SidecarManager,
     diff_text: &str,
     files: &FileChangeSummary,
 ) -> Result<String> {
     // Cap to model/server safe upper bound to prevent runaway contexts
-    let capped_tokens = config.ai.max_context_tokens;
+    let capped_tokens = ai_config.max_context_tokens;
     // Truncate diff to configured max context (rough 4 chars/token) with UTF-8 boundary safety
     let max_chars = capped_tokens.saturating_mul(4);
     let truncated = if diff_text.len() > max_chars {
@@ -64,7 +65,7 @@ pub fn generate_summary_blocking(
     };
 
     // Choose a model tier using centralized selector
-    let Some(model) = crate::ai::llama::select_model(&config.ai) else {
+    let Some(model) = crate::ai::models::select_model(ai_config) else {
         tracing::warn!("No suitable AI model tier for available RAM; skipping summary generation");
         return Ok(String::new());
     };
@@ -77,7 +78,7 @@ pub fn generate_summary_blocking(
         // MLX doesn't use the local GGUF; provide the filename for sidecar mapping
         uhoh_dir.join("models").join(&model.filename)
     } else {
-        match crate::ai::llama::ensure_model_downloaded(uhoh_dir, &model) {
+        match crate::ai::models::ensure_model_downloaded(uhoh_dir, &model) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("Cannot download model {}: {}", model.name, e);
@@ -88,10 +89,10 @@ pub fn generate_summary_blocking(
 
     // Spawn or reuse sidecar
     // Pass through context size cap so sidecar uses a consistent ctx-size
-    let port = crate::ai::sidecar::get_or_spawn_port_with_ctx(
+    let port = sidecar_manager.get_or_spawn_port_with_ctx(
         &model_path,
         uhoh_dir,
-        config.ai.idle_shutdown_secs,
+        ai_config.idle_shutdown_secs,
         capped_tokens as u64,
     )?;
 

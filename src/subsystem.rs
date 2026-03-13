@@ -38,58 +38,9 @@ pub struct SubsystemContext {
     pub server_event_tx: tokio::sync::broadcast::Sender<ServerEvent>,
 }
 
-#[derive(Clone)]
-pub struct AgentContext {
-    pub database: Arc<Database>,
-    pub event_ledger: EventLedger,
-    pub config: crate::config::Config,
-    pub uhoh_dir: std::path::PathBuf,
-}
-
-#[derive(Clone)]
-pub struct DbGuardContext {
-    pub database: Arc<Database>,
-    pub event_ledger: EventLedger,
-    pub config: crate::config::Config,
-    pub uhoh_dir: std::path::PathBuf,
-}
-
-#[derive(Clone)]
-pub struct MaintenanceContext {
-    pub database: Arc<Database>,
-    pub config: crate::config::Config,
-    pub uhoh_dir: std::path::PathBuf,
-    pub server_event_tx: tokio::sync::broadcast::Sender<ServerEvent>,
-}
-
-impl SubsystemContext {
-    pub fn agent_context(&self) -> AgentContext {
-        AgentContext {
-            database: self.database.clone(),
-            event_ledger: self.event_ledger.clone(),
-            config: self.config.clone(),
-            uhoh_dir: self.uhoh_dir.clone(),
-        }
-    }
-
-    pub fn db_guard_context(&self) -> DbGuardContext {
-        DbGuardContext {
-            database: self.database.clone(),
-            event_ledger: self.event_ledger.clone(),
-            config: self.config.clone(),
-            uhoh_dir: self.uhoh_dir.clone(),
-        }
-    }
-
-    pub fn maintenance_context(&self) -> MaintenanceContext {
-        MaintenanceContext {
-            database: self.database.clone(),
-            config: self.config.clone(),
-            uhoh_dir: self.uhoh_dir.clone(),
-            server_event_tx: self.server_event_tx.clone(),
-        }
-    }
-}
+pub type AgentContext = SubsystemContext;
+pub type DbGuardContext = SubsystemContext;
+pub type MaintenanceContext = SubsystemContext;
 
 #[async_trait]
 pub trait Subsystem: Send + Sync {

@@ -23,7 +23,7 @@ pub struct RestoreOutcome {
 pub struct PreRestoreSnapshot<'a> {
     pub trigger: &'a str,
     pub message: Option<String>,
-    pub config: &'a crate::config::Config,
+    pub snapshot_runtime: &'a crate::snapshot::SnapshotRuntime,
 }
 
 pub struct RestoreRequest<'a> {
@@ -374,7 +374,7 @@ pub(crate) fn apply_restore(
             snapshot::create_snapshot(
                 uhoh_dir,
                 database,
-                pre_restore.config,
+                pre_restore.snapshot_runtime,
                 snapshot::CreateSnapshotRequest {
                     project_hash: &project.hash,
                     project_path,

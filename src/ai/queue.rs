@@ -3,7 +3,8 @@ use std::path::Path;
 
 use tokio::sync::broadcast;
 
-use crate::config::Config;
+use crate::ai::sidecar::SidecarManager;
+use crate::config::AiConfig;
 use crate::db::Database;
 use crate::events::{publish_event, ServerEvent};
 
@@ -18,7 +19,8 @@ const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024;
 pub async fn process_summary_queue(
     uhoh_dir: &Path,
     database: &Database,
-    config: &Config,
+    ai_config: &AiConfig,
+    sidecar_manager: &SidecarManager,
     event_tx: &broadcast::Sender<ServerEvent>,
 ) {
     let Ok(jobs) = database.dequeue_pending_ai(MAX_AI_SUMMARIES_PER_TICK) else {
@@ -60,7 +62,7 @@ pub async fn process_summary_queue(
 
         let blob_root = uhoh_dir.join("blobs");
         let (added, modified, deleted, diff_chunks) =
-            build_summary_inputs(&blob_root, config, &this_files, &prev_map);
+            build_summary_inputs(&blob_root, ai_config, &this_files, &prev_map);
 
         let files = crate::ai::summary::FileChangeSummary {
             added: added.clone(),
@@ -68,13 +70,15 @@ pub async fn process_summary_queue(
             modified: modified.clone(),
         };
         let uhoh_dir_for_ai = uhoh_dir.to_path_buf();
-        let cfg_for_ai = config.clone();
+        let ai_config = ai_config.clone();
+        let sidecar_manager = sidecar_manager.clone();
         let diff_for_ai = diff_chunks.clone();
         let files_for_ai = files.clone();
         let ai_result = tokio::task::spawn_blocking(move || {
             crate::ai::summary::generate_summary_blocking(
                 &uhoh_dir_for_ai,
-                &cfg_for_ai,
+                &ai_config,
+                &sidecar_manager,
                 &diff_for_ai,
                 &files_for_ai,
             )
@@ -129,7 +133,7 @@ fn delete_after_retry_budget(database: &Database, snapshot_rowid: i64) {
 
 fn build_summary_inputs(
     blob_root: &Path,
-    config: &Config,
+    ai_config: &AiConfig,
     this_files: &[crate::db::FileEntryRow],
     prev_map: &HashMap<String, (String, bool, u64)>,
 ) -> (Vec<String>, Vec<String>, Vec<String>, String) {
@@ -137,7 +141,7 @@ fn build_summary_inputs(
     let mut modified = Vec::new();
     let mut deleted = Vec::new();
     let mut diff_chunks = String::new();
-    let max_diff_chars = config.ai.max_context_tokens.saturating_mul(4);
+    let max_diff_chars = ai_config.max_context_tokens.saturating_mul(4);
     let mut diff_chars = 0usize;
     let mut diff_truncated = false;
 

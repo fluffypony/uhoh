@@ -535,8 +535,8 @@ pub(crate) async fn create_snapshot(
     Json(body): Json<CreateSnapshotBody>,
 ) -> impl IntoResponse {
     let db = state.runtime.database();
-    let cfg = state.runtime.config_owned();
     let uhoh_dir = state.runtime.uhoh_dir_buf();
+    let snapshot_runtime = state.runtime.snapshot_runtime();
     let message = body.message;
     let event_tx = state.runtime.event_tx();
 
@@ -546,7 +546,7 @@ pub(crate) async fn create_snapshot(
         let result = crate::project_service::create_project_snapshot(
             &uhoh_dir,
             &db,
-            &cfg,
+            &snapshot_runtime,
             &project,
             "api",
             message.as_deref(),
@@ -610,8 +610,8 @@ pub(crate) async fn restore_snapshot(
     }
 
     let db = state.runtime.database();
-    let cfg = state.runtime.config_owned();
     let restore_runtime = state.runtime.restore_runtime();
+    let snapshot_runtime = state.runtime.snapshot_runtime();
     let target_path_for_validation = target_path.clone();
     let target_path_for_task = target_path.clone();
 
@@ -639,7 +639,7 @@ pub(crate) async fn restore_snapshot(
 
         let outcome = crate::project_service::restore_project_snapshot(
             &restore_runtime,
-            &cfg,
+            &snapshot_runtime,
             &project,
             &snap_id,
             dry_run,

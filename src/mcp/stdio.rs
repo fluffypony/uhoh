@@ -22,6 +22,7 @@ pub fn run_stdio_server(uhoh_dir: &Path) -> Result<()> {
         config,
         event_tx: None,
         restore_coordinator: None,
+        sidecar_manager: None,
     });
     let application = super::build_application(runtime);
     let stdin = io::stdin();

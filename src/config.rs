@@ -687,103 +687,117 @@ impl Default for AgentConfig {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        if path.exists() {
-            let content = std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read config: {}", path.display()))?;
-            let config: Config = toml::from_str(&content)
-                .with_context(|| format!("Failed to parse config: {}", path.display()))?;
-            // Basic validation
-            if config.watch.debounce_quiet_secs == 0 {
-                anyhow::bail!("watch.debounce_quiet_secs must be > 0");
-            }
-            if config.watch.min_snapshot_interval_secs == 0 {
-                anyhow::bail!("watch.min_snapshot_interval_secs must be > 0");
-            }
-            if !(0.0..=1.0).contains(&config.storage.storage_limit_fraction)
-                || config.storage.storage_limit_fraction <= 0.0
-            {
-                anyhow::bail!("storage.storage_limit_fraction must be in (0.0, 1.0]");
-            }
-            if config.compaction.emergency_expire_hours == 0 {
-                anyhow::bail!("compaction.emergency_expire_hours must be > 0");
-            }
-            if config.watch.emergency_delete_threshold <= 0.0
-                || config.watch.emergency_delete_threshold > 1.0
-            {
-                anyhow::bail!(
-                    "watch.emergency_delete_threshold must be in (0.0, 1.0], got {}",
-                    config.watch.emergency_delete_threshold
-                );
-            }
-            if config.watch.emergency_delete_min_files == 0 {
-                anyhow::bail!("watch.emergency_delete_min_files must be > 0");
-            }
-            if config.watch.emergency_cooldown_secs == 0 {
-                anyhow::bail!("watch.emergency_cooldown_secs must be > 0");
-            }
-            if config.ai.max_context_tokens == 0 {
-                anyhow::bail!("ai.max_context_tokens must be > 0");
-            }
-            if !(1..=22).contains(&config.storage.compress_level) {
-                anyhow::bail!("storage.compress_level must be between 1 and 22 (inclusive)");
-            }
-            if config.server.port == 0 {
-                anyhow::bail!("server.port must be > 0");
-            }
-            if config.sidecar_update.check_interval_hours == 0 {
-                anyhow::bail!("sidecar_update.check_interval_hours must be > 0");
-            }
-            if config.notifications.cooldown_seconds == 0 {
-                anyhow::bail!("notifications.cooldown_seconds must be > 0");
-            }
-            if !(0.0..=1.0).contains(&config.db_guard.mass_delete_pct_threshold)
-                || config.db_guard.mass_delete_pct_threshold <= 0.0
-            {
-                anyhow::bail!("db_guard.mass_delete_pct_threshold must be in (0.0, 1.0]");
-            }
-            if config.db_guard.mass_delete_row_threshold == 0 {
-                anyhow::bail!("db_guard.mass_delete_row_threshold must be > 0");
-            }
-            if config.agent.mcp_proxy_port == 0 {
-                anyhow::bail!("agent.mcp_proxy_port must be > 0");
-            }
-            if config.agent.pause_timeout_seconds == 0 {
-                anyhow::bail!("agent.pause_timeout_seconds must be > 0");
-            }
-            if config.agent.audit_max_events_per_second == 0 {
-                anyhow::bail!("agent.audit_max_events_per_second must be > 0");
-            }
-            if config.ai.mlx.check_interval_hours == 0 {
-                anyhow::bail!("ai.mlx.check_interval_hours must be > 0");
-            }
-            if config.storage.max_binary_blob_bytes == 0 {
-                anyhow::bail!("storage.max_binary_blob_bytes must be > 0");
-            }
-            if config.storage.max_text_blob_bytes == 0 {
-                anyhow::bail!("storage.max_text_blob_bytes must be > 0");
-            }
-            if config.storage.max_copy_blob_bytes == 0 {
-                anyhow::bail!("storage.max_copy_blob_bytes must be > 0");
-            }
-            if config.watch.max_debounce_secs == 0 {
-                anyhow::bail!("watch.max_debounce_secs must be > 0");
-            }
-            if config.watch.max_debounce_secs < config.watch.debounce_quiet_secs {
-                anyhow::bail!("watch.max_debounce_secs must be >= watch.debounce_quiet_secs");
-            }
-            if config.storage.storage_min_bytes == 0 {
-                anyhow::bail!("storage.storage_min_bytes must be > 0");
-            }
-            Ok(config)
-        } else {
-            let config = Config::default();
-            let content = toml::to_string_pretty(&config)?;
-            // Attempt to write default config but don't fail if we can't
-            if let Err(e) = std::fs::write(path, &content) {
-                tracing::warn!("Could not write default config: {}", e);
-            }
-            Ok(config)
+        if !path.exists() {
+            return Ok(Config::default());
         }
+
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config: {}", path.display()))?;
+        let config: Config = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse config: {}", path.display()))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn load_or_initialize(path: &Path) -> Result<Self> {
+        if path.exists() {
+            return Self::load(path);
+        }
+
+        let config = Self::default();
+        Self::write_default(path, &config)?;
+        Ok(config)
+    }
+
+    pub fn write_default(path: &Path, config: &Self) -> Result<()> {
+        let content = toml::to_string_pretty(config)?;
+        std::fs::write(path, content)
+            .with_context(|| format!("Failed to write default config: {}", path.display()))
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.watch.debounce_quiet_secs == 0 {
+            anyhow::bail!("watch.debounce_quiet_secs must be > 0");
+        }
+        if self.watch.min_snapshot_interval_secs == 0 {
+            anyhow::bail!("watch.min_snapshot_interval_secs must be > 0");
+        }
+        if !(0.0..=1.0).contains(&self.storage.storage_limit_fraction)
+            || self.storage.storage_limit_fraction <= 0.0
+        {
+            anyhow::bail!("storage.storage_limit_fraction must be in (0.0, 1.0]");
+        }
+        if self.compaction.emergency_expire_hours == 0 {
+            anyhow::bail!("compaction.emergency_expire_hours must be > 0");
+        }
+        if self.watch.emergency_delete_threshold <= 0.0
+            || self.watch.emergency_delete_threshold > 1.0
+        {
+            anyhow::bail!(
+                "watch.emergency_delete_threshold must be in (0.0, 1.0], got {}",
+                self.watch.emergency_delete_threshold
+            );
+        }
+        if self.watch.emergency_delete_min_files == 0 {
+            anyhow::bail!("watch.emergency_delete_min_files must be > 0");
+        }
+        if self.watch.emergency_cooldown_secs == 0 {
+            anyhow::bail!("watch.emergency_cooldown_secs must be > 0");
+        }
+        if self.ai.max_context_tokens == 0 {
+            anyhow::bail!("ai.max_context_tokens must be > 0");
+        }
+        if !(1..=22).contains(&self.storage.compress_level) {
+            anyhow::bail!("storage.compress_level must be between 1 and 22 (inclusive)");
+        }
+        if self.server.port == 0 {
+            anyhow::bail!("server.port must be > 0");
+        }
+        if self.sidecar_update.check_interval_hours == 0 {
+            anyhow::bail!("sidecar_update.check_interval_hours must be > 0");
+        }
+        if self.notifications.cooldown_seconds == 0 {
+            anyhow::bail!("notifications.cooldown_seconds must be > 0");
+        }
+        if !(0.0..=1.0).contains(&self.db_guard.mass_delete_pct_threshold)
+            || self.db_guard.mass_delete_pct_threshold <= 0.0
+        {
+            anyhow::bail!("db_guard.mass_delete_pct_threshold must be in (0.0, 1.0]");
+        }
+        if self.db_guard.mass_delete_row_threshold == 0 {
+            anyhow::bail!("db_guard.mass_delete_row_threshold must be > 0");
+        }
+        if self.agent.mcp_proxy_port == 0 {
+            anyhow::bail!("agent.mcp_proxy_port must be > 0");
+        }
+        if self.agent.pause_timeout_seconds == 0 {
+            anyhow::bail!("agent.pause_timeout_seconds must be > 0");
+        }
+        if self.agent.audit_max_events_per_second == 0 {
+            anyhow::bail!("agent.audit_max_events_per_second must be > 0");
+        }
+        if self.ai.mlx.check_interval_hours == 0 {
+            anyhow::bail!("ai.mlx.check_interval_hours must be > 0");
+        }
+        if self.storage.max_binary_blob_bytes == 0 {
+            anyhow::bail!("storage.max_binary_blob_bytes must be > 0");
+        }
+        if self.storage.max_text_blob_bytes == 0 {
+            anyhow::bail!("storage.max_text_blob_bytes must be > 0");
+        }
+        if self.storage.max_copy_blob_bytes == 0 {
+            anyhow::bail!("storage.max_copy_blob_bytes must be > 0");
+        }
+        if self.watch.max_debounce_secs == 0 {
+            anyhow::bail!("watch.max_debounce_secs must be > 0");
+        }
+        if self.watch.max_debounce_secs < self.watch.debounce_quiet_secs {
+            anyhow::bail!("watch.max_debounce_secs must be >= watch.debounce_quiet_secs");
+        }
+        if self.storage.storage_min_bytes == 0 {
+            anyhow::bail!("storage.storage_min_bytes must be > 0");
+        }
+        Ok(())
     }
 }
 
@@ -808,5 +822,16 @@ mod tests {
     fn dangerous_change_policy_default_is_none() {
         let cfg = Config::default();
         assert_eq!(cfg.agent.on_dangerous_change, DangerousChangePolicy::None);
+    }
+
+    #[test]
+    fn load_missing_config_does_not_create_file() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("config.toml");
+
+        let cfg = Config::load(&path).expect("load default config");
+
+        assert_eq!(cfg.ai.enabled, Config::default().ai.enabled);
+        assert!(!path.exists());
     }
 }

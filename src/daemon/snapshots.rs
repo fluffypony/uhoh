@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use notify::{RecursiveMode, Watcher as _};
 use tokio::sync::broadcast;
 
-use crate::config::Config;
+use crate::config::WatchConfig;
 use crate::db::{Database, ProjectEntry, SnapshotRow};
 use crate::event_ledger::{new_event, EventLedger};
 use crate::events::{publish_event, ServerEvent};
@@ -74,7 +74,8 @@ struct SnapshotExecutionCtx<'a> {
     uhoh_dir: &'a Path,
     database: Arc<Database>,
     states: &'a mut HashMap<String, ProjectDaemonState>,
-    config: &'a Config,
+    snapshot_runtime: &'a snapshot::SnapshotRuntime,
+    watch: &'a WatchConfig,
     event_tx: &'a broadcast::Sender<ServerEvent>,
     event_ledger: &'a EventLedger,
 }
@@ -107,7 +108,7 @@ pub(super) struct SnapshotProcessCtx<'a> {
     pub(super) uhoh_dir: &'a Path,
     pub(super) database: Arc<Database>,
     pub(super) states: &'a mut HashMap<String, ProjectDaemonState>,
-    pub(super) config: &'a Config,
+    pub(super) snapshot_runtime: &'a snapshot::SnapshotRuntime,
     pub(super) event_tx: &'a broadcast::Sender<ServerEvent>,
     pub(super) event_ledger: &'a EventLedger,
     pub(super) restore_in_progress: &'a AtomicBool,
@@ -297,12 +298,13 @@ pub(super) async fn process_pending_snapshots(ctx: SnapshotProcessCtx<'_>) {
         uhoh_dir,
         database,
         states,
-        config,
+        snapshot_runtime,
         event_tx,
         event_ledger,
         restore_in_progress,
         was_restoring_snapshot,
     } = ctx;
+    let watch = &snapshot_runtime.settings().watch;
 
     let now = Instant::now();
     let currently_restoring = update_restore_state(
@@ -317,7 +319,7 @@ pub(super) async fn process_pending_snapshots(ctx: SnapshotProcessCtx<'_>) {
     let plan = build_snapshot_execution_plan(
         states,
         database.as_ref(),
-        config,
+        watch,
         event_tx,
         event_ledger,
         currently_restoring,
@@ -328,7 +330,8 @@ pub(super) async fn process_pending_snapshots(ctx: SnapshotProcessCtx<'_>) {
             uhoh_dir,
             database,
             states,
-            config,
+            snapshot_runtime,
+            watch,
             event_tx,
             event_ledger,
         },
@@ -412,7 +415,7 @@ pub(super) fn check_moved_folders(
 fn build_snapshot_execution_plan(
     states: &mut HashMap<String, ProjectDaemonState>,
     database: &Database,
-    config: &Config,
+    watch: &WatchConfig,
     event_tx: &broadcast::Sender<ServerEvent>,
     event_ledger: &EventLedger,
     currently_restoring: bool,
@@ -429,7 +432,7 @@ fn build_snapshot_execution_plan(
             project_path,
             state,
             database,
-            config,
+            watch,
             event_tx,
             event_ledger,
             currently_restoring,
@@ -439,7 +442,7 @@ fn build_snapshot_execution_plan(
             continue;
         }
 
-        if let Some(request) = build_auto_snapshot_request(project_path, state, config, now) {
+        if let Some(request) = build_auto_snapshot_request(project_path, state, watch, now) {
             plan.auto_requests.push(request);
         }
     }
@@ -452,7 +455,8 @@ async fn execute_snapshot_plan(ctx: SnapshotExecutionCtx<'_>, plan: SnapshotExec
         uhoh_dir,
         database,
         states,
-        config,
+        snapshot_runtime,
+        watch,
         event_tx,
         event_ledger,
     } = ctx;
@@ -467,7 +471,7 @@ async fn execute_snapshot_plan(ctx: SnapshotExecutionCtx<'_>, plan: SnapshotExec
         semaphore.clone(),
         uhoh_dir,
         database.clone(),
-        config,
+        snapshot_runtime,
         plan.auto_requests,
     )
     .await;
@@ -476,7 +480,7 @@ async fn execute_snapshot_plan(ctx: SnapshotExecutionCtx<'_>, plan: SnapshotExec
         semaphore,
         uhoh_dir,
         database.clone(),
-        config,
+        snapshot_runtime,
         plan.emergency_requests,
     )
     .await;
@@ -486,7 +490,7 @@ async fn execute_snapshot_plan(ctx: SnapshotExecutionCtx<'_>, plan: SnapshotExec
             Ok(task_result) => apply_snapshot_result(
                 states,
                 database.as_ref(),
-                config,
+                watch,
                 event_tx,
                 event_ledger,
                 task_result,
@@ -501,7 +505,7 @@ async fn schedule_snapshot_requests(
     semaphore: Arc<tokio::sync::Semaphore>,
     uhoh_dir: &Path,
     database: Arc<Database>,
-    config: &Config,
+    snapshot_runtime: &snapshot::SnapshotRuntime,
     requests: Vec<SnapshotSpawnRequest>,
 ) {
     for request in requests {
@@ -510,7 +514,7 @@ async fn schedule_snapshot_requests(
             semaphore.clone(),
             uhoh_dir,
             database.clone(),
-            config,
+            snapshot_runtime,
             request,
         )
         .await;
@@ -598,7 +602,7 @@ fn evaluate_emergency_for_project(
     project_path: &str,
     state: &mut ProjectDaemonState,
     database: &Database,
-    config: &Config,
+    watch: &WatchConfig,
     event_tx: &broadcast::Sender<ServerEvent>,
     event_ledger: &EventLedger,
     currently_restoring: bool,
@@ -628,7 +632,7 @@ fn evaluate_emergency_for_project(
     }
 
     if let Some(window_start) = state.cumulative_window_start {
-        if window_start.elapsed() > Duration::from_secs(config.watch.emergency_cooldown_secs) {
+        if window_start.elapsed() > Duration::from_secs(watch.emergency_cooldown_secs) {
             state.cumulative_deletes = state.deleted_paths.len();
             state.cumulative_window_start = Some(now);
         }
@@ -639,9 +643,9 @@ fn evaluate_emergency_for_project(
         deleted_paths_hint_count,
         cached_baseline_count: state.cached_prev_file_count,
         last_emergency_at: state.last_emergency_at,
-        cooldown_secs: config.watch.emergency_cooldown_secs,
-        threshold: config.watch.emergency_delete_threshold,
-        min_files: config.watch.emergency_delete_min_files,
+        cooldown_secs: watch.emergency_cooldown_secs,
+        threshold: watch.emergency_delete_threshold,
+        min_files: watch.emergency_delete_min_files,
         restore_in_progress: currently_restoring,
         overflow_occurred: state.overflow_occurred,
         project_root: Path::new(project_path),
@@ -686,7 +690,7 @@ fn evaluate_emergency_for_project(
                 event_tx,
                 event_ledger,
                 &state.hash,
-                config,
+                watch,
                 verified_deleted_count,
                 baseline_count,
                 ratio,
@@ -731,7 +735,7 @@ fn evaluate_emergency_for_project(
                 event_tx,
                 event_ledger,
                 &state.hash,
-                config,
+                watch,
                 verified_deleted_count,
                 baseline_count,
                 ratio,
@@ -759,7 +763,7 @@ fn emit_emergency_delete_detected(
     event_tx: &broadcast::Sender<ServerEvent>,
     event_ledger: &EventLedger,
     project_hash: &str,
-    config: &Config,
+    watch: &WatchConfig,
     deleted_count: usize,
     baseline_count: u64,
     ratio: f64,
@@ -771,8 +775,8 @@ fn emit_emergency_delete_detected(
         "deleted_count": deleted_count,
         "baseline_count": baseline_count,
         "ratio": ratio,
-        "threshold": config.watch.emergency_delete_threshold,
-        "min_files": config.watch.emergency_delete_min_files,
+        "threshold": watch.emergency_delete_threshold,
+        "min_files": watch.emergency_delete_min_files,
         "cooldown_suppressed": cooldown_suppressed,
     });
     if let Some(remaining_secs) = cooldown_remaining_secs {
@@ -803,8 +807,8 @@ fn emit_emergency_delete_detected(
             deleted_count,
             baseline_count,
             ratio,
-            threshold: config.watch.emergency_delete_threshold,
-            min_files: config.watch.emergency_delete_min_files,
+            threshold: watch.emergency_delete_threshold,
+            min_files: watch.emergency_delete_min_files,
             cooldown_suppressed,
             cooldown_remaining_secs,
         },
@@ -814,7 +818,7 @@ fn emit_emergency_delete_detected(
 fn build_auto_snapshot_request(
     project_path: &str,
     state: &mut ProjectDaemonState,
-    config: &Config,
+    watch: &WatchConfig,
     now: Instant,
 ) -> Option<SnapshotSpawnRequest> {
     if state.pending_changes.is_empty() {
@@ -824,11 +828,11 @@ fn build_auto_snapshot_request(
     let first_change = state.first_change_at?;
     let last_change = state.last_change_at.unwrap_or(first_change);
     let quiet_elapsed =
-        now.duration_since(last_change) >= Duration::from_secs(config.watch.debounce_quiet_secs);
+        now.duration_since(last_change) >= Duration::from_secs(watch.debounce_quiet_secs);
     let max_ceiling =
-        now.duration_since(first_change) >= Duration::from_secs(config.watch.max_debounce_secs);
+        now.duration_since(first_change) >= Duration::from_secs(watch.max_debounce_secs);
     let min_interval = now.duration_since(state.last_snapshot)
-        >= Duration::from_secs(config.watch.min_snapshot_interval_secs);
+        >= Duration::from_secs(watch.min_snapshot_interval_secs);
 
     if !(quiet_elapsed || max_ceiling) || !min_interval {
         return None;
@@ -856,7 +860,7 @@ async fn spawn_snapshot_task(
     semaphore: Arc<tokio::sync::Semaphore>,
     uhoh_dir: &Path,
     database: Arc<Database>,
-    config: &Config,
+    snapshot_runtime: &snapshot::SnapshotRuntime,
     request: SnapshotSpawnRequest,
 ) {
     let permit = match semaphore.clone().acquire_owned().await {
@@ -871,7 +875,7 @@ async fn spawn_snapshot_task(
     };
 
     let uhoh_dir = uhoh_dir.to_path_buf();
-    let config = config.clone();
+    let snapshot_runtime = snapshot_runtime.clone();
     let SnapshotSpawnRequest {
         project_path_key,
         project_hash,
@@ -888,7 +892,7 @@ async fn spawn_snapshot_task(
             match snapshot::create_snapshot(
                 &uhoh_dir,
                 &database,
-                &config,
+                &snapshot_runtime,
                 snapshot::CreateSnapshotRequest {
                     project_hash: &project_hash,
                     project_path: &project_path,
@@ -934,7 +938,7 @@ async fn spawn_snapshot_task(
 fn apply_snapshot_result(
     states: &mut HashMap<String, ProjectDaemonState>,
     database: &Database,
-    config: &Config,
+    watch: &WatchConfig,
     event_tx: &broadcast::Sender<ServerEvent>,
     event_ledger: &EventLedger,
     task_result: SnapshotTaskResult,
@@ -947,7 +951,7 @@ fn apply_snapshot_result(
                     snapshot_id,
                     was_emergency_spawn,
                     database,
-                    config,
+                    watch,
                     event_tx,
                     event_ledger,
                 );
@@ -973,7 +977,7 @@ fn handle_created_snapshot(
     snapshot_id: u64,
     was_emergency_spawn: bool,
     database: &Database,
-    config: &Config,
+    watch: &WatchConfig,
     event_tx: &broadcast::Sender<ServerEvent>,
     event_ledger: &EventLedger,
 ) {
@@ -991,7 +995,7 @@ fn handle_created_snapshot(
                     state,
                     snapshot_id,
                     &row,
-                    config,
+                    watch,
                     event_tx,
                     event_ledger,
                 );
@@ -1026,7 +1030,7 @@ fn handle_dynamic_emergency_upgrade(
     state: &ProjectDaemonState,
     snapshot_id: u64,
     row: &SnapshotRow,
-    config: &Config,
+    watch: &WatchConfig,
     event_tx: &broadcast::Sender<ServerEvent>,
     event_ledger: &EventLedger,
 ) {
@@ -1058,7 +1062,7 @@ fn handle_dynamic_emergency_upgrade(
         event_tx,
         event_ledger,
         &state.hash,
-        config,
+        watch,
         deleted_count,
         baseline_count,
         ratio,
