@@ -15,7 +15,7 @@ pub async fn run_session_tailers_async(ctx: &AgentContext, agents: &[AgentEntry]
     loop {
         let mut offsets_changed = false;
         for agent in agents {
-            let profile_toml = crate::util::expand_home(&agent.profile_path);
+            let profile_toml = super::expand_home(&agent.profile_path);
             let profile_path = Path::new(&profile_toml);
             if !profile_path.exists() {
                 continue;

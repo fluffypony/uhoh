@@ -102,7 +102,7 @@ struct EncryptedFileBackend;
 
 impl CredentialBackend for EncryptedFileBackend {
     fn load(&self, key: &str) -> Result<Option<CredentialMaterial>> {
-        resolve_encrypted_credentials(key)
+        load_encrypted_credentials(key)
     }
 
     fn store(&self, key: &str, value: &CredentialMaterial) -> Result<()> {
@@ -210,7 +210,9 @@ pub fn resolve_postgres_credentials_with_keyring(
     })
 }
 
-fn resolve_encrypted_credentials(connection_ref: &str) -> Result<Option<CredentialMaterial>> {
+pub(crate) fn load_encrypted_credentials(
+    connection_ref: &str,
+) -> Result<Option<CredentialMaterial>> {
     let uhoh = crate::uhoh_dir();
     let path = uhoh.join("credentials.enc");
     if !path.exists() {
@@ -221,12 +223,6 @@ fn resolve_encrypted_credentials(connection_ref: &str) -> Result<Option<Credenti
         .with_context(|| format!("Failed reading encrypted credentials: {}", path.display()))?;
     let map = decrypt_credentials_map(&payload)?;
     Ok(map.get(connection_ref).cloned())
-}
-
-pub(crate) fn load_encrypted_credentials(
-    connection_ref: &str,
-) -> Result<Option<CredentialMaterial>> {
-    resolve_encrypted_credentials(connection_ref)
 }
 
 pub fn store_encrypted_credential(connection_ref: &str, cred: &CredentialMaterial) -> Result<()> {

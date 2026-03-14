@@ -46,13 +46,13 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Zero-verb convenience: running `uhoh` with no args performs:
+    // Default action: running `uhoh` with no args performs:
     // - If current folder is not registered: register and create an initial snapshot
     // - If it is registered: create a quick snapshot and revert to the previous snapshot
     if std::env::args().len() == 1 {
         let uhoh = ensure_uhoh_dir()?;
         let database = db::Database::open(&uhoh.join("uhoh.db"))?;
-        return project_commands::zero_verb(&uhoh, &database);
+        return project_commands::default_action(&uhoh, &database);
     }
 
     let cli = Cli::parse();

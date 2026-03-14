@@ -40,7 +40,7 @@ pub fn load_agent_profile(path: &std::path::Path) -> Result<AgentProfile> {
 }
 
 pub fn resolve_session_log_path(pattern: &str) -> Result<Option<std::path::PathBuf>> {
-    let expanded = crate::util::expand_home(pattern);
+    let expanded = super::expand_home(pattern);
     let mut matches = Vec::new();
     for entry in glob::glob(&expanded)? {
         let path = match entry {

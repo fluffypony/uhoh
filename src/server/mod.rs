@@ -133,7 +133,6 @@ pub async fn start_server(bootstrap: ServerBootstrap) -> Result<tokio::task::Joi
         },
         mcp: crate::mcp::McpHttpState {
             application: crate::mcp::build_application(runtime.clone()),
-            transport_policy,
         },
         ws: WsState {
             event_tx,
@@ -181,11 +180,11 @@ fn build_app(
     let mut app = Router::new();
     if config.mcp_enabled {
         app = app
-            .route("/mcp", post(crate::mcp::http::handle_http_request))
-            .route("/mcp", get(crate::mcp::http::get_not_supported))
+            .route("/mcp", post(crate::mcp::handle_http_request))
+            .route("/mcp", get(crate::mcp::get_not_supported))
             .route(
                 "/mcp",
-                axum::routing::delete(crate::mcp::http::delete_not_supported),
+                axum::routing::delete(crate::mcp::delete_not_supported),
             );
     }
 
@@ -366,7 +365,6 @@ mod tests {
             },
             mcp: crate::mcp::McpHttpState {
                 application: crate::mcp::build_application(runtime.clone()),
-                transport_policy,
             },
             ws: WsState {
                 event_tx,

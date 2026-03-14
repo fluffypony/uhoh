@@ -9,8 +9,6 @@ use std::path::Path;
 
 use crate::db::Database;
 
-// Removed duplicate is_uhoh_process_alive; use crate::platform::is_uhoh_process_alive instead
-
 /// Spawn daemon as a detached background process.
 pub fn spawn_detached_daemon(uhoh_dir: &Path) -> Result<()> {
     let exe = std::env::current_exe()?;

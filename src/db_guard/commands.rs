@@ -8,7 +8,7 @@ use crate::cli::DbAction;
 use crate::config;
 use crate::db::{self, Database};
 
-pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction) -> Result<()> {
+pub fn handle_cli_action(uhoh_dir: &Path, database: &Database, action: &DbAction) -> Result<()> {
     match action {
         DbAction::Add {
             dsn,

@@ -354,9 +354,6 @@ impl DbGuardMode {
         self.as_str().eq_ignore_ascii_case(value)
     }
 
-    pub fn trim(self) -> &'static str {
-        self.as_str()
-    }
 }
 
 impl FromStr for DbGuardMode {
@@ -712,7 +709,7 @@ impl Database {
     }
 }
 
-// Type aliases to simplify complex tuple signatures used around snapshot creation
+// Types used around snapshot creation
 #[derive(Debug, Clone)]
 pub struct SnapFileEntry {
     pub path: String,
@@ -724,4 +721,11 @@ pub struct SnapFileEntry {
     pub storage_method: StorageMethod,
     pub is_symlink: bool,
 }
-pub type DeletedFile = (String, String, u64, bool, StorageMethod); // (path, hash, size, stored, storage_method)
+#[derive(Debug, Clone)]
+pub struct DeletedFile {
+    pub path: String,
+    pub hash: String,
+    pub size: u64,
+    pub stored: bool,
+    pub storage_method: StorageMethod,
+}

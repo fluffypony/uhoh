@@ -140,12 +140,26 @@ pub async fn status(uhoh: &Path, database: &db::Database) -> Result<()> {
     println!("Projects: {}", projects.len());
     let total: u64 = projects
         .iter()
-        .filter_map(|project| database.snapshot_count(&project.hash).ok())
+        .map(|project| match database.snapshot_count(&project.hash) {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("Failed to count snapshots for {}: {e}", project.hash);
+                0
+            }
+        })
         .sum();
     println!("Snapshots: {total}");
-    let size = database.get_blob_bytes().unwrap_or(0);
-    println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0);
-    let cfg = config::Config::load(&uhoh.join("config.toml")).unwrap_or_default();
+    match database.get_blob_bytes() {
+        Ok(size) => println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0),
+        Err(e) => println!("Blob storage: unavailable ({e})"),
+    }
+    let cfg = match config::Config::load(&uhoh.join("config.toml")) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Config: failed to load ({e}), using defaults");
+            config::Config::default()
+        }
+    };
     println!(
         "AI: {}",
         if cfg.ai.enabled {
@@ -210,8 +224,8 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
         );
     }
     if cfg.agent.mcp_proxy_enabled {
-        let proxy_token = crate::agent::proxy::ensure_proxy_token(uhoh)?;
-        let auth_line = crate::agent::proxy::auth_handshake_line(&proxy_token);
+        let proxy_token = crate::agent::ensure_proxy_token(uhoh)?;
+        let auth_line = crate::agent::auth_handshake_line(&proxy_token);
         cmd.env(
             "UHOH_MCP_PROXY_ADDR",
             format!("127.0.0.1:{}", cfg.agent.mcp_proxy_port),
@@ -226,7 +240,7 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
     }
 
     if cfg.agent.sandbox_enabled {
-        if !crate::agent::sandbox::sandbox_supported() {
+        if !crate::agent::sandbox_supported() {
             anyhow::bail!("Sandbox requested in config but unsupported on this platform/build");
         }
         cmd.env("UHOH_SANDBOX_ENABLED", "1");
@@ -241,9 +255,9 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
                     )
                 });
                 let profile =
-                    crate::agent::profiles::load_agent_profile(std::path::Path::new(&profile_path))
+                    crate::agent::load_agent_profile(std::path::Path::new(&profile_path))
                         .map_err(|e| std::io::Error::other(e.to_string()))?;
-                crate::agent::sandbox::apply_landlock(&profile)
+                crate::agent::apply_landlock(&profile)
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
                 Ok(())
             });
@@ -308,10 +322,11 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
         let status = cmd
             .status()
             .with_context(|| format!("Failed to run command: {}", command[0]))?;
-        std::process::exit(status.code().unwrap_or(1));
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
     }
 
-    #[cfg(target_os = "linux")]
     Ok(())
 }
 
@@ -528,17 +543,18 @@ async fn verify_install() -> Result<()> {
         Ok(expected) => {
             if expected.eq_ignore_ascii_case(&local_hash) {
                 println!("\u{2713} Binary hash matches DNS record.");
-                std::process::exit(0);
+                Ok(())
             } else {
                 eprintln!("Binary hash does not match DNS record!");
                 eprintln!("  Local:    {local_hash}");
                 eprintln!("  Expected: {expected}");
+                // Exit code 2 is the install-script contract for hash mismatch
                 std::process::exit(2);
             }
         }
         Err(e) => {
             eprintln!("Could not verify hash via DNS: {e}");
-            std::process::exit(0);
+            Ok(())
         }
     }
 }
