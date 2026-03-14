@@ -472,7 +472,7 @@ fn test_emergency_snapshot_retained_within_window() {
     // Create snapshots with emergency trigger
     let ts_recent = chrono::Utc::now().to_rfc3339();
     let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
-    let deleted: Vec<(String, String, u64, bool, uhoh::cas::StorageMethod)> = Vec::new();
+    let deleted: Vec<uhoh::db::DeletedFile> = Vec::new();
 
     let (rowid, _) = db
         .create_snapshot(uhoh::db::CreateSnapshotRow {
@@ -507,7 +507,7 @@ fn test_emergency_snapshot_pruned_after_window() {
     // Create emergency snapshot with old timestamp (72h ago, beyond 48h default)
     let old_ts = (chrono::Utc::now() - chrono::Duration::hours(72)).to_rfc3339();
     let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
-    let deleted: Vec<(String, String, u64, bool, uhoh::cas::StorageMethod)> = Vec::new();
+    let deleted: Vec<uhoh::db::DeletedFile> = Vec::new();
 
     let (old_rowid, _) = db
         .create_snapshot(uhoh::db::CreateSnapshotRow {
@@ -562,7 +562,7 @@ fn test_predecessor_protection_in_compaction() {
     db.add_project("emrg5", "/fake/path").unwrap();
 
     let files: Vec<uhoh::db::SnapFileEntry> = Vec::new();
-    let deleted: Vec<(String, String, u64, bool, uhoh::cas::StorageMethod)> = Vec::new();
+    let deleted: Vec<uhoh::db::DeletedFile> = Vec::new();
 
     // Create predecessor snapshot (old but not emergency)
     let pred_ts = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();

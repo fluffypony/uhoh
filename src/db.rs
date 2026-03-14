@@ -709,7 +709,7 @@ impl Database {
     }
 }
 
-// Type aliases to simplify complex tuple signatures used around snapshot creation
+// Types used around snapshot creation
 #[derive(Debug, Clone)]
 pub struct SnapFileEntry {
     pub path: String,
