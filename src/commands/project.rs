@@ -95,7 +95,7 @@ fn create_initial_snapshot(
         snapshot::CreateSnapshotRequest {
             project_hash,
             project_path,
-            trigger: "manual",
+            trigger: crate::db::SnapshotTrigger::Manual,
             message: Some("Initial snapshot"),
             changed_paths: None,
         },
@@ -236,7 +236,10 @@ pub fn commit(
     let project = database
         .find_project_by_path(&project_path)?
         .context("Not registered")?;
-    let trigger = trigger.unwrap_or_else(|| "manual".to_string());
+    let trigger = trigger
+        .as_deref()
+        .and_then(db::SnapshotTrigger::parse)
+        .unwrap_or(db::SnapshotTrigger::Manual);
     let cfg = config::Config::load(&uhoh.join("config.toml"))?;
     let snapshot_runtime = snapshot::SnapshotRuntime::from_config(&cfg);
     snapshot::create_snapshot(
@@ -246,7 +249,7 @@ pub fn commit(
         snapshot::CreateSnapshotRequest {
             project_hash: &project.hash,
             project_path: &project_path,
-            trigger: &trigger,
+            trigger,
             message: message.as_deref(),
             changed_paths: None,
         },
@@ -278,7 +281,7 @@ pub fn restore_snapshot(
             dry_run,
             force,
             pre_restore_snapshot: Some(restore::PreRestoreSnapshot {
-                trigger: "pre-restore",
+                trigger: db::SnapshotTrigger::PreRestore,
                 message: Some(pre_restore_message),
                 snapshot_runtime: &snapshot_runtime,
             }),

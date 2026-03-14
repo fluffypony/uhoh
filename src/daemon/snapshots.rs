@@ -28,10 +28,10 @@ pub(super) enum SnapshotTaskKind {
 }
 
 impl SnapshotTaskKind {
-    pub(super) fn trigger(self) -> &'static str {
+    pub(super) fn trigger(self) -> crate::db::SnapshotTrigger {
         match self {
-            SnapshotTaskKind::Auto => "auto",
-            SnapshotTaskKind::Emergency => "emergency",
+            SnapshotTaskKind::Auto => crate::db::SnapshotTrigger::Auto,
+            SnapshotTaskKind::Emergency => crate::db::SnapshotTrigger::Emergency,
         }
     }
 
@@ -771,7 +771,7 @@ fn handle_created_snapshot(
 
     if let Ok(Some(rowid)) = database.latest_snapshot_rowid(&state.hash) {
         if let Ok(Some(row)) = database.get_snapshot_by_rowid(rowid) {
-            if row.trigger == "emergency" && !was_emergency_spawn {
+            if row.trigger == crate::db::SnapshotTrigger::Emergency && !was_emergency_spawn {
                 state.last_emergency_at = Some(Instant::now());
                 super::emergency::handle_dynamic_emergency_upgrade(
                     database,

@@ -32,7 +32,7 @@ pub struct RestoreOutcome {
 }
 
 pub struct PreRestoreSnapshot<'a> {
-    pub trigger: &'a str,
+    pub trigger: crate::db::SnapshotTrigger,
     pub message: Option<String>,
     pub snapshot_runtime: &'a crate::snapshot::SnapshotRuntime,
 }

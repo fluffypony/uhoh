@@ -98,6 +98,75 @@ fn invalid_db_text_conversion(index: usize, field: &'static str, value: &str) ->
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SnapshotTrigger {
+    Auto,
+    Manual,
+    Emergency,
+    PreRestore,
+    Initial,
+    Mcp,
+    Api,
+}
+
+impl SnapshotTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SnapshotTrigger::Auto => "auto",
+            SnapshotTrigger::Manual => "manual",
+            SnapshotTrigger::Emergency => "emergency",
+            SnapshotTrigger::PreRestore => "pre-restore",
+            SnapshotTrigger::Initial => "initial",
+            SnapshotTrigger::Mcp => "mcp",
+            SnapshotTrigger::Api => "api",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(SnapshotTrigger::Auto),
+            "manual" => Some(SnapshotTrigger::Manual),
+            "emergency" => Some(SnapshotTrigger::Emergency),
+            "pre-restore" => Some(SnapshotTrigger::PreRestore),
+            "initial" => Some(SnapshotTrigger::Initial),
+            "mcp" => Some(SnapshotTrigger::Mcp),
+            "api" => Some(SnapshotTrigger::Api),
+            _ => None,
+        }
+    }
+
+    fn parse_persisted(value: &str, index: usize) -> rusqlite::Result<Self> {
+        Self::parse(value)
+            .ok_or_else(|| invalid_db_text_conversion(index, "snapshot trigger", value))
+    }
+
+    /// Returns `true` for triggers that represent explicit user action.
+    pub fn is_manual_kind(self) -> bool {
+        matches!(self, SnapshotTrigger::Manual | SnapshotTrigger::Mcp | SnapshotTrigger::Api)
+    }
+}
+
+impl FromStr for SnapshotTrigger {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(value).ok_or(())
+    }
+}
+
+impl std::fmt::Display for SnapshotTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<&str> for SnapshotTrigger {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str().eq_ignore_ascii_case(other)
+    }
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ProjectEntry {
@@ -112,7 +181,7 @@ pub struct SnapshotRow {
     pub rowid: i64,
     pub snapshot_id: u64,
     pub timestamp: String,
-    pub trigger: String,
+    pub trigger: SnapshotTrigger,
     pub message: String,
     pub pinned: bool,
     pub ai_summary: Option<String>,
@@ -125,7 +194,7 @@ pub struct SnapshotSummary {
     pub rowid: i64,
     pub snapshot_id: u64,
     pub timestamp: String,
-    pub trigger: String,
+    pub trigger: SnapshotTrigger,
     pub message: String,
     pub pinned: bool,
     pub file_count: u64,
@@ -137,7 +206,7 @@ pub struct SearchResult {
     pub snapshot_rowid: i64,
     pub snapshot_id: u64,
     pub timestamp: String,
-    pub trigger: String,
+    pub trigger: SnapshotTrigger,
     pub message: String,
     pub ai_summary: Option<String>,
     pub match_context: String,
@@ -147,7 +216,7 @@ pub struct CreateSnapshotRow<'a> {
     pub project_hash: &'a str,
     pub snapshot_id: u64,
     pub timestamp: &'a str,
-    pub trigger: &'a str,
+    pub trigger: SnapshotTrigger,
     pub message: &'a str,
     pub pinned: bool,
     pub files: &'a [SnapFileEntry],
@@ -496,7 +565,7 @@ pub struct FileHistoryRow {
     pub snapshot_id: u64,
     pub timestamp: String,
     pub hash: String,
-    pub trigger: String,
+    pub trigger: SnapshotTrigger,
 }
 
 impl Database {

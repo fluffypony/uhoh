@@ -83,7 +83,7 @@ fn test_snapshot_creation_and_query() {
             project_hash: "proj1",
             snapshot_id: snap_id,
             timestamp: "2025-01-01T00:00:00Z",
-            trigger: "manual",
+            trigger: uhoh::db::SnapshotTrigger::Manual,
             message: "test",
             pinned: false,
             files: &files,
@@ -96,7 +96,7 @@ fn test_snapshot_creation_and_query() {
 
     let snaps = db.list_snapshots("proj1").unwrap();
     assert_eq!(snaps.len(), 1);
-    assert_eq!(snaps[0].trigger, "manual");
+    assert_eq!(snaps[0].trigger, uhoh::db::SnapshotTrigger::Manual);
 
     // Smoke test for snapshot listing display formatting by invoking the binary
     // This validates that storage method strings appear without panics.

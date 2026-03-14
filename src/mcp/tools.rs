@@ -276,7 +276,7 @@ fn tool_create_snapshot(
         database.as_ref(),
         &context.snapshot_runtime(),
         &project,
-        "mcp",
+        crate::db::SnapshotTrigger::Mcp,
         args.message.as_deref(),
     )
     .map_err(|e| McpToolError::internal(e.to_string()))?;

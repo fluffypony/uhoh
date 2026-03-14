@@ -545,7 +545,7 @@ pub(crate) async fn create_snapshot(
             &db,
             &snapshot_runtime,
             &project,
-            "api",
+            crate::db::SnapshotTrigger::Api,
             message.as_deref(),
         )
         .map_err(ApiError::invalid_input)?;
@@ -727,9 +727,10 @@ pub(crate) async fn get_timeline(
                     "file_count": s.file_count,
                     "ai_summary": ai_summary,
                 });
-                match s.trigger.as_str() {
-                    "manual" | "mcp" | "api" => manual.push(entry),
-                    _ => auto_saves.push(entry),
+                if s.trigger.is_manual_kind() {
+                    manual.push(entry);
+                } else {
+                    auto_saves.push(entry);
                 }
             }
             Json(json!({

@@ -26,7 +26,7 @@ pub struct CachedFileState {
 pub struct CreateSnapshotRequest<'a> {
     pub project_hash: &'a str,
     pub project_path: &'a Path,
-    pub trigger: &'a str,
+    pub trigger: crate::db::SnapshotTrigger,
     pub message: Option<&'a str>,
     pub changed_paths: Option<&'a [PathBuf]>,
 }
@@ -105,7 +105,7 @@ impl SnapshotScanResult {
 }
 
 struct SnapshotDecision {
-    trigger: String,
+    trigger: crate::db::SnapshotTrigger,
     message: String,
 }
 
@@ -135,7 +135,7 @@ pub fn create_snapshot(
         &blob_root,
     )?;
 
-    if !scan.has_changes && trigger == "auto" {
+    if !scan.has_changes && trigger == crate::db::SnapshotTrigger::Auto {
         return Ok(None);
     }
 
@@ -650,14 +650,14 @@ fn record_file_entry(
 }
 
 fn derive_snapshot_decision(
-    trigger: &str,
+    trigger: crate::db::SnapshotTrigger,
     message: Option<&str>,
     deleted_count: usize,
     prev_file_count: usize,
     settings: &SnapshotSettings,
 ) -> SnapshotDecision {
     let prev_count = prev_file_count as u64;
-    let trigger = if trigger == "auto"
+    let trigger = if trigger == crate::db::SnapshotTrigger::Auto
         && crate::emergency::exceeds_threshold(
             deleted_count,
             prev_count,
@@ -671,12 +671,12 @@ fn derive_snapshot_decision(
             prev_count,
             ratio
         );
-        "emergency".to_string()
+        crate::db::SnapshotTrigger::Emergency
     } else {
-        trigger.to_string()
+        trigger
     };
 
-    let message = if trigger == "emergency" && message.is_none() {
+    let message = if trigger == crate::db::SnapshotTrigger::Emergency && message.is_none() {
         let ratio = crate::emergency::deletion_ratio(deleted_count, prev_count);
         format!(
             "Mass delete detected: {}/{} files ({:.1}%)",
@@ -702,7 +702,7 @@ fn persist_snapshot(
         project_hash,
         snapshot_id: 0,
         timestamp: &timestamp,
-        trigger: &decision.trigger,
+        trigger: decision.trigger,
         message: &decision.message,
         pinned: false,
         files: &scan.files_for_manifest,
@@ -728,7 +728,7 @@ fn run_snapshot_post_commit(
         decision,
         &scan.files_for_manifest,
     );
-    update_active_operation_snapshot(database, project_hash, &decision.trigger, snapshot_id);
+    update_active_operation_snapshot(database, project_hash, decision.trigger, snapshot_id);
     schedule_ai_summary(
         uhoh_dir,
         database,
@@ -774,7 +774,7 @@ fn index_snapshot_for_search(
     let _ = database.index_snapshot_for_search(
         rowid,
         project_hash,
-        &decision.trigger,
+        decision.trigger.as_str(),
         &decision.message,
         "",
         &file_paths_str,
@@ -784,10 +784,10 @@ fn index_snapshot_for_search(
 fn update_active_operation_snapshot(
     database: &Database,
     project_hash: &str,
-    trigger: &str,
+    trigger: crate::db::SnapshotTrigger,
     snapshot_id: u64,
 ) {
-    if trigger == "pre-restore" {
+    if trigger == crate::db::SnapshotTrigger::PreRestore {
         return;
     }
     if let Ok(Some(op)) = database.get_active_operation(project_hash) {
@@ -933,7 +933,7 @@ fn enforce_storage_limit(
             continue;
         }
         // Protect emergency snapshots within their retention window
-        if snap.trigger == "emergency" {
+        if snap.trigger == crate::db::SnapshotTrigger::Emergency {
             if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&snap.timestamp) {
                 let age = now.signed_duration_since(ts.with_timezone(&chrono::Utc));
                 if age < emergency_retention {

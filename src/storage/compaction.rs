@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 
 use crate::config::CompactionConfig;
-use crate::db::{Database, SnapshotRow};
+use crate::db::{Database, SnapshotRow, SnapshotTrigger};
 
 /// Run compaction on a project's snapshots.
 /// Uses bucket-based deduplication with O(1) bucket membership check via HashSet.
@@ -33,7 +33,7 @@ pub fn compact_project(
 
     // First pass: identify protected predecessors.
     for snapshot in &snapshots {
-        if snapshot.trigger == "emergency" {
+        if snapshot.trigger == SnapshotTrigger::Emergency {
             let ts = parse_timestamp(&snapshot.timestamp)
                 .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
             let age = now.signed_duration_since(ts);
@@ -81,7 +81,7 @@ pub fn compact_project(
 
         // Emergency snapshots are immune to bucket-deduplication pruning within
         // the configured retention window.
-        if snapshot.trigger == "emergency" && age < emergency_retention {
+        if snapshot.trigger == SnapshotTrigger::Emergency && age < emergency_retention {
             register_in_buckets(
                 snapshot,
                 &mut buckets_5min,
@@ -107,7 +107,7 @@ pub fn compact_project(
 
         // Manual commits with messages are always retained (like pinned snapshots).
         // They represent explicit user saves and should never be pruned by bucket dedup.
-        if snapshot.trigger == "manual" && !snapshot.message.is_empty() {
+        if snapshot.trigger == SnapshotTrigger::Manual && !snapshot.message.is_empty() {
             register_in_buckets(
                 snapshot,
                 &mut buckets_5min,

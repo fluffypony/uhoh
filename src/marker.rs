@@ -83,8 +83,12 @@ fn marker_path_for(project_path: &Path) -> PathBuf {
 pub fn scan_for_markers(search_paths: &[PathBuf]) -> Vec<(String, PathBuf)> {
     let mut found = Vec::new();
     for base in search_paths {
-        if let Some(hash) = read_marker(base).ok().flatten() {
-            found.push((hash, base.clone()));
+        match read_marker(base) {
+            Ok(Some(hash)) => found.push((hash, base.clone())),
+            Ok(None) => {} // no marker present
+            Err(e) => {
+                tracing::warn!("Corrupt or unreadable marker at {}: {e}", base.display());
+            }
         }
     }
     found
