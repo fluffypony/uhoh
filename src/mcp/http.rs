@@ -39,29 +39,7 @@ pub async fn handle_http_request(
     headers: axum::http::HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> axum::response::Response {
-    if !state.transport_policy.validate_host(&headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(JsonRpcResponse::error(
-                request.id,
-                -32600,
-                "Invalid Host header".to_string(),
-            )),
-        )
-            .into_response();
-    }
-
-    if !state.transport_policy.validate_origin(&headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(JsonRpcResponse::error(
-                request.id,
-                -32600,
-                "Invalid Origin header".to_string(),
-            )),
-        )
-            .into_response();
-    }
+    // Host and Origin validation is handled by server middleware.
 
     match super::handle_json_rpc_request(state.application.clone(), request).await {
         super::McpTransportResponse::Notification => StatusCode::ACCEPTED.into_response(),

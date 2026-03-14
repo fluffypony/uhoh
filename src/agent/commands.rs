@@ -12,7 +12,7 @@ pub fn handle_cli_action(uhoh_dir: &Path, database: &Database, action: &AgentAct
             let profile_path = profile
                 .clone()
                 .unwrap_or_else(|| format!("~/.uhoh/agents/{name}.toml"));
-            let resolved_profile = crate::util::expand_home(&profile_path);
+            let resolved_profile = super::expand_home(&profile_path);
             if !Path::new(&resolved_profile).exists() {
                 anyhow::bail!("Agent profile not found: {resolved_profile}");
             }
