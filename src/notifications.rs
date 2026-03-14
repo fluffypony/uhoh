@@ -74,13 +74,19 @@ impl NotificationPipeline {
                 "summary": summary,
                 "event": event,
             });
-            if let Err(e) = reqwest::Client::new()
+            match reqwest::Client::new()
                 .post(self.cfg.webhook_url.clone())
                 .json(&payload)
                 .send()
                 .await
             {
-                tracing::warn!("Webhook delivery failed: {e}");
+                Ok(resp) if !resp.status().is_success() => {
+                    tracing::warn!("Webhook delivery returned {}", resp.status());
+                }
+                Err(e) => {
+                    tracing::warn!("Webhook delivery failed: {e}");
+                }
+                _ => {}
             }
         }
     }
