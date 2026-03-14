@@ -34,7 +34,7 @@ pub fn handle_cli_action(uhoh_dir: &Path, database: &Database, action: &DbAction
             let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
 
             let mode_kind = if engine == db::DbGuardEngine::Mysql {
-                if !db::DbGuardMode::SchemaPolling.eq_ignore_ascii_case(mode) {
+                if *mode != db::DbGuardMode::SchemaPolling {
                     tracing::warn!(
                         "MySQL guard only supports schema_polling mode; normalizing requested mode '{}'",
                         mode
@@ -42,8 +42,7 @@ pub fn handle_cli_action(uhoh_dir: &Path, database: &Database, action: &DbAction
                 }
                 db::DbGuardMode::SchemaPolling
             } else {
-                db::DbGuardMode::parse(mode)
-                    .with_context(|| "Supported modes: triggers, schema_polling".to_string())?
+                *mode
             };
 
             let connection_ref = super::credentials::scrub_dsn(dsn);

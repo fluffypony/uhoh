@@ -9,7 +9,7 @@ use crate::db;
 use crate::diff_view;
 use crate::git;
 use crate::marker;
-use crate::operations;
+use crate::commands::operations;
 use crate::restore;
 use crate::snapshot;
 
@@ -359,5 +359,5 @@ pub fn undo(uhoh: &Path, database: &db::Database, target: Option<String>) -> Res
 
 pub fn operations(database: &db::Database, target: Option<String>) -> Result<()> {
     let project = resolve_target_project(database, target.as_deref())?;
-    crate::operations::cmd_list_operations(database, &project)
+    crate::commands::operations::cmd_list_operations(database, &project)
 }
