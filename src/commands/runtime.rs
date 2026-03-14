@@ -246,6 +246,9 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
         cmd.env("UHOH_SANDBOX_ENABLED", "1");
 
         #[cfg(target_os = "linux")]
+        // SAFETY: pre_exec runs in a fork-child context before exec; the closure loads
+        // an agent profile and applies Landlock restrictions — no async or allocator
+        // state is shared with the parent, so this is safe to call.
         unsafe {
             cmd.pre_exec(|| {
                 let profile_path = std::env::var("UHOH_AGENT_PROFILE").unwrap_or_else(|_| {
@@ -274,12 +277,17 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
         let pid_u32 = child.id();
         let pid = i32::try_from(pid_u32).unwrap_or(i32::MAX);
         let mut pidfd = -1;
+        // SAFETY: pidfd_open is called with a valid pid obtained from child.id();
+        // failure returns -1 which is checked immediately below.
         unsafe {
             pidfd = libc::syscall(libc::SYS_pidfd_open, pid, 0) as i32;
         }
         if pidfd >= 0 {
             tracing::info!("pidfd supervision enabled for pid {}", pid);
+            // SAFETY: siginfo_t is a plain-old-data struct where all-zero bytes are valid.
             let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: waitid with P_PIDFD on a valid pidfd obtained above; status is a
+            // properly aligned, zero-initialized siginfo_t with sufficient size.
             let waited = unsafe {
                 libc::waitid(
                     libc::P_PIDFD,
@@ -288,6 +296,8 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
                     libc::WEXITED | libc::WNOWAIT,
                 )
             };
+            // SAFETY: closing a valid pidfd obtained from SYS_pidfd_open above;
+            // the fd is not used after this point.
             unsafe {
                 libc::close(pidfd);
             }

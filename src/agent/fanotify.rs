@@ -35,6 +35,8 @@ struct FanotifyFd(RawFd);
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 impl Drop for FanotifyFd {
     fn drop(&mut self) {
+        // SAFETY: closing a valid fd obtained from fanotify_init; Drop guarantees
+        // this runs exactly once and the fd is not used afterward.
         unsafe {
             libc::close(self.0);
         }
@@ -194,6 +196,8 @@ fn normalize_monitor_roots(monitor_roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 fn init_fanotify() -> Result<FanotifyFd> {
+    // SAFETY: fanotify_init is called with valid flag constants; failure returns -1
+    // which is checked immediately below.
     let fan_fd_raw = unsafe {
         libc::fanotify_init(
             (libc::FAN_CLASS_CONTENT
@@ -219,6 +223,8 @@ fn mark_monitor_roots(fan_fd: RawFd, monitor_roots: &[PathBuf]) -> Result<()> {
             .custom_flags(libc::O_CLOEXEC)
             .open(monitor_root)
             .with_context(|| format!("Failed opening monitor root: {}", monitor_root.display()))?;
+        // SAFETY: fanotify_mark is called with a valid fanotify fd, a valid directory fd
+        // from OpenOptions, and a NUL-terminated CString path; return value is checked.
         let mark_ok = unsafe {
             libc::fanotify_mark(
                 fan_fd,
@@ -235,6 +241,8 @@ fn mark_monitor_roots(fan_fd: RawFd, monitor_roots: &[PathBuf]) -> Result<()> {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::EINVAL) {
             tracing::warn!("FAN_MARK_FILESYSTEM unsupported, retrying with FAN_MARK_MOUNT only");
+            // SAFETY: same as above but without FAN_MARK_FILESYSTEM; all fd and
+            // path arguments remain valid from the enclosing scope.
             let fallback = unsafe {
                 libc::fanotify_mark(
                     fan_fd,
@@ -277,6 +285,8 @@ fn emit_monitor_started(ctx: &AgentContext, monitor_roots: &[PathBuf]) {
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 fn poll_for_events(pollfd: &mut libc::pollfd) -> bool {
+    // SAFETY: pollfd points to a valid, initialized libc::pollfd struct with a valid
+    // fanotify fd; nfds=1 matches the single-element pointer.
     let poll_ret = unsafe { libc::poll(pollfd, 1, 1000) };
     if poll_ret == 0 {
         return false;
@@ -299,6 +309,8 @@ fn read_fanotify_chunk(
     ledger: &EventLedger,
     batch: &mut PendingAuditBatch,
 ) -> Result<Option<usize>> {
+    // SAFETY: reading from a valid fanotify fd into a caller-owned buffer;
+    // buf.as_mut_ptr() and buf.len() describe a valid writable region.
     let nread = unsafe { libc::read(fan_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
     if nread < 0 {
         let err = std::io::Error::last_os_error();
@@ -349,6 +361,9 @@ fn next_event_metadata<'a>(
     if *offset + std::mem::size_of::<libc::fanotify_event_metadata>() > bytes.len() {
         return None;
     }
+    // SAFETY: the size check above guarantees bytes[*offset..] has enough room for a
+    // fanotify_event_metadata; the kernel wrote this struct so alignment is satisfied
+    // and the content is valid.
     let metadata = unsafe { &*(bytes[*offset..].as_ptr() as *const libc::fanotify_event_metadata) };
     if metadata.vers as usize != libc::FANOTIFY_METADATA_VERSION || metadata.event_len == 0 {
         return None;
@@ -411,6 +426,8 @@ fn handle_permission_event(
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 fn close_metadata_fd(fd: RawFd) {
     if fd >= 0 {
+        // SAFETY: fd is a non-negative file descriptor provided by fanotify event
+        // metadata; each event fd is closed exactly once here after processing.
         unsafe {
             libc::close(fd);
         }
@@ -449,10 +466,14 @@ fn capture_preimage_from_fd(
     }
     // Use dup() on the fanotify-provided fd instead of File::open() to avoid
     // generating a second FAN_OPEN_PERM event that would deadlock the monitor.
+    // SAFETY: dup() on a valid fanotify event fd; failure returns -1 which is
+    // checked immediately below. The original fd remains owned by the caller.
     let dup_fd = unsafe { libc::dup(event_fd) };
     if dup_fd < 0 {
         anyhow::bail!("dup() failed for pre-image fd");
     }
+    // SAFETY: dup_fd is a valid, newly duplicated fd (checked non-negative above);
+    // ownership transfers to File which will close it on drop.
     let mut file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
     // Check file size before reading to prevent OOM
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -535,6 +556,8 @@ fn respond_allow(fan_fd: RawFd, fd: RawFd) {
         fd,
         response: libc::FAN_ALLOW,
     };
+    // SAFETY: writing a properly initialized fanotify_response to a valid fanotify fd;
+    // the response struct lives on the stack and the pointer/size are correct.
     let ret = unsafe {
         libc::write(
             fan_fd,
