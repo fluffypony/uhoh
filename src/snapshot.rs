@@ -8,7 +8,6 @@ use crate::cas;
 use crate::config::{AiConfig, CompactionConfig, Config, StorageConfig, WatchConfig};
 use crate::db::Database;
 use crate::ignore_rules;
-// use crate::db::SnapshotRow; // not used directly here
 use crate::ai;
 
 /// File metadata cache for efficient change detection.
@@ -83,13 +82,11 @@ impl SnapshotRuntime {
     }
 }
 
-type DeletedManifestEntry = (String, String, u64, bool, cas::StorageMethod);
-
 struct SnapshotScanResult {
     has_changes: bool,
     new_files: Vec<String>,
     files_for_manifest: Vec<crate::db::SnapFileEntry>,
-    deleted_for_manifest: Vec<DeletedManifestEntry>,
+    deleted_for_manifest: Vec<crate::db::DeletedFile>,
     current_hashes: HashMap<String, (String, bool)>,
 }
 
@@ -496,14 +493,14 @@ fn cached_manifest_entry(path: &str, cached: &CachedFileState) -> crate::db::Sna
     }
 }
 
-fn deleted_manifest_entry(path: &str, cached: &CachedFileState) -> DeletedManifestEntry {
-    (
-        path.to_string(),
-        cached.hash.clone(),
-        cached.size,
-        cached.stored,
-        cached.storage_method,
-    )
+fn deleted_manifest_entry(path: &str, cached: &CachedFileState) -> crate::db::DeletedFile {
+    crate::db::DeletedFile {
+        path: path.to_string(),
+        hash: cached.hash.clone(),
+        size: cached.size,
+        stored: cached.stored,
+        storage_method: cached.storage_method,
+    }
 }
 
 fn record_symlink_entry(
@@ -786,7 +783,7 @@ fn schedule_ai_summary(
     prev_files: &HashMap<String, CachedFileState>,
     rowid: i64,
     current_files: &[crate::db::SnapFileEntry],
-    deleted_for_manifest: &[DeletedManifestEntry],
+    deleted_for_manifest: &[crate::db::DeletedFile],
 ) {
     if !ai::should_run_ai(&runtime.settings().ai) {
         let _ = database.enqueue_ai_summary(rowid, project_hash);
@@ -823,13 +820,13 @@ fn schedule_ai_summary(
         }
     }
 
-    for (path, hash, size, stored, _) in deleted_for_manifest {
+    for entry in deleted_for_manifest {
         changes.push(crate::ai::summary::SummaryDiffEntry {
-            path,
+            path: &entry.path,
             previous: Some(crate::ai::summary::SummaryBlobRef {
-                hash,
-                stored: *stored,
-                size: *size,
+                hash: &entry.hash,
+                stored: entry.stored,
+                size: entry.size,
             }),
             current: None,
         });
@@ -959,4 +956,3 @@ fn load_previous_snapshot_files(
     Ok(map)
 }
 
-// Tree hash computation removed to reduce overhead; table preserved for potential future use.

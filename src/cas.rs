@@ -392,12 +392,11 @@ pub fn read_blob(blob_root: &Path, hash: &str) -> Result<Option<Vec<u8>>> {
     // Verify integrity (catch disk corruption / tampering)
     let actual_hash = blake3::hash(&content).to_hex().to_string();
     if actual_hash != hash {
-        tracing::error!(
-            "Blob corruption detected! Expected {}, got {}",
+        anyhow::bail!(
+            "Blob corruption detected: expected {}, got {}",
             &hash[..hash.len().min(16)],
             &actual_hash[..actual_hash.len().min(16)]
         );
-        return Ok(None);
     }
 
     Ok(Some(content))

@@ -516,4 +516,3 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
     }
     Ok(entries)
 }
-// safe_truncate: removed unused function (dead code)
