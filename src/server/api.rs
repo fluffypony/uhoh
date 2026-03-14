@@ -224,8 +224,7 @@ pub(crate) async fn get_snapshot(
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
-            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
-            .map_err(|err| err)?;
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))?;
         Ok(json!({
             "id": crate::cas::id_to_base58(snap.snapshot_id),
             "rowid": snap.rowid,
@@ -253,8 +252,7 @@ pub(crate) async fn get_snapshot_files(
     let db = state.runtime.database();
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let id = crate::cas::base58_to_id(&snap_id)
-            .ok_or_else(|| ApiError::invalid_input("Invalid snapshot ID"))
-            .map_err(|err| err)?;
+            .ok_or_else(|| ApiError::invalid_input("Invalid snapshot ID"))?;
         if id == 0 {
             return Err(ApiError::invalid_input(
                 "Snapshot ID '1' maps to reserved value 0; valid IDs start from '2'",
@@ -262,8 +260,7 @@ pub(crate) async fn get_snapshot_files(
         }
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
-            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
-            .map_err(|err| err)?;
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))?;
         if snap.snapshot_id != id {
             return Err(ApiError::invalid_input(
                 "Snapshot does not belong to requested project",
@@ -387,15 +384,13 @@ pub(crate) async fn get_diff(
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
-            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
-            .map_err(|err| err)?;
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))?;
         let files = db.get_snapshot_files(snap.rowid)?;
 
         let base_rowid = if let Some(base_id) = params.against.as_ref() {
             Some(
                 db.find_snapshot_by_base58(&hash, base_id)?
-                    .ok_or_else(|| ApiError::not_found("Base snapshot not found"))
-                    .map_err(|err| err)?
+                    .ok_or_else(|| ApiError::not_found("Base snapshot not found"))?
                     .rowid,
             )
         } else {
@@ -494,14 +489,12 @@ pub(crate) async fn get_file_content(
         .map_err(ApiError::invalid_input)?;
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
-            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
-            .map_err(|err| err)?;
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))?;
         let file = db
             .get_snapshot_files(snap.rowid)?
             .into_iter()
             .find(|f| f.path == clean_path)
-            .ok_or_else(|| ApiError::not_found("File not found in snapshot"))
-            .map_err(|err| err)?;
+            .ok_or_else(|| ApiError::not_found("File not found in snapshot"))?;
         if !file.stored {
             return Err(ApiError::invalid_input(
                 "File content is not stored for this snapshot entry",
@@ -580,8 +573,7 @@ pub(crate) async fn set_snapshot_pin(
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let snap = db
             .find_snapshot_by_base58(&hash, &snap_id)?
-            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
-            .map_err(|err| err)?;
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))?;
         db.pin_snapshot(snap.rowid, pinned)?;
         Ok(json!({
             "id": crate::cas::id_to_base58(snap.snapshot_id),
@@ -620,8 +612,7 @@ pub(crate) async fn restore_snapshot(
             resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::not_found)?;
         let snapshot = db
             .find_snapshot_by_base58(&hash, &snap_id)?
-            .ok_or_else(|| ApiError::not_found("Snapshot not found"))
-            .map_err(|err| err)?;
+            .ok_or_else(|| ApiError::not_found("Snapshot not found"))?;
         if let Some(tp) = target_path_for_validation.as_deref() {
             resolve::validate_path_within_project(std::path::Path::new(&project.current_path), tp)
                 .map_err(ApiError::invalid_input)?;

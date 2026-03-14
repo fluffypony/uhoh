@@ -66,11 +66,10 @@ pub async fn auth_middleware(
         if !auth_policy.requires_mcp_auth() {
             return next.run(request).await;
         }
-    } else if path == "/ws" {
-        return next.run(request).await;
-    } else if !auth_policy.requires_http_auth() {
-        return next.run(request).await;
-    } else if matches!(method, Method::GET | Method::HEAD) {
+    } else if path == "/ws"
+        || !auth_policy.requires_http_auth()
+        || matches!(method, Method::GET | Method::HEAD)
+    {
         return next.run(request).await;
     }
 

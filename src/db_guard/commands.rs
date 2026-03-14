@@ -348,8 +348,8 @@ fn apply_recovery_artifact(
         let plaintext = super::recovery::decrypt_recovery_payload(&bytes, uhoh_dir)
             .context("Failed to decrypt recovery payload")?;
         bytes.zeroize();
-        let sql = String::from_utf8(plaintext).context("Recovery payload is not valid UTF-8")?;
-        sql
+        
+        String::from_utf8(plaintext).context("Recovery payload is not valid UTF-8")?
     } else {
         String::from_utf8(bytes).context("Recovery artifact is not valid UTF-8")?
     };
@@ -447,11 +447,10 @@ fn json_contains_table_name(value: &serde_json::Value, table: &str) -> bool {
         serde_json::Value::Object(map) => {
             let key_hits = ["table", "table_name", "tableName", "relation", "relname"];
             for (key, value) in map {
-                if key_hits.iter().any(|candidate| candidate == key) {
-                    if json_contains_table_name(value, table) {
+                if key_hits.iter().any(|candidate| candidate == key)
+                    && json_contains_table_name(value, table) {
                         return true;
                     }
-                }
                 if matches!(
                     key.as_str(),
                     "added_tables" | "removed_tables" | "tables" | "details"
