@@ -140,12 +140,26 @@ pub async fn status(uhoh: &Path, database: &db::Database) -> Result<()> {
     println!("Projects: {}", projects.len());
     let total: u64 = projects
         .iter()
-        .filter_map(|project| database.snapshot_count(&project.hash).ok())
+        .map(|project| match database.snapshot_count(&project.hash) {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!("Failed to count snapshots for {}: {e}", project.hash);
+                0
+            }
+        })
         .sum();
     println!("Snapshots: {total}");
-    let size = database.get_blob_bytes().unwrap_or(0);
-    println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0);
-    let cfg = config::Config::load(&uhoh.join("config.toml")).unwrap_or_default();
+    match database.get_blob_bytes() {
+        Ok(size) => println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0),
+        Err(e) => println!("Blob storage: unavailable ({e})"),
+    }
+    let cfg = match config::Config::load(&uhoh.join("config.toml")) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Config: failed to load ({e}), using defaults");
+            config::Config::default()
+        }
+    };
     println!(
         "AI: {}",
         if cfg.ai.enabled {
