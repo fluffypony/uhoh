@@ -298,10 +298,6 @@ pub fn generate_summary_blocking(
     Ok(Some(summary.to_string()))
 }
 
-// Removed async generate_summary variant to avoid duplication and drift. The
-// blocking variant is used consistently; async callers should spawn it in a
-// blocking task if needed.
-
 #[cfg(test)]
 mod tests {
     use super::{prepare_summary_inputs, SummaryBlobRef, SummaryDiffEntry};

@@ -56,7 +56,9 @@ impl NotificationPipeline {
             } else {
                 "uhoh"
             };
-            let _ = send_desktop_notification(title, &summary).await;
+            if let Err(e) = send_desktop_notification(title, &summary).await {
+                tracing::warn!("Desktop notification failed: {e}");
+            }
         }
 
         if !self.cfg.webhook_url.trim().is_empty()
@@ -72,11 +74,14 @@ impl NotificationPipeline {
                 "summary": summary,
                 "event": event,
             });
-            let _ = reqwest::Client::new()
+            if let Err(e) = reqwest::Client::new()
                 .post(self.cfg.webhook_url.clone())
                 .json(&payload)
                 .send()
-                .await;
+                .await
+            {
+                tracing::warn!("Webhook delivery failed: {e}");
+            }
         }
     }
 

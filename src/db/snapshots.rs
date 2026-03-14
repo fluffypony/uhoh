@@ -83,14 +83,14 @@ pub fn create_snapshot_tx(
             "INSERT INTO snapshot_deleted (snapshot_rowid, path, hash, size, stored, storage_method)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
-        for (path, hash, size, stored, storage_method) in deleted {
+        for entry in deleted {
             del_stmt.execute(params![
                 rowid,
-                path,
-                hash,
-                size,
-                *stored as i32,
-                storage_method.to_db()
+                entry.path,
+                entry.hash,
+                entry.size,
+                entry.stored as i32,
+                entry.storage_method.to_db()
             ])?;
         }
     }

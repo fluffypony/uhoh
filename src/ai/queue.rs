@@ -23,8 +23,12 @@ pub async fn process_summary_queue(
     sidecar_manager: &SidecarManager,
     event_tx: &broadcast::Sender<ServerEvent>,
 ) {
-    let Ok(jobs) = database.dequeue_pending_ai(MAX_AI_SUMMARIES_PER_TICK) else {
-        return;
+    let jobs = match database.dequeue_pending_ai(MAX_AI_SUMMARIES_PER_TICK) {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            tracing::warn!("Failed to dequeue pending AI summaries: {e}");
+            return;
+        }
     };
 
     for job in jobs {
