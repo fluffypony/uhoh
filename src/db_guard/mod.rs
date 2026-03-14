@@ -4,6 +4,7 @@ mod crypto_policy;
 mod mysql;
 mod postgres;
 mod postgres_connection;
+mod postgres_monitoring;
 mod recovery;
 mod sqlite;
 use std::collections::HashMap;

@@ -81,7 +81,7 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
             if engine == db::DbGuardEngine::Postgres {
                 let postgres_connection =
                     super::postgres_connection::ResolvedPostgresConnection::resolve(dsn)?;
-                match super::postgres::install_monitoring_infrastructure(
+                match super::postgres_monitoring::install_monitoring_infrastructure(
                     &postgres_connection,
                     tables_csv.as_str(),
                 ) {
@@ -138,7 +138,7 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
                 if postgres_infra_installed {
                     let postgres_connection =
                         super::postgres_connection::ResolvedPostgresConnection::resolve(dsn)?;
-                    if let Err(clean_err) = super::postgres::drop_monitoring_infrastructure(
+                    if let Err(clean_err) = super::postgres_monitoring::drop_monitoring_infrastructure(
                         &postgres_connection,
                         tables_csv.as_str(),
                     ) {
@@ -164,7 +164,7 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
                         super::postgres_connection::ResolvedPostgresConnection::resolve(
                             &guard.connection_ref,
                         )?;
-                    super::postgres::drop_monitoring_infrastructure(
+                    super::postgres_monitoring::drop_monitoring_infrastructure(
                         &postgres_connection,
                         &guard.tables_csv,
                     )?;
@@ -296,7 +296,7 @@ pub fn handle_cli_action(database: &Database, uhoh_dir: &Path, action: &DbAction
                     super::postgres_connection::ResolvedPostgresConnection::resolve(
                         &guard.connection_ref,
                     )?;
-                super::postgres::test_monitoring_infrastructure(&postgres_connection)?;
+                super::postgres_monitoring::test_monitoring_infrastructure(&postgres_connection)?;
             }
             println!(
                 "Guard '{}' OK: engine={}, mode={}, conn={}",
@@ -386,7 +386,7 @@ fn apply_recovery_artifact(
                 super::postgres_connection::ResolvedPostgresConnection::resolve(
                     &guard.connection_ref,
                 )?;
-            super::postgres::execute_sql(&postgres_connection, &sql)
+            super::postgres_monitoring::execute_sql(&postgres_connection, &sql)
         }
         db::DbGuardEngine::Mysql => {
             anyhow::bail!("Recovery apply is not supported for engine 'mysql'")
