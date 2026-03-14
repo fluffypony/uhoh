@@ -79,7 +79,7 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
     let canonicalize_paths = |paths: &[String]| -> Vec<String> {
         paths
             .iter()
-            .map(|p| crate::util::expand_home(p))
+            .map(|p| super::expand_home(p))
             .filter_map(|p| {
                 let candidate = std::path::PathBuf::from(&p);
                 if candidate.exists() {
