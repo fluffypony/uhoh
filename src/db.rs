@@ -47,6 +47,8 @@ mod projects;
 mod search;
 mod snapshots;
 
+pub use ledger::LedgerRecentFilters;
+
 fn row_u64(row: &Row<'_>, index: usize, field: &'static str) -> rusqlite::Result<u64> {
     let value = row.get::<_, i64>(index)?;
     u64::try_from(value).map_err(|_| {
@@ -98,7 +100,77 @@ fn invalid_db_text_conversion(index: usize, field: &'static str, value: &str) ->
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SnapshotTrigger {
+    Auto,
+    Manual,
+    Emergency,
+    PreRestore,
+    Initial,
+    Mcp,
+    Api,
+}
+
+impl SnapshotTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SnapshotTrigger::Auto => "auto",
+            SnapshotTrigger::Manual => "manual",
+            SnapshotTrigger::Emergency => "emergency",
+            SnapshotTrigger::PreRestore => "pre-restore",
+            SnapshotTrigger::Initial => "initial",
+            SnapshotTrigger::Mcp => "mcp",
+            SnapshotTrigger::Api => "api",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(SnapshotTrigger::Auto),
+            "manual" => Some(SnapshotTrigger::Manual),
+            "emergency" => Some(SnapshotTrigger::Emergency),
+            "pre-restore" => Some(SnapshotTrigger::PreRestore),
+            "initial" => Some(SnapshotTrigger::Initial),
+            "mcp" => Some(SnapshotTrigger::Mcp),
+            "api" => Some(SnapshotTrigger::Api),
+            _ => None,
+        }
+    }
+
+    fn parse_persisted(value: &str, index: usize) -> rusqlite::Result<Self> {
+        Self::parse(value)
+            .ok_or_else(|| invalid_db_text_conversion(index, "snapshot trigger", value))
+    }
+
+    /// Returns `true` for triggers that represent explicit user action.
+    pub fn is_manual_kind(self) -> bool {
+        matches!(self, SnapshotTrigger::Manual | SnapshotTrigger::Mcp | SnapshotTrigger::Api)
+    }
+}
+
+impl FromStr for SnapshotTrigger {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(value).ok_or(())
+    }
+}
+
+impl std::fmt::Display for SnapshotTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<&str> for SnapshotTrigger {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str().eq_ignore_ascii_case(other)
+    }
+}
+
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ProjectEntry {
     pub hash: String,
     pub current_path: String,
@@ -106,11 +178,12 @@ pub struct ProjectEntry {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SnapshotRow {
     pub rowid: i64,
     pub snapshot_id: u64,
     pub timestamp: String,
-    pub trigger: String,
+    pub trigger: SnapshotTrigger,
     pub message: String,
     pub pinned: bool,
     pub ai_summary: Option<String>,
@@ -118,22 +191,24 @@ pub struct SnapshotRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct SnapshotSummary {
     pub rowid: i64,
     pub snapshot_id: u64,
     pub timestamp: String,
-    pub trigger: String,
+    pub trigger: SnapshotTrigger,
     pub message: String,
     pub pinned: bool,
     pub file_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct SearchResult {
     pub snapshot_rowid: i64,
     pub snapshot_id: u64,
     pub timestamp: String,
-    pub trigger: String,
+    pub trigger: SnapshotTrigger,
     pub message: String,
     pub ai_summary: Option<String>,
     pub match_context: String,
@@ -143,7 +218,7 @@ pub struct CreateSnapshotRow<'a> {
     pub project_hash: &'a str,
     pub snapshot_id: u64,
     pub timestamp: &'a str,
-    pub trigger: &'a str,
+    pub trigger: SnapshotTrigger,
     pub message: &'a str,
     pub pinned: bool,
     pub files: &'a [SnapFileEntry],
@@ -151,6 +226,7 @@ pub struct CreateSnapshotRow<'a> {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EventLedgerEntry {
     pub id: i64,
     pub ts: String,
@@ -327,8 +403,9 @@ impl PartialEq<&str> for DbGuardEngine {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
+#[clap(rename_all = "snake_case")]
 pub enum DbGuardMode {
     Triggers,
     SchemaPolling,
@@ -377,12 +454,14 @@ impl PartialEq<&str> for DbGuardMode {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EventLedgerTraceResult {
     pub entries: Vec<EventLedgerEntry>,
     pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct NewEventLedgerEntry {
     pub source: LedgerSource,
     pub event_type: String,
@@ -399,6 +478,7 @@ pub struct NewEventLedgerEntry {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DbGuardEntry {
     pub id: i64,
     pub name: String,
@@ -423,6 +503,7 @@ impl DbGuardEntry {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AgentEntry {
     pub id: i64,
     pub name: String,
@@ -433,6 +514,7 @@ pub struct AgentEntry {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct FileEntryRow {
     pub path: String,
     pub hash: String,
@@ -445,6 +527,7 @@ pub struct FileEntryRow {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OperationListRow {
     pub id: i64,
     pub label: String,
@@ -455,6 +538,7 @@ pub struct OperationListRow {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PendingAiSummaryRow {
     pub snapshot_rowid: i64,
     pub project_hash: String,
@@ -463,12 +547,14 @@ pub struct PendingAiSummaryRow {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ActiveOperationRow {
     pub id: i64,
     pub label: String,
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CompletedOperationRow {
     pub id: i64,
     pub label: String,
@@ -477,11 +563,12 @@ pub struct CompletedOperationRow {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct FileHistoryRow {
     pub snapshot_id: u64,
     pub timestamp: String,
     pub hash: String,
-    pub trigger: String,
+    pub trigger: SnapshotTrigger,
 }
 
 impl Database {
@@ -722,6 +809,7 @@ pub struct SnapFileEntry {
     pub is_symlink: bool,
 }
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DeletedFile {
     pub path: String,
     pub hash: String,

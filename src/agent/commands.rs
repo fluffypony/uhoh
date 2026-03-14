@@ -6,7 +6,7 @@ use crate::agent::{profiles, proxy, undo};
 use crate::cli::AgentAction;
 use crate::db::{self, Database};
 
-pub fn handle_cli_action(uhoh_dir: &Path, database: &Database, action: &AgentAction) -> Result<()> {
+pub fn handle_agent_action(uhoh_dir: &Path, database: &Database, action: &AgentAction) -> Result<()> {
     match action {
         AgentAction::Add { name, profile } => {
             let profile_path = profile
@@ -36,10 +36,12 @@ pub fn handle_cli_action(uhoh_dir: &Path, database: &Database, action: &AgentAct
         }
         AgentAction::Log { name, session } => {
             let events = database.event_ledger_recent(
-                Some(db::LedgerSource::Agent),
-                None,
-                name.as_deref(),
-                session.as_deref(),
+                db::LedgerRecentFilters {
+                    source: Some(db::LedgerSource::Agent),
+                    agent_name: name.as_deref(),
+                    session: session.as_deref(),
+                    ..Default::default()
+                },
                 100,
             )?;
             for event in events {

@@ -96,6 +96,8 @@ fn install_launchagent() -> Result<()> {
     std::fs::write(&plist_path, plist)?;
 
     // Use modern launchctl API
+    // SAFETY: getuid() is always safe to call — it has no preconditions and
+    // simply returns the real user ID of the calling process.
     let uid = unsafe { libc::getuid() };
     let status = std::process::Command::new("launchctl")
         .args(["bootstrap", &format!("gui/{uid}")])
@@ -119,6 +121,8 @@ fn remove_launchagent() -> Result<()> {
         .context("No home dir")?
         .join("Library/LaunchAgents/com.uhoh.daemon.plist");
 
+    // SAFETY: getuid() is always safe to call — it has no preconditions and
+    // simply returns the real user ID of the calling process.
     let uid = unsafe { libc::getuid() };
     let _ = std::process::Command::new("launchctl")
         .args([
@@ -254,6 +258,9 @@ pub fn is_uhoh_process_alive(pid: u32) -> bool {
         use winapi::um::processthreadsapi::OpenProcess;
         use winapi::um::psapi::GetModuleFileNameExW;
         use winapi::um::winnt::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+        // SAFETY: OpenProcess with QUERY_INFORMATION|VM_READ opens a read-only handle
+        // to the target process; null is checked. GetModuleFileNameExW writes into a
+        // stack buffer of known size. CloseHandle releases the handle before returning.
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
             if handle.is_null() {
@@ -332,6 +339,10 @@ pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
         use winapi::um::processthreadsapi::{GetProcessTimes, OpenProcess};
         use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
 
+        // SAFETY: OpenProcess with QUERY_LIMITED_INFORMATION opens a minimal handle;
+        // null is checked. FILETIME is a plain-old-data struct where all-zero bytes
+        // are valid. GetProcessTimes writes into properly aligned stack variables.
+        // CloseHandle releases the handle before returning.
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if handle.is_null() {

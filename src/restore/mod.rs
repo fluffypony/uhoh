@@ -20,6 +20,7 @@ use crate::snapshot;
 pub(crate) const RESTORE_IN_PROGRESS_FILE: &str = ".restore-in-progress";
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RestoreOutcome {
     pub snapshot_id: String,
     pub dry_run: bool,
@@ -31,7 +32,7 @@ pub struct RestoreOutcome {
 }
 
 pub struct PreRestoreSnapshot<'a> {
-    pub trigger: &'a str,
+    pub trigger: crate::db::SnapshotTrigger,
     pub message: Option<String>,
     pub snapshot_runtime: &'a crate::snapshot::SnapshotRuntime,
 }

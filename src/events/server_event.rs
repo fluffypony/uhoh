@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::db::LedgerSeverity;
+use crate::db::{LedgerSeverity, SnapshotTrigger};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ServerEventKind {
@@ -45,7 +45,7 @@ pub enum ServerEvent {
         project_hash: String,
         snapshot_id: String,
         timestamp: String,
-        trigger: String,
+        trigger: SnapshotTrigger,
         file_count: usize,
         message: Option<String>,
     },

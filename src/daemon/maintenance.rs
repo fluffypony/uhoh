@@ -32,15 +32,15 @@ pub(super) struct DaemonMaintenanceSubsystem {
     sidecar_check_interval: std::time::Duration,
     last_sidecar_check: Option<std::time::Instant>,
     vacuum_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    sidecar_manager: crate::ai::sidecar::SidecarManager,
-    mlx_update_state: crate::ai::mlx_update::MlxAutoUpdateState,
+    sidecar_manager: crate::ai::SidecarManager,
+    mlx_update_state: crate::ai::MlxAutoUpdateState,
     last_failure: Option<String>,
 }
 
 impl DaemonMaintenanceSubsystem {
     pub(super) fn new(
         config: &Config,
-        sidecar_manager: crate::ai::sidecar::SidecarManager,
+        sidecar_manager: crate::ai::SidecarManager,
     ) -> Self {
         Self {
             compaction_index: 0,
@@ -54,7 +54,7 @@ impl DaemonMaintenanceSubsystem {
             last_sidecar_check: None,
             vacuum_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sidecar_manager,
-            mlx_update_state: crate::ai::mlx_update::MlxAutoUpdateState::default(),
+            mlx_update_state: crate::ai::MlxAutoUpdateState::default(),
             last_failure: None,
         }
     }
@@ -225,7 +225,7 @@ impl DaemonMaintenanceSubsystem {
         let mut tick_sys = sysinfo::System::new();
         tick_sys.refresh_memory();
         if crate::ai::should_run_ai_with(&settings.ai, &tick_sys) {
-            crate::ai::queue::process_summary_queue(
+            crate::ai::process_summary_queue(
                 &ctx.uhoh_dir,
                 &ctx.database,
                 &settings.ai,
@@ -257,15 +257,15 @@ impl DaemonMaintenanceSubsystem {
         let sidecar_manager = self.sidecar_manager.clone();
         tokio::task::spawn_blocking(move || {
             let before =
-                crate::ai::sidecar_update::read_manifest(&sidecar_dir).map(|m| m.version);
-            match crate::ai::sidecar_update::run_update_check(
+                crate::ai::read_manifest(&sidecar_dir).map(|m| m.version);
+            match crate::ai::run_update_check(
                 &sidecar_dir,
                 &repo,
                 pin.as_deref(),
                 move || sidecar_manager.shutdown(),
             ) {
                 Ok(true) => {
-                    let after = crate::ai::sidecar_update::read_manifest(&sidecar_dir)
+                    let after = crate::ai::read_manifest(&sidecar_dir)
                         .map(|m| m.version)
                         .unwrap_or_else(|| "unknown".to_string());
                     publish_event(
@@ -287,7 +287,7 @@ impl DaemonMaintenanceSubsystem {
         ctx: &SubsystemContext,
         settings: &MaintenanceSettings,
     ) -> Option<String> {
-        if let Err(err) = crate::ai::mlx_update::maybe_run_mlx_auto_update(
+        if let Err(err) = crate::ai::maybe_run_mlx_auto_update(
             &mut self.mlx_update_state,
             &settings.ai,
             &ctx.uhoh_dir,
@@ -368,7 +368,7 @@ mod tests {
         config.sidecar_update.auto_update = false;
 
         let mut subsystem =
-            DaemonMaintenanceSubsystem::new(&config, crate::ai::sidecar::SidecarManager::new());
+            DaemonMaintenanceSubsystem::new(&config, crate::ai::SidecarManager::new());
         let ctx = SubsystemContext {
             database: database.clone(),
             event_ledger: EventLedger::new(database),

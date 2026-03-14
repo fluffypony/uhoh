@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
+#[non_exhaustive]
 pub struct AgentProfile {
     pub name: String,
     #[serde(default)]

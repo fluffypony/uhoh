@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+use crate::db::DbGuardMode;
+
 #[derive(Parser)]
 #[command(
     name = "uhoh",
@@ -10,6 +12,7 @@ use clap::{Parser, Subcommand};
                   Short aliases: + (add), - (remove), l (list), s (snapshots), \
                   r (restore), g (gitstash), c (commit), d (diff), p (cat), o (log)"
 )]
+#[non_exhaustive]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -208,8 +211,8 @@ pub enum DbAction {
         tables: Option<String>,
         #[arg(long)]
         name: Option<String>,
-        #[arg(long, default_value = "triggers")]
-        mode: String,
+        #[arg(long, value_enum, default_value_t = DbGuardMode::Triggers)]
+        mode: DbGuardMode,
     },
     Remove {
         name: String,

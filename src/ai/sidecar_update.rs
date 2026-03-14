@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SidecarManifest {
     pub version: String,
     pub platform: String,

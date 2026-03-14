@@ -1,5 +1,6 @@
 mod emergency;
 mod maintenance;
+pub(crate) mod notifications;
 mod runtime;
 mod snapshots;
 mod watcher;
@@ -28,6 +29,10 @@ pub fn spawn_detached_daemon(uhoh_dir: &Path) -> Result<()> {
         let mut cmd = std::process::Command::new(&exe);
         cmd.args(["start", "--service"]);
         // Detach from controlling terminal
+        // SAFETY: CommandExt::pre_exec requires unsafe because the closure runs between
+        // fork and exec. This closure calls setsid() (async-signal-safe) and eprintln!
+        // (not async-signal-safe but acceptable in single-threaded CLI context). setsid()
+        // failure is non-fatal — the child continues regardless.
         unsafe {
             cmd.pre_exec(|| {
                 if libc::setsid() == -1 {
@@ -88,6 +93,10 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
     }
 
     #[cfg(unix)]
+    // SAFETY: libc::kill with SIGTERM on a pid we verified is a running uhoh process
+    // via is_uhoh_process_alive_with_start above; sending SIGTERM is a graceful
+    // shutdown request and is safe even if the process exits between the check and
+    // the signal (the signal is simply discarded by the kernel).
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
     }

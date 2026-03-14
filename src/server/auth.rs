@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use subtle::ConstantTimeEq;
 
-use crate::transport_security::TransportSecurityPolicy;
+use crate::server::transport_security::TransportSecurityPolicy;
 
 #[derive(Clone)]
 pub struct AuthToken(pub String);

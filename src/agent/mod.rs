@@ -9,7 +9,7 @@ mod runtime;
 pub mod sandbox;
 pub mod undo;
 
-pub use commands::handle_cli_action;
+pub use commands::handle_agent_action;
 
 pub(crate) fn expand_home(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {

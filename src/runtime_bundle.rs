@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
-use crate::ai::sidecar::SidecarManager;
+use crate::ai::SidecarManager;
 use crate::config::Config;
 use crate::db::Database;
 use crate::events::ServerEvent;

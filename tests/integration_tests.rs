@@ -302,7 +302,7 @@ fn test_compaction_preserves_pinned() {
     let mut pin_rowid = None;
     for i in 0..8u64 {
         let ts = chrono::Utc::now() - chrono::Duration::days((60 - (i as i64) * 5).max(1));
-        let trigger = if i % 2 == 0 { "manual" } else { "auto" };
+        let trigger = if i % 2 == 0 { uhoh::db::SnapshotTrigger::Manual } else { uhoh::db::SnapshotTrigger::Auto };
         let message = if i == 0 { "keep" } else { "" };
         let pinned = i == 0;
         let (rowid, _) = database
@@ -360,7 +360,7 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "emrg1",
             project_path: &project_dir,
-            trigger: "auto",
+            trigger: uhoh::db::SnapshotTrigger::Auto,
             message: None,
             changed_paths: None,
         },
@@ -381,7 +381,7 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "emrg1",
             project_path: &project_dir,
-            trigger: "auto",
+            trigger: uhoh::db::SnapshotTrigger::Auto,
             message: None,
             changed_paths: None,
         },
@@ -392,7 +392,7 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
     let snaps = db.list_snapshots("emrg1").unwrap();
     let latest = &snaps[0]; // newest first
     assert_eq!(
-        latest.trigger, "emergency",
+        latest.trigger, uhoh::db::SnapshotTrigger::Emergency,
         "Expected trigger upgrade to 'emergency'"
     );
     assert!(
@@ -429,7 +429,7 @@ fn test_sub_threshold_no_emergency_upgrade() {
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "emrg2",
             project_path: &project_dir,
-            trigger: "auto",
+            trigger: uhoh::db::SnapshotTrigger::Auto,
             message: None,
             changed_paths: None,
         },
@@ -447,7 +447,7 @@ fn test_sub_threshold_no_emergency_upgrade() {
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "emrg2",
             project_path: &project_dir,
-            trigger: "auto",
+            trigger: uhoh::db::SnapshotTrigger::Auto,
             message: None,
             changed_paths: None,
         },
@@ -457,7 +457,7 @@ fn test_sub_threshold_no_emergency_upgrade() {
 
     let snaps = db.list_snapshots("emrg2").unwrap();
     assert_eq!(
-        snaps[0].trigger, "auto",
+        snaps[0].trigger, uhoh::db::SnapshotTrigger::Auto,
         "Should remain 'auto' for sub-threshold delete"
     );
 }
@@ -479,7 +479,7 @@ fn test_emergency_snapshot_retained_within_window() {
             project_hash: "emrg3",
             snapshot_id: 0,
             timestamp: &ts_recent,
-            trigger: "emergency",
+            trigger: uhoh::db::SnapshotTrigger::Emergency,
             message: "mass delete",
             pinned: false,
             files: &files,
@@ -514,7 +514,7 @@ fn test_emergency_snapshot_pruned_after_window() {
             project_hash: "emrg4",
             snapshot_id: 0,
             timestamp: &old_ts,
-            trigger: "emergency",
+            trigger: uhoh::db::SnapshotTrigger::Emergency,
             message: "old mass delete",
             pinned: false,
             files: &files,
@@ -529,7 +529,7 @@ fn test_emergency_snapshot_pruned_after_window() {
             project_hash: "emrg4",
             snapshot_id: 0,
             timestamp: &recent_ts,
-            trigger: "auto",
+            trigger: uhoh::db::SnapshotTrigger::Auto,
             message: "",
             pinned: false,
             files: &files,
@@ -571,7 +571,7 @@ fn test_predecessor_protection_in_compaction() {
             project_hash: "emrg5",
             snapshot_id: 0,
             timestamp: &pred_ts,
-            trigger: "auto",
+            trigger: uhoh::db::SnapshotTrigger::Auto,
             message: "",
             pinned: false,
             files: &files,
@@ -586,7 +586,7 @@ fn test_predecessor_protection_in_compaction() {
             project_hash: "emrg5",
             snapshot_id: 0,
             timestamp: &emrg_ts,
-            trigger: "emergency",
+            trigger: uhoh::db::SnapshotTrigger::Emergency,
             message: "mass delete",
             pinned: false,
             files: &files,
@@ -644,7 +644,7 @@ fn test_fast_path_directory_deletion_fallback() {
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "dirtest",
             project_path: &project_dir,
-            trigger: "auto",
+            trigger: uhoh::db::SnapshotTrigger::Auto,
             message: None,
             changed_paths: None,
         },
@@ -663,7 +663,7 @@ fn test_fast_path_directory_deletion_fallback() {
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "dirtest",
             project_path: &project_dir,
-            trigger: "auto",
+            trigger: uhoh::db::SnapshotTrigger::Auto,
             message: None,
             changed_paths: Some(&changed),
         },
@@ -711,7 +711,7 @@ fn test_restore_sets_and_clears_restore_marker_file() {
         uhoh::snapshot::CreateSnapshotRequest {
             project_hash: "restmark",
             project_path: &project_dir,
-            trigger: "manual",
+            trigger: uhoh::db::SnapshotTrigger::Manual,
             message: Some("baseline"),
             changed_paths: None,
         },
@@ -733,7 +733,7 @@ fn test_restore_sets_and_clears_restore_marker_file() {
             dry_run: false,
             force: true,
             pre_restore_snapshot: Some(uhoh::restore::PreRestoreSnapshot {
-                trigger: "pre-restore",
+                trigger: uhoh::db::SnapshotTrigger::PreRestore,
                 message: Some(format!("Before restore to {snap_id}")),
                 snapshot_runtime: &snapshot_runtime,
             }),
@@ -781,7 +781,7 @@ fn test_ledger_reads_reject_unknown_source_severity_strings() {
     assert!(!get_err.to_string().is_empty());
 
     let recent_err = db
-        .event_ledger_recent(None, None, None, None, 10)
+        .event_ledger_recent(uhoh::db::LedgerRecentFilters::default(), 10)
         .expect_err("recent ledger queries should reject invalid persisted enum values");
     assert!(!recent_err.to_string().is_empty());
 

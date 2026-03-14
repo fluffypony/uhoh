@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[derive(Debug, Deserialize)]
+#[non_exhaustive]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
     pub method: String,
@@ -11,6 +12,7 @@ pub struct JsonRpcRequest {
 }
 
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -21,6 +23,7 @@ pub struct JsonRpcResponse {
 }
 
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct JsonRpcError {
     pub code: i64,
     pub message: String,

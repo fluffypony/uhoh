@@ -7,6 +7,7 @@ const MAX_AI_DIFF_FILE_SIZE: u64 = 512 * 1024;
 const MAX_DIFF_FILES: usize = 10;
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct FileChangeSummary {
     pub added: Vec<String>,
     pub deleted: Vec<String>,
@@ -14,6 +15,7 @@ pub struct FileChangeSummary {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SummaryBlobRef<'a> {
     pub hash: &'a str,
     pub stored: bool,
@@ -21,6 +23,7 @@ pub struct SummaryBlobRef<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SummaryDiffEntry<'a> {
     pub path: &'a str,
     pub previous: Option<SummaryBlobRef<'a>>,
@@ -28,6 +31,7 @@ pub struct SummaryDiffEntry<'a> {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PreparedSummaryInput {
     pub files: FileChangeSummary,
     pub diff_text: String,

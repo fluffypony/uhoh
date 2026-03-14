@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub(crate) mod transport_security;
 pub mod ws;
 
 use anyhow::Result;
@@ -23,9 +24,10 @@ use crate::events::ServerEvent;
 use crate::restore::RestoreCoordinator;
 use crate::runtime_bundle::{RuntimeBundle, RuntimeBundleConfig};
 use crate::subsystem::{SubsystemHealth, SubsystemManager};
-use crate::transport_security::TransportSecurityPolicy;
+use crate::server::transport_security::TransportSecurityPolicy;
 use auth::{auth_middleware, host_validation_middleware, AuthToken};
 
+#[non_exhaustive]
 pub struct ServerBootstrap {
     pub config: ServerConfig,
     pub full_config: crate::config::Config,
@@ -33,11 +35,12 @@ pub struct ServerBootstrap {
     pub uhoh_dir: PathBuf,
     pub event_tx: broadcast::Sender<ServerEvent>,
     pub restore_coordinator: RestoreCoordinator,
-    pub sidecar_manager: crate::ai::sidecar::SidecarManager,
+    pub sidecar_manager: crate::ai::SidecarManager,
     pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct AppState {
     pub api: ApiState,
     pub health: HealthState,
@@ -56,6 +59,7 @@ pub struct HealthState {
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct WsState {
     pub event_tx: broadcast::Sender<ServerEvent>,
     pub transport_policy: TransportSecurityPolicy,
@@ -337,7 +341,7 @@ mod tests {
     use crate::db::Database;
     use crate::runtime_bundle::{RuntimeBundle, RuntimeBundleConfig};
     use crate::subsystem::SubsystemManager;
-    use crate::transport_security::TransportSecurityPolicy;
+    use crate::server::transport_security::TransportSecurityPolicy;
 
     fn test_app() -> (TempDir, crate::config::Config, axum::Router) {
         let temp = tempfile::tempdir().expect("tempdir");

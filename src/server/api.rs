@@ -13,12 +13,14 @@ use crate::project_service::RestoreProjectError;
 use crate::resolve;
 
 #[derive(Deserialize)]
+#[non_exhaustive]
 pub struct PaginationParams {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
 }
 
 #[derive(Deserialize)]
+#[non_exhaustive]
 pub struct SearchParams {
     pub q: String,
     pub project: Option<String>,
@@ -26,12 +28,14 @@ pub struct SearchParams {
 }
 
 #[derive(Deserialize)]
+#[non_exhaustive]
 pub struct DiffParams {
     pub against: Option<String>,
     pub file: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[non_exhaustive]
 pub struct TimelineParams {
     pub from: Option<String>,
     pub to: Option<String>,
@@ -541,7 +545,7 @@ pub(crate) async fn create_snapshot(
             &db,
             &snapshot_runtime,
             &project,
-            "api",
+            crate::db::SnapshotTrigger::Api,
             message.as_deref(),
         )
         .map_err(ApiError::invalid_input)?;
@@ -723,9 +727,10 @@ pub(crate) async fn get_timeline(
                     "file_count": s.file_count,
                     "ai_summary": ai_summary,
                 });
-                match s.trigger.as_str() {
-                    "manual" | "mcp" | "api" => manual.push(entry),
-                    _ => auto_saves.push(entry),
+                if s.trigger.is_manual_kind() {
+                    manual.push(entry);
+                } else {
+                    auto_saves.push(entry);
                 }
             }
             Json(json!({

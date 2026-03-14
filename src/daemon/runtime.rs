@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::db::{Database, LedgerSeverity, LedgerSource, ProjectEntry};
 use crate::event_ledger::{new_event, EventLedger};
 use crate::events::{publish_event, ServerEvent};
-use crate::notifications::NotificationPipeline;
+use crate::daemon::notifications::NotificationPipeline;
 use crate::subsystem::{SubsystemContext, SubsystemManager};
 
 use super::maintenance::DaemonMaintenanceSubsystem;
@@ -33,6 +33,10 @@ pub(super) async fn run_foreground(uhoh_dir: &Path, database: Arc<Database>) -> 
             .to_string();
         let mutex_name = format!("Local\\uhoh-{}\0", &dir_hash[..16]);
         let name: Vec<u16> = OsStr::new(&mutex_name).encode_wide().collect();
+        // SAFETY: CreateMutexW is called with a valid NUL-terminated wide string;
+        // the returned handle is checked for null and ERROR_ALREADY_EXISTS.
+        // The handle is stored in _daemon_mutex so it remains open for the
+        // daemon's lifetime, preventing duplicate instances.
         unsafe {
             let handle = winapi::um::synchapi::CreateMutexW(
                 std::ptr::null_mut(),
@@ -113,7 +117,7 @@ struct ForegroundDaemonRuntime {
     config_path: PathBuf,
     config: Config,
     database: Arc<Database>,
-    sidecar_manager: crate::ai::sidecar::SidecarManager,
+    sidecar_manager: crate::ai::SidecarManager,
     server_event_tx: broadcast::Sender<ServerEvent>,
     restore_coordinator: crate::restore::RestoreCoordinator,
     restore_in_progress: Arc<AtomicBool>,
@@ -144,7 +148,7 @@ impl ForegroundDaemonRuntime {
         let restore_in_progress = restore_coordinator.in_progress_flag();
         let event_ledger =
             EventLedger::new(database.clone()).with_event_publisher(server_event_tx.clone());
-        let sidecar_manager = crate::ai::sidecar::SidecarManager::new();
+        let sidecar_manager = crate::ai::SidecarManager::new();
         let subsystem_manager = start_subsystems(
             &config,
             sidecar_manager.clone(),
@@ -386,7 +390,7 @@ fn seed_project_states(
 
 async fn start_subsystems(
     config: &Config,
-    sidecar_manager: crate::ai::sidecar::SidecarManager,
+    sidecar_manager: crate::ai::SidecarManager,
     database: &Arc<Database>,
     event_ledger: &EventLedger,
     uhoh_dir: &Path,
@@ -418,7 +422,7 @@ async fn start_server(
     uhoh_dir: &Path,
     server_event_tx: &broadcast::Sender<ServerEvent>,
     restore_coordinator: &crate::restore::RestoreCoordinator,
-    sidecar_manager: crate::ai::sidecar::SidecarManager,
+    sidecar_manager: crate::ai::SidecarManager,
     subsystem_manager: &Arc<Mutex<SubsystemManager>>,
 ) -> Result<Option<tokio::task::JoinHandle<()>>> {
     if !config.server.enabled {
@@ -452,6 +456,8 @@ fn spawn_shutdown_listener() -> Result<mpsc::Receiver<()>> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
+        // SAFETY: setting SIGHUP to SIG_IGN is safe — it simply tells the kernel
+        // to ignore hangup signals so the daemon survives terminal closure.
         unsafe {
             libc::signal(libc::SIGHUP, libc::SIG_IGN);
         }

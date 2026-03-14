@@ -23,6 +23,7 @@ struct EncEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CredentialMaterial {
     pub username: Option<String>,
     pub password: Option<String>,
@@ -81,6 +82,7 @@ impl KeyringStatus {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CliCredentialResolution {
     pub material: CredentialMaterial,
     pub source: CredentialSource,

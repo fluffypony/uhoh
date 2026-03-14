@@ -22,6 +22,7 @@ struct EncryptionMaterial {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ArtifactInfo {
     pub path: String,
     pub blake3: String,

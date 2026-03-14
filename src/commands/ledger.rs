@@ -22,7 +22,7 @@ pub fn trace(database: &db::Database, event_id: i64) -> Result<()> {
 }
 
 pub fn blame(database: &db::Database, path: &str) -> Result<()> {
-    let events = database.event_ledger_recent(None, None, None, None, 500)?;
+    let events = database.event_ledger_recent(db::LedgerRecentFilters::default(), 500)?;
     if let Some(seed) = events
         .into_iter()
         .find(|entry| entry.path.as_deref() == Some(path))
@@ -58,12 +58,12 @@ pub fn timeline(
     let since_cutoff = since.as_deref().map(parse_since_cutoff).transpose()?;
     let since_rfc3339 = since_cutoff.map(|cutoff| cutoff.to_rfc3339());
 
-    let mut events = database.event_ledger_recent_since(
-        normalized_source,
-        None,
-        None,
-        None,
-        since_rfc3339.as_deref(),
+    let mut events = database.event_ledger_recent(
+        db::LedgerRecentFilters {
+            source: normalized_source,
+            since: since_rfc3339.as_deref(),
+            ..Default::default()
+        },
         1000,
     )?;
     events.reverse();

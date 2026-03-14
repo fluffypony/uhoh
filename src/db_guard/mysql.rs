@@ -9,6 +9,7 @@ use crate::event_ledger::new_event;
 use crate::subsystem::DbGuardContext;
 
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct MysqlGuardState {
     pub last_schema_hash: Option<String>,
     pub last_row_total: Option<i64>,
@@ -40,7 +41,7 @@ pub fn tick_mysql_guard(
             if let Err(err) = ctx.event_ledger.append(event) {
                 tracing::error!("failed to append mysql_poll_failed event: {err}");
             }
-            return Ok(());
+            return Err(e);
         }
     };
     let schema_hash = blake3::hash(snapshot.schema_sql.as_bytes())

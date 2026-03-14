@@ -180,34 +180,41 @@ pub async fn status(uhoh: &Path, database: &db::Database) -> Result<()> {
     }
 
     if running {
-        if let Ok(port_raw) = std::fs::read_to_string(uhoh.join("server.port")) {
-            if let Ok(port) = port_raw.trim().parse::<u16>() {
-                let url = format!("http://127.0.0.1:{port}/health");
-                if let Ok(resp) = reqwest::get(url).await {
-                    if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        if let Some(subsystems) =
-                            json.get("subsystems").and_then(|value| value.as_array())
-                        {
-                            println!("Subsystems:");
-                            for item in subsystems {
-                                let name = item
-                                    .get("name")
-                                    .and_then(|value| value.as_str())
-                                    .unwrap_or("unknown");
-                                let status = item
-                                    .get("status")
-                                    .and_then(|value| value.as_str())
-                                    .unwrap_or("unknown");
-                                println!("  - {}: {}", name, status);
-                            }
-                        }
-                    }
+        let health_msg = match fetch_subsystem_health(uhoh).await {
+            Ok(subsystems) => {
+                let mut lines = vec!["Subsystems:".to_string()];
+                for item in &subsystems {
+                    let name = item
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown");
+                    let status = item
+                        .get("status")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown");
+                    lines.push(format!("  - {}: {}", name, status));
                 }
+                lines.join("\n")
             }
-        }
+            Err(e) => format!("Subsystems: unavailable ({e})"),
+        };
+        println!("{health_msg}");
     }
 
     Ok(())
+}
+
+async fn fetch_subsystem_health(uhoh: &Path) -> Result<Vec<serde_json::Value>> {
+    let port_raw = std::fs::read_to_string(uhoh.join("server.port"))
+        .context("could not read server.port")?;
+    let port: u16 = port_raw.trim().parse().context("invalid port in server.port")?;
+    let url = format!("http://127.0.0.1:{port}/health");
+    let resp = reqwest::get(&url).await.context("could not reach health endpoint")?;
+    let json: serde_json::Value = resp.json().await.context("invalid health response")?;
+    json.get("subsystems")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no subsystems field in health response"))
 }
 
 pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()> {
@@ -246,6 +253,11 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
         cmd.env("UHOH_SANDBOX_ENABLED", "1");
 
         #[cfg(target_os = "linux")]
+        // SAFETY: CommandExt::pre_exec requires unsafe because the closure runs between
+        // fork and exec where only async-signal-safe operations are strictly safe. This
+        // closure performs file I/O and allocation which is technically not async-signal-safe,
+        // but is acceptable here because: (1) this is a single-threaded CLI context with no
+        // other threads that could hold locks, and (2) the operations complete before exec.
         unsafe {
             cmd.pre_exec(|| {
                 let profile_path = std::env::var("UHOH_AGENT_PROFILE").unwrap_or_else(|_| {
@@ -274,12 +286,17 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
         let pid_u32 = child.id();
         let pid = i32::try_from(pid_u32).unwrap_or(i32::MAX);
         let mut pidfd = -1;
+        // SAFETY: pidfd_open is called with a valid pid obtained from child.id();
+        // failure returns -1 which is checked immediately below.
         unsafe {
             pidfd = libc::syscall(libc::SYS_pidfd_open, pid, 0) as i32;
         }
         if pidfd >= 0 {
             tracing::info!("pidfd supervision enabled for pid {}", pid);
+            // SAFETY: siginfo_t is a plain-old-data struct where all-zero bytes are valid.
             let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: waitid with P_PIDFD on a valid pidfd obtained above; status is a
+            // properly aligned, zero-initialized siginfo_t with sufficient size.
             let waited = unsafe {
                 libc::waitid(
                     libc::P_PIDFD,
@@ -288,6 +305,8 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
                     libc::WEXITED | libc::WNOWAIT,
                 )
             };
+            // SAFETY: closing a valid pidfd obtained from SYS_pidfd_open above;
+            // the fd is not used after this point.
             unsafe {
                 libc::close(pidfd);
             }

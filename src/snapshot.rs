@@ -12,6 +12,7 @@ use crate::ai;
 
 /// File metadata cache for efficient change detection.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CachedFileState {
     pub hash: String,
     pub size: u64,
@@ -25,12 +26,13 @@ pub struct CachedFileState {
 pub struct CreateSnapshotRequest<'a> {
     pub project_hash: &'a str,
     pub project_path: &'a Path,
-    pub trigger: &'a str,
+    pub trigger: crate::db::SnapshotTrigger,
     pub message: Option<&'a str>,
     pub changed_paths: Option<&'a [PathBuf]>,
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct SnapshotSettings {
     pub ai: AiConfig,
     pub compaction: CompactionConfig,
@@ -52,20 +54,20 @@ impl SnapshotSettings {
 #[derive(Clone)]
 pub struct SnapshotRuntime {
     settings: SnapshotSettings,
-    sidecar_manager: crate::ai::sidecar::SidecarManager,
+    sidecar_manager: crate::ai::SidecarManager,
 }
 
 impl SnapshotRuntime {
     pub fn from_config(config: &Config) -> Self {
         Self::new(
             SnapshotSettings::from_config(config),
-            crate::ai::sidecar::SidecarManager::new(),
+            crate::ai::SidecarManager::new(),
         )
     }
 
     pub fn new(
         settings: SnapshotSettings,
-        sidecar_manager: crate::ai::sidecar::SidecarManager,
+        sidecar_manager: crate::ai::SidecarManager,
     ) -> Self {
         Self {
             settings,
@@ -77,7 +79,7 @@ impl SnapshotRuntime {
         &self.settings
     }
 
-    pub fn sidecar_manager(&self) -> &crate::ai::sidecar::SidecarManager {
+    pub fn sidecar_manager(&self) -> &crate::ai::SidecarManager {
         &self.sidecar_manager
     }
 }
@@ -103,7 +105,7 @@ impl SnapshotScanResult {
 }
 
 struct SnapshotDecision {
-    trigger: String,
+    trigger: crate::db::SnapshotTrigger,
     message: String,
 }
 
@@ -133,7 +135,7 @@ pub fn create_snapshot(
         &blob_root,
     )?;
 
-    if !scan.has_changes && trigger == "auto" {
+    if !scan.has_changes && trigger == crate::db::SnapshotTrigger::Auto {
         return Ok(None);
     }
 
@@ -648,14 +650,14 @@ fn record_file_entry(
 }
 
 fn derive_snapshot_decision(
-    trigger: &str,
+    trigger: crate::db::SnapshotTrigger,
     message: Option<&str>,
     deleted_count: usize,
     prev_file_count: usize,
     settings: &SnapshotSettings,
 ) -> SnapshotDecision {
     let prev_count = prev_file_count as u64;
-    let trigger = if trigger == "auto"
+    let trigger = if trigger == crate::db::SnapshotTrigger::Auto
         && crate::emergency::exceeds_threshold(
             deleted_count,
             prev_count,
@@ -669,12 +671,12 @@ fn derive_snapshot_decision(
             prev_count,
             ratio
         );
-        "emergency".to_string()
+        crate::db::SnapshotTrigger::Emergency
     } else {
-        trigger.to_string()
+        trigger
     };
 
-    let message = if trigger == "emergency" && message.is_none() {
+    let message = if trigger == crate::db::SnapshotTrigger::Emergency && message.is_none() {
         let ratio = crate::emergency::deletion_ratio(deleted_count, prev_count);
         format!(
             "Mass delete detected: {}/{} files ({:.1}%)",
@@ -700,7 +702,7 @@ fn persist_snapshot(
         project_hash,
         snapshot_id: 0,
         timestamp: &timestamp,
-        trigger: &decision.trigger,
+        trigger: decision.trigger,
         message: &decision.message,
         pinned: false,
         files: &scan.files_for_manifest,
@@ -726,7 +728,7 @@ fn run_snapshot_post_commit(
         decision,
         &scan.files_for_manifest,
     );
-    update_active_operation_snapshot(database, project_hash, &decision.trigger, snapshot_id);
+    update_active_operation_snapshot(database, project_hash, decision.trigger, snapshot_id);
     schedule_ai_summary(
         uhoh_dir,
         database,
@@ -772,7 +774,7 @@ fn index_snapshot_for_search(
     let _ = database.index_snapshot_for_search(
         rowid,
         project_hash,
-        &decision.trigger,
+        decision.trigger.as_str(),
         &decision.message,
         "",
         &file_paths_str,
@@ -782,10 +784,10 @@ fn index_snapshot_for_search(
 fn update_active_operation_snapshot(
     database: &Database,
     project_hash: &str,
-    trigger: &str,
+    trigger: crate::db::SnapshotTrigger,
     snapshot_id: u64,
 ) {
-    if trigger == "pre-restore" {
+    if trigger == crate::db::SnapshotTrigger::PreRestore {
         return;
     }
     if let Ok(Some(op)) = database.get_active_operation(project_hash) {
@@ -819,18 +821,18 @@ fn schedule_ai_summary(
         let previous =
             prev_files
                 .get(&file.path)
-                .map(|previous| crate::ai::summary::SummaryBlobRef {
+                .map(|previous| crate::ai::SummaryBlobRef {
                     hash: &previous.hash,
                     stored: previous.stored,
                     size: previous.size,
                 });
-        let current = Some(crate::ai::summary::SummaryBlobRef {
+        let current = Some(crate::ai::SummaryBlobRef {
             hash: &file.hash,
             stored: file.stored,
             size: file.size,
         });
         if previous.is_none() || previous.is_some_and(|previous| previous.hash != file.hash) {
-            changes.push(crate::ai::summary::SummaryDiffEntry {
+            changes.push(crate::ai::SummaryDiffEntry {
                 path: &file.path,
                 previous,
                 current,
@@ -839,9 +841,9 @@ fn schedule_ai_summary(
     }
 
     for entry in deleted_for_manifest {
-        changes.push(crate::ai::summary::SummaryDiffEntry {
+        changes.push(crate::ai::SummaryDiffEntry {
             path: &entry.path,
-            previous: Some(crate::ai::summary::SummaryBlobRef {
+            previous: Some(crate::ai::SummaryBlobRef {
                 hash: &entry.hash,
                 stored: entry.stored,
                 size: entry.size,
@@ -851,10 +853,10 @@ fn schedule_ai_summary(
     }
 
     let prepared =
-        crate::ai::summary::prepare_summary_inputs(&blob_root, &runtime.settings().ai, &changes);
+        crate::ai::prepare_summary_inputs(&blob_root, &runtime.settings().ai, &changes);
 
     std::thread::spawn(move || {
-        match crate::ai::summary::generate_summary_blocking(
+        match crate::ai::generate_summary_blocking(
             &uhoh_dir_cl,
             &runtime.settings().ai,
             runtime.sidecar_manager(),
@@ -931,7 +933,7 @@ fn enforce_storage_limit(
             continue;
         }
         // Protect emergency snapshots within their retention window
-        if snap.trigger == "emergency" {
+        if snap.trigger == crate::db::SnapshotTrigger::Emergency {
             if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&snap.timestamp) {
                 let age = now.signed_duration_since(ts.with_timezone(&chrono::Utc));
                 if age < emergency_retention {
