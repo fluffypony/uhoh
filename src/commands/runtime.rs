@@ -534,7 +534,8 @@ async fn verify_install() -> Result<()> {
                 eprintln!("Binary hash does not match DNS record!");
                 eprintln!("  Local:    {local_hash}");
                 eprintln!("  Expected: {expected}");
-                anyhow::bail!("Binary hash mismatch");
+                // Exit code 2 is the install-script contract for hash mismatch
+                std::process::exit(2);
             }
         }
         Err(e) => {
