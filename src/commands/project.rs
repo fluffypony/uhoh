@@ -23,11 +23,11 @@ pub fn add(uhoh: &Path, database: &db::Database, path: Option<String>) -> Result
     register_project(uhoh, database, project_path)
 }
 
-pub fn zero_verb(uhoh: &Path, database: &db::Database) -> Result<()> {
+pub fn default_action(uhoh: &Path, database: &db::Database) -> Result<()> {
     let cwd = dunce::canonicalize(std::env::current_dir()?)?;
 
     if let Some(project) = database.find_project_by_path(&cwd)? {
-        print_zero_verb_status(database, &project.hash)?;
+        print_project_status(database, &project.hash)?;
         return Ok(());
     }
 
@@ -103,7 +103,7 @@ fn create_initial_snapshot(
     Ok(())
 }
 
-fn print_zero_verb_status(database: &db::Database, project_hash: &str) -> Result<()> {
+fn print_project_status(database: &db::Database, project_hash: &str) -> Result<()> {
     let snaps = database.list_snapshots(project_hash)?;
     println!("uhoh is active in this directory.");
     if let Some(latest) = snaps.first() {
