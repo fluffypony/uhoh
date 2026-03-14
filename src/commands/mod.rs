@@ -48,7 +48,7 @@ pub async fn dispatch(uhoh: &Path, database: db::Database, command: Commands) ->
         Commands::Operations { target } => project::operations(&database, target)?,
         Commands::ServiceInstall => runtime::install_service()?,
         Commands::ServiceRemove => runtime::remove_service()?,
-        Commands::Db { action } => crate::db_guard::handle_cli_action(&database, uhoh, &action)?,
+        Commands::Db { action } => crate::db_guard::handle_cli_action(uhoh, &database, &action)?,
         Commands::Agent { action } => crate::agent::handle_cli_action(uhoh, &database, &action)?,
         Commands::Trace { event_id } => ledger::trace(&database, event_id)?,
         Commands::Blame { path } => ledger::blame(&database, &path)?,
