@@ -16,8 +16,6 @@ pub mod git;
 pub(crate) mod ignore_rules;
 pub(crate) mod marker;
 pub(crate) mod mcp;
-pub(crate) mod notifications;
-pub(crate) mod operations;
 pub mod platform;
 pub(crate) mod project_service;
 pub mod resolve;
@@ -27,7 +25,6 @@ pub(crate) mod server;
 pub mod snapshot;
 pub mod storage;
 pub mod subsystem;
-pub(crate) mod transport_security;
 pub mod update;
 
 // Single source of truth for ~/.uhoh directory
