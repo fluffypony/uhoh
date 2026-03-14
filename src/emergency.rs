@@ -27,6 +27,7 @@ pub enum EmergencyEvaluation {
     },
 }
 
+#[non_exhaustive]
 pub struct EmergencyEvalInput<'a> {
     pub deleted_paths_hint_count: usize,
     pub cached_baseline_count: Option<u64>,

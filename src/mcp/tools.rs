@@ -110,6 +110,7 @@ fn default_restore_dry_run() -> bool {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct McpToolError {
     pub code: i64,
     pub message: String,

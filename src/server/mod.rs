@@ -26,6 +26,7 @@ use crate::subsystem::{SubsystemHealth, SubsystemManager};
 use crate::transport_security::TransportSecurityPolicy;
 use auth::{auth_middleware, host_validation_middleware, AuthToken};
 
+#[non_exhaustive]
 pub struct ServerBootstrap {
     pub config: ServerConfig,
     pub full_config: crate::config::Config,
@@ -38,6 +39,7 @@ pub struct ServerBootstrap {
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct AppState {
     pub api: ApiState,
     pub health: HealthState,
@@ -56,6 +58,7 @@ pub struct HealthState {
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct WsState {
     pub event_tx: broadcast::Sender<ServerEvent>,
     pub transport_policy: TransportSecurityPolicy,

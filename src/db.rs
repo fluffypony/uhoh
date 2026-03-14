@@ -99,6 +99,7 @@ fn invalid_db_text_conversion(index: usize, field: &'static str, value: &str) ->
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ProjectEntry {
     pub hash: String,
     pub current_path: String,
@@ -106,6 +107,7 @@ pub struct ProjectEntry {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SnapshotRow {
     pub rowid: i64,
     pub snapshot_id: u64,
@@ -118,6 +120,7 @@ pub struct SnapshotRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct SnapshotSummary {
     pub rowid: i64,
     pub snapshot_id: u64,
@@ -129,6 +132,7 @@ pub struct SnapshotSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct SearchResult {
     pub snapshot_rowid: i64,
     pub snapshot_id: u64,
@@ -139,6 +143,7 @@ pub struct SearchResult {
     pub match_context: String,
 }
 
+#[non_exhaustive]
 pub struct CreateSnapshotRow<'a> {
     pub project_hash: &'a str,
     pub snapshot_id: u64,
@@ -151,6 +156,7 @@ pub struct CreateSnapshotRow<'a> {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EventLedgerEntry {
     pub id: i64,
     pub ts: String,
@@ -377,12 +383,14 @@ impl PartialEq<&str> for DbGuardMode {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EventLedgerTraceResult {
     pub entries: Vec<EventLedgerEntry>,
     pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct NewEventLedgerEntry {
     pub source: LedgerSource,
     pub event_type: String,
@@ -399,6 +407,7 @@ pub struct NewEventLedgerEntry {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DbGuardEntry {
     pub id: i64,
     pub name: String,
@@ -423,6 +432,7 @@ impl DbGuardEntry {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AgentEntry {
     pub id: i64,
     pub name: String,
@@ -433,6 +443,7 @@ pub struct AgentEntry {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct FileEntryRow {
     pub path: String,
     pub hash: String,
@@ -445,6 +456,7 @@ pub struct FileEntryRow {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OperationListRow {
     pub id: i64,
     pub label: String,
@@ -455,6 +467,7 @@ pub struct OperationListRow {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PendingAiSummaryRow {
     pub snapshot_rowid: i64,
     pub project_hash: String,
@@ -463,12 +476,14 @@ pub struct PendingAiSummaryRow {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ActiveOperationRow {
     pub id: i64,
     pub label: String,
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CompletedOperationRow {
     pub id: i64,
     pub label: String,
@@ -477,6 +492,7 @@ pub struct CompletedOperationRow {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct FileHistoryRow {
     pub snapshot_id: u64,
     pub timestamp: String,
@@ -711,6 +727,7 @@ impl Database {
 
 // Types used around snapshot creation
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SnapFileEntry {
     pub path: String,
     pub hash: String,
@@ -722,6 +739,7 @@ pub struct SnapFileEntry {
     pub is_symlink: bool,
 }
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DeletedFile {
     pub path: String,
     pub hash: String,

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct Config {
     #[serde(default)]
     /// Watch configuration. Hot-reload applies to debounce_quiet_secs only; other fields require daemon restart.
@@ -46,6 +47,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct WatchConfig {
     /// Seconds of quiet before creating a snapshot
     #[serde(default = "default_debounce_quiet_secs")]
@@ -85,6 +87,7 @@ pub struct WatchConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CompactionConfig {
     #[serde(default = "default_keep_all_minutes")]
     pub keep_all_minutes: u64,
@@ -101,6 +104,7 @@ pub struct CompactionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StorageConfig {
     /// Max size (bytes) for binary files to store in CAS. Larger binaries get hash recorded only.
     #[serde(default = "default_max_binary_blob_bytes")]
@@ -140,6 +144,7 @@ pub struct StorageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AiConfig {
     #[serde(default)]
     /// Enable AI (requires daemon restart to change the sidecar/model state)
@@ -170,6 +175,7 @@ pub struct AiConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MlxConfig {
     #[serde(default = "default_true")]
     pub auto_update: bool,
@@ -184,6 +190,7 @@ pub struct MlxConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ModelTierConfig {
     pub name: String,
     pub filename: String,
@@ -204,6 +211,7 @@ pub struct UpdateConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ServerConfig {
     /// Enable the unified HTTP server.
     #[serde(default = "default_true")]
@@ -235,6 +243,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SidecarUpdateConfig {
     /// Check and install newer llama-server builds.
     #[serde(default = "default_true")]
@@ -254,6 +263,7 @@ pub struct SidecarUpdateConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct NotificationsConfig {
     #[serde(default = "default_true")]
     pub desktop: bool,
@@ -339,6 +349,7 @@ impl std::fmt::Display for DangerousChangePolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DbGuardConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -359,6 +370,7 @@ pub struct DbGuardConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AgentConfig {
     #[serde(default)]
     pub enabled: bool,

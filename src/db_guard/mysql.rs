@@ -9,6 +9,7 @@ use crate::event_ledger::new_event;
 use crate::subsystem::DbGuardContext;
 
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct MysqlGuardState {
     pub last_schema_hash: Option<String>,
     pub last_row_total: Option<i64>,

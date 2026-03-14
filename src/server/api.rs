@@ -13,12 +13,14 @@ use crate::project_service::RestoreProjectError;
 use crate::resolve;
 
 #[derive(Deserialize)]
+#[non_exhaustive]
 pub struct PaginationParams {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
 }
 
 #[derive(Deserialize)]
+#[non_exhaustive]
 pub struct SearchParams {
     pub q: String,
     pub project: Option<String>,
@@ -26,12 +28,14 @@ pub struct SearchParams {
 }
 
 #[derive(Deserialize)]
+#[non_exhaustive]
 pub struct DiffParams {
     pub against: Option<String>,
     pub file: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[non_exhaustive]
 pub struct TimelineParams {
     pub from: Option<String>,
     pub to: Option<String>,

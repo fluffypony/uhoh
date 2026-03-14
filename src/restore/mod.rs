@@ -20,6 +20,7 @@ use crate::snapshot;
 pub(crate) const RESTORE_IN_PROGRESS_FILE: &str = ".restore-in-progress";
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RestoreOutcome {
     pub snapshot_id: String,
     pub dry_run: bool,
@@ -30,12 +31,14 @@ pub struct RestoreOutcome {
     pub files_to_delete: Vec<String>,
 }
 
+#[non_exhaustive]
 pub struct PreRestoreSnapshot<'a> {
     pub trigger: &'a str,
     pub message: Option<String>,
     pub snapshot_runtime: &'a crate::snapshot::SnapshotRuntime,
 }
 
+#[non_exhaustive]
 pub struct RestoreRequest<'a> {
     pub snapshot_id: &'a str,
     pub target_path: Option<&'a str>,

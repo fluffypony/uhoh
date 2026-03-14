@@ -12,6 +12,7 @@ use crate::ai;
 
 /// File metadata cache for efficient change detection.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CachedFileState {
     pub hash: String,
     pub size: u64,
@@ -22,6 +23,7 @@ pub struct CachedFileState {
     pub is_symlink: bool,
 }
 
+#[non_exhaustive]
 pub struct CreateSnapshotRequest<'a> {
     pub project_hash: &'a str,
     pub project_path: &'a Path,
@@ -31,6 +33,7 @@ pub struct CreateSnapshotRequest<'a> {
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct SnapshotSettings {
     pub ai: AiConfig,
     pub compaction: CompactionConfig,
