@@ -210,8 +210,8 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
         );
     }
     if cfg.agent.mcp_proxy_enabled {
-        let proxy_token = crate::agent::proxy::ensure_proxy_token(uhoh)?;
-        let auth_line = crate::agent::proxy::auth_handshake_line(&proxy_token);
+        let proxy_token = crate::agent::ensure_proxy_token(uhoh)?;
+        let auth_line = crate::agent::auth_handshake_line(&proxy_token);
         cmd.env(
             "UHOH_MCP_PROXY_ADDR",
             format!("127.0.0.1:{}", cfg.agent.mcp_proxy_port),
@@ -226,7 +226,7 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
     }
 
     if cfg.agent.sandbox_enabled {
-        if !crate::agent::sandbox::sandbox_supported() {
+        if !crate::agent::sandbox_supported() {
             anyhow::bail!("Sandbox requested in config but unsupported on this platform/build");
         }
         cmd.env("UHOH_SANDBOX_ENABLED", "1");
@@ -241,9 +241,9 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
                     )
                 });
                 let profile =
-                    crate::agent::profiles::load_agent_profile(std::path::Path::new(&profile_path))
+                    crate::agent::load_agent_profile(std::path::Path::new(&profile_path))
                         .map_err(|e| std::io::Error::other(e.to_string()))?;
-                crate::agent::sandbox::apply_landlock(&profile)
+                crate::agent::apply_landlock(&profile)
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
                 Ok(())
             });
