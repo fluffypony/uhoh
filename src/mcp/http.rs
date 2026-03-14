@@ -1,8 +1,6 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
 
-use crate::transport_security::TransportSecurityPolicy;
-
 use super::{
     protocol::{JsonRpcRequest, JsonRpcResponse},
     McpApplication,
@@ -11,7 +9,6 @@ use super::{
 #[derive(Clone)]
 pub struct McpHttpState {
     pub application: McpApplication,
-    pub transport_policy: TransportSecurityPolicy,
 }
 
 pub async fn get_not_supported() -> impl IntoResponse {

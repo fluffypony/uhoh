@@ -133,7 +133,6 @@ pub async fn start_server(bootstrap: ServerBootstrap) -> Result<tokio::task::Joi
         },
         mcp: crate::mcp::McpHttpState {
             application: crate::mcp::build_application(runtime.clone()),
-            transport_policy,
         },
         ws: WsState {
             event_tx,
@@ -366,7 +365,6 @@ mod tests {
             },
             mcp: crate::mcp::McpHttpState {
                 application: crate::mcp::build_application(runtime.clone()),
-                transport_policy,
             },
             ws: WsState {
                 event_tx,
