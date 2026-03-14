@@ -1,3 +1,4 @@
+mod emergency;
 mod maintenance;
 mod runtime;
 mod snapshots;
