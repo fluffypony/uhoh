@@ -35,7 +35,7 @@ pub struct ServerBootstrap {
     pub uhoh_dir: PathBuf,
     pub event_tx: broadcast::Sender<ServerEvent>,
     pub restore_coordinator: RestoreCoordinator,
-    pub sidecar_manager: crate::ai::sidecar::SidecarManager,
+    pub sidecar_manager: crate::ai::SidecarManager,
     pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
 }
 

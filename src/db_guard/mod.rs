@@ -18,7 +18,7 @@ use crate::db::{DbGuardEngine, DbGuardEntry, DbGuardMode, LedgerSeverity, Ledger
 use crate::event_ledger::new_event;
 use crate::subsystem::{DbGuardContext, Subsystem, SubsystemContext, SubsystemHealth};
 
-pub use commands::handle_cli_action;
+pub use commands::handle_db_guard_action;
 
 fn normalize_guard_mode(engine: DbGuardEngine, mode: DbGuardMode) -> DbGuardMode {
     match engine {

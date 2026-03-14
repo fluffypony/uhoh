@@ -180,34 +180,41 @@ pub async fn status(uhoh: &Path, database: &db::Database) -> Result<()> {
     }
 
     if running {
-        if let Ok(port_raw) = std::fs::read_to_string(uhoh.join("server.port")) {
-            if let Ok(port) = port_raw.trim().parse::<u16>() {
-                let url = format!("http://127.0.0.1:{port}/health");
-                if let Ok(resp) = reqwest::get(url).await {
-                    if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        if let Some(subsystems) =
-                            json.get("subsystems").and_then(|value| value.as_array())
-                        {
-                            println!("Subsystems:");
-                            for item in subsystems {
-                                let name = item
-                                    .get("name")
-                                    .and_then(|value| value.as_str())
-                                    .unwrap_or("unknown");
-                                let status = item
-                                    .get("status")
-                                    .and_then(|value| value.as_str())
-                                    .unwrap_or("unknown");
-                                println!("  - {}: {}", name, status);
-                            }
-                        }
-                    }
+        let health_msg = match fetch_subsystem_health(uhoh).await {
+            Ok(subsystems) => {
+                let mut lines = vec!["Subsystems:".to_string()];
+                for item in &subsystems {
+                    let name = item
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown");
+                    let status = item
+                        .get("status")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown");
+                    lines.push(format!("  - {}: {}", name, status));
                 }
+                lines.join("\n")
             }
-        }
+            Err(e) => format!("Subsystems: unavailable ({e})"),
+        };
+        println!("{health_msg}");
     }
 
     Ok(())
+}
+
+async fn fetch_subsystem_health(uhoh: &Path) -> Result<Vec<serde_json::Value>> {
+    let port_raw = std::fs::read_to_string(uhoh.join("server.port"))
+        .context("could not read server.port")?;
+    let port: u16 = port_raw.trim().parse().context("invalid port in server.port")?;
+    let url = format!("http://127.0.0.1:{port}/health");
+    let resp = reqwest::get(&url).await.context("could not reach health endpoint")?;
+    let json: serde_json::Value = resp.json().await.context("invalid health response")?;
+    json.get("subsystems")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no subsystems field in health response"))
 }
 
 pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()> {

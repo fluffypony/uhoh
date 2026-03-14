@@ -5,6 +5,19 @@ pub mod sidecar;
 pub mod sidecar_update;
 pub mod summary;
 
+// Facade re-exports: external modules should use these instead of reaching
+// into sub-modules directly.
+pub use mlx_update::MlxAutoUpdateState;
+pub use mlx_update::maybe_run_mlx_auto_update;
+pub use queue::process_summary_queue;
+pub use sidecar::SidecarManager;
+pub use sidecar_update::read_manifest;
+pub use sidecar_update::run_update_check;
+pub use summary::SummaryBlobRef;
+pub use summary::SummaryDiffEntry;
+pub use summary::generate_summary_blocking;
+pub use summary::prepare_summary_inputs;
+
 use crate::config::AiConfig;
 use sysinfo as _; // ensure sysinfo available in this module
 

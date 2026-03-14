@@ -118,7 +118,7 @@ fn event_ledger_trace_and_resolve_roundtrip() {
         None,
     ));
     let root = db
-        .event_ledger_recent(None, None, None, None, 10)
+        .event_ledger_recent(uhoh::db::LedgerRecentFilters::default(), 10)
         .unwrap()
         .first()
         .map(|e| e.id)
@@ -130,7 +130,7 @@ fn event_ledger_trace_and_resolve_roundtrip() {
         Some(root),
     ));
     let child = db
-        .event_ledger_recent(None, None, None, None, 10)
+        .event_ledger_recent(uhoh::db::LedgerRecentFilters::default(), 10)
         .unwrap()
         .first()
         .map(|e| e.id)

@@ -117,7 +117,7 @@ struct ForegroundDaemonRuntime {
     config_path: PathBuf,
     config: Config,
     database: Arc<Database>,
-    sidecar_manager: crate::ai::sidecar::SidecarManager,
+    sidecar_manager: crate::ai::SidecarManager,
     server_event_tx: broadcast::Sender<ServerEvent>,
     restore_coordinator: crate::restore::RestoreCoordinator,
     restore_in_progress: Arc<AtomicBool>,
@@ -148,7 +148,7 @@ impl ForegroundDaemonRuntime {
         let restore_in_progress = restore_coordinator.in_progress_flag();
         let event_ledger =
             EventLedger::new(database.clone()).with_event_publisher(server_event_tx.clone());
-        let sidecar_manager = crate::ai::sidecar::SidecarManager::new();
+        let sidecar_manager = crate::ai::SidecarManager::new();
         let subsystem_manager = start_subsystems(
             &config,
             sidecar_manager.clone(),
@@ -390,7 +390,7 @@ fn seed_project_states(
 
 async fn start_subsystems(
     config: &Config,
-    sidecar_manager: crate::ai::sidecar::SidecarManager,
+    sidecar_manager: crate::ai::SidecarManager,
     database: &Arc<Database>,
     event_ledger: &EventLedger,
     uhoh_dir: &Path,
@@ -422,7 +422,7 @@ async fn start_server(
     uhoh_dir: &Path,
     server_event_tx: &broadcast::Sender<ServerEvent>,
     restore_coordinator: &crate::restore::RestoreCoordinator,
-    sidecar_manager: crate::ai::sidecar::SidecarManager,
+    sidecar_manager: crate::ai::SidecarManager,
     subsystem_manager: &Arc<Mutex<SubsystemManager>>,
 ) -> Result<Option<tokio::task::JoinHandle<()>>> {
     if !config.server.enabled {

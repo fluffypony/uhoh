@@ -781,7 +781,7 @@ fn test_ledger_reads_reject_unknown_source_severity_strings() {
     assert!(!get_err.to_string().is_empty());
 
     let recent_err = db
-        .event_ledger_recent(None, None, None, None, 10)
+        .event_ledger_recent(uhoh::db::LedgerRecentFilters::default(), 10)
         .expect_err("recent ledger queries should reject invalid persisted enum values");
     assert!(!recent_err.to_string().is_empty());
 

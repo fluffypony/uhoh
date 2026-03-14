@@ -8,7 +8,7 @@ use crate::cli::DbAction;
 use crate::config;
 use crate::db::{self, Database};
 
-pub fn handle_cli_action(uhoh_dir: &Path, database: &Database, action: &DbAction) -> Result<()> {
+pub fn handle_db_guard_action(uhoh_dir: &Path, database: &Database, action: &DbAction) -> Result<()> {
     match action {
         DbAction::Add {
             dsn,
@@ -187,10 +187,11 @@ pub fn handle_cli_action(uhoh_dir: &Path, database: &Database, action: &DbAction
         }
         DbAction::Events { name, table } => {
             let events = database.event_ledger_recent(
-                Some(db::LedgerSource::DbGuard),
-                name.as_deref(),
-                None,
-                None,
+                db::LedgerRecentFilters {
+                    source: Some(db::LedgerSource::DbGuard),
+                    guard_name: name.as_deref(),
+                    ..Default::default()
+                },
                 100,
             )?;
             for event in events {

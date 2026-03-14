@@ -47,6 +47,8 @@ mod projects;
 mod search;
 mod snapshots;
 
+pub use ledger::LedgerRecentFilters;
+
 fn row_u64(row: &Row<'_>, index: usize, field: &'static str) -> rusqlite::Result<u64> {
     let value = row.get::<_, i64>(index)?;
     u64::try_from(value).map_err(|_| {
