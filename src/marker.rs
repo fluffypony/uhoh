@@ -35,12 +35,11 @@ pub fn read_marker(project_path: &Path) -> Result<Option<String>> {
             if bytes.len() == 37 && &bytes[..4] == MARKER_MAGIC && bytes[4] == MARKER_VERSION {
                 Ok(Some(hex::encode(&bytes[5..37])))
             } else {
-                tracing::warn!(
-                    "Marker file has unexpected size ({} bytes): {}",
+                anyhow::bail!(
+                    "Marker file corrupted ({} bytes, expected 37): {}",
                     bytes.len(),
                     marker_path.display()
                 );
-                Ok(None)
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
