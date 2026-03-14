@@ -20,6 +20,7 @@ static THEME_SET: Lazy<syntect::highlighting::ThemeSet> =
     Lazy::new(syntect::highlighting::ThemeSet::load_defaults);
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct DiffLine {
     pub change_type: String,
     pub old_line: Option<usize>,
@@ -29,6 +30,7 @@ pub struct DiffLine {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct DiffHunk {
     pub old_start: usize,
     pub old_count: usize,
@@ -38,6 +40,7 @@ pub struct DiffHunk {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct FileDiff {
     pub path: String,
     pub status: String,

@@ -8,6 +8,7 @@ use super::{
     FileHistoryRow, SnapFileEntry, SnapshotRow, SnapshotSummary,
 };
 
+#[non_exhaustive]
 pub struct SnapshotInsert<'a> {
     pub project_hash: &'a str,
     pub snapshot_id: u64,

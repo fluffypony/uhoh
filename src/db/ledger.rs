@@ -7,6 +7,7 @@ use super::{
     LedgerSource, NewEventLedgerEntry,
 };
 
+#[non_exhaustive]
 pub struct LedgerRecentFilters<'a> {
     pub source: Option<LedgerSource>,
     pub guard_name: Option<&'a str>,

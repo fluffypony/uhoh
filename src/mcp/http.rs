@@ -4,6 +4,7 @@ use serde_json::json;
 use super::{protocol::JsonRpcRequest, McpApplication};
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct McpHttpState {
     pub application: McpApplication,
 }
