@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     if std::env::args().len() == 1 {
         let uhoh = ensure_uhoh_dir()?;
         let database = db::Database::open(&uhoh.join("uhoh.db"))?;
-        return project_commands::zero_verb(&uhoh, &database);
+        return project_commands::default_action(&uhoh, &database);
     }
 
     let cli = Cli::parse();

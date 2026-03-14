@@ -308,10 +308,11 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
         let status = cmd
             .status()
             .with_context(|| format!("Failed to run command: {}", command[0]))?;
-        std::process::exit(status.code().unwrap_or(1));
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
     }
 
-    #[cfg(target_os = "linux")]
     Ok(())
 }
 
@@ -528,17 +529,17 @@ async fn verify_install() -> Result<()> {
         Ok(expected) => {
             if expected.eq_ignore_ascii_case(&local_hash) {
                 println!("\u{2713} Binary hash matches DNS record.");
-                std::process::exit(0);
+                Ok(())
             } else {
                 eprintln!("Binary hash does not match DNS record!");
                 eprintln!("  Local:    {local_hash}");
                 eprintln!("  Expected: {expected}");
-                std::process::exit(2);
+                anyhow::bail!("Binary hash mismatch");
             }
         }
         Err(e) => {
             eprintln!("Could not verify hash via DNS: {e}");
-            std::process::exit(0);
+            Ok(())
         }
     }
 }
