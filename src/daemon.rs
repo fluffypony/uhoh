@@ -1,5 +1,6 @@
 mod emergency;
 mod maintenance;
+pub(crate) mod notifications;
 mod runtime;
 mod snapshots;
 mod watcher;

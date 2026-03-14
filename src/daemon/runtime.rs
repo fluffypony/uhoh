@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::db::{Database, LedgerSeverity, LedgerSource, ProjectEntry};
 use crate::event_ledger::{new_event, EventLedger};
 use crate::events::{publish_event, ServerEvent};
-use crate::notifications::NotificationPipeline;
+use crate::daemon::notifications::NotificationPipeline;
 use crate::subsystem::{SubsystemContext, SubsystemManager};
 
 use super::maintenance::DaemonMaintenanceSubsystem;
