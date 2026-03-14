@@ -246,9 +246,11 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
         cmd.env("UHOH_SANDBOX_ENABLED", "1");
 
         #[cfg(target_os = "linux")]
-        // SAFETY: pre_exec runs in a fork-child context before exec; the closure loads
-        // an agent profile and applies Landlock restrictions — no async or allocator
-        // state is shared with the parent, so this is safe to call.
+        // SAFETY: CommandExt::pre_exec requires unsafe because the closure runs between
+        // fork and exec where only async-signal-safe operations are strictly safe. This
+        // closure performs file I/O and allocation which is technically not async-signal-safe,
+        // but is acceptable here because: (1) this is a single-threaded CLI context with no
+        // other threads that could hold locks, and (2) the operations complete before exec.
         unsafe {
             cmd.pre_exec(|| {
                 let profile_path = std::env::var("UHOH_AGENT_PROFILE").unwrap_or_else(|_| {
