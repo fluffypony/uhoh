@@ -8,6 +8,7 @@ use super::{
 };
 
 #[non_exhaustive]
+#[derive(Default)]
 pub struct LedgerRecentFilters<'a> {
     pub source: Option<LedgerSource>,
     pub guard_name: Option<&'a str>,
@@ -304,33 +305,12 @@ impl Database {
 
     pub fn event_ledger_recent(
         &self,
-        source: Option<LedgerSource>,
-        guard_name: Option<&str>,
-        agent_name: Option<&str>,
-        session: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<EventLedgerEntry>> {
-        self.event_ledger_recent_since(source, guard_name, agent_name, session, None, limit)
-    }
-
-    pub fn event_ledger_recent_since(
-        &self,
-        source: Option<LedgerSource>,
-        guard_name: Option<&str>,
-        agent_name: Option<&str>,
-        session: Option<&str>,
-        since: Option<&str>,
+        filters: LedgerRecentFilters<'_>,
         limit: usize,
     ) -> Result<Vec<EventLedgerEntry>> {
         let conn = self.conn()?;
         let (sql, param_values) = build_recent_query(
-            LedgerRecentFilters {
-                source,
-                guard_name,
-                agent_name,
-                session,
-                since,
-            },
+            filters,
             limit as i64,
         );
         let mut stmt = conn.prepare(&sql)?;

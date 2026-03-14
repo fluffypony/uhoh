@@ -54,20 +54,20 @@ impl SnapshotSettings {
 #[derive(Clone)]
 pub struct SnapshotRuntime {
     settings: SnapshotSettings,
-    sidecar_manager: crate::ai::sidecar::SidecarManager,
+    sidecar_manager: crate::ai::SidecarManager,
 }
 
 impl SnapshotRuntime {
     pub fn from_config(config: &Config) -> Self {
         Self::new(
             SnapshotSettings::from_config(config),
-            crate::ai::sidecar::SidecarManager::new(),
+            crate::ai::SidecarManager::new(),
         )
     }
 
     pub fn new(
         settings: SnapshotSettings,
-        sidecar_manager: crate::ai::sidecar::SidecarManager,
+        sidecar_manager: crate::ai::SidecarManager,
     ) -> Self {
         Self {
             settings,
@@ -79,7 +79,7 @@ impl SnapshotRuntime {
         &self.settings
     }
 
-    pub fn sidecar_manager(&self) -> &crate::ai::sidecar::SidecarManager {
+    pub fn sidecar_manager(&self) -> &crate::ai::SidecarManager {
         &self.sidecar_manager
     }
 }
@@ -821,18 +821,18 @@ fn schedule_ai_summary(
         let previous =
             prev_files
                 .get(&file.path)
-                .map(|previous| crate::ai::summary::SummaryBlobRef {
+                .map(|previous| crate::ai::SummaryBlobRef {
                     hash: &previous.hash,
                     stored: previous.stored,
                     size: previous.size,
                 });
-        let current = Some(crate::ai::summary::SummaryBlobRef {
+        let current = Some(crate::ai::SummaryBlobRef {
             hash: &file.hash,
             stored: file.stored,
             size: file.size,
         });
         if previous.is_none() || previous.is_some_and(|previous| previous.hash != file.hash) {
-            changes.push(crate::ai::summary::SummaryDiffEntry {
+            changes.push(crate::ai::SummaryDiffEntry {
                 path: &file.path,
                 previous,
                 current,
@@ -841,9 +841,9 @@ fn schedule_ai_summary(
     }
 
     for entry in deleted_for_manifest {
-        changes.push(crate::ai::summary::SummaryDiffEntry {
+        changes.push(crate::ai::SummaryDiffEntry {
             path: &entry.path,
-            previous: Some(crate::ai::summary::SummaryBlobRef {
+            previous: Some(crate::ai::SummaryBlobRef {
                 hash: &entry.hash,
                 stored: entry.stored,
                 size: entry.size,
@@ -853,10 +853,10 @@ fn schedule_ai_summary(
     }
 
     let prepared =
-        crate::ai::summary::prepare_summary_inputs(&blob_root, &runtime.settings().ai, &changes);
+        crate::ai::prepare_summary_inputs(&blob_root, &runtime.settings().ai, &changes);
 
     std::thread::spawn(move || {
-        match crate::ai::summary::generate_summary_blocking(
+        match crate::ai::generate_summary_blocking(
             &uhoh_dir_cl,
             &runtime.settings().ai,
             runtime.sidecar_manager(),
