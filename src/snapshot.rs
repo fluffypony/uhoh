@@ -23,7 +23,6 @@ pub struct CachedFileState {
     pub is_symlink: bool,
 }
 
-#[non_exhaustive]
 pub struct CreateSnapshotRequest<'a> {
     pub project_hash: &'a str,
     pub project_path: &'a Path,

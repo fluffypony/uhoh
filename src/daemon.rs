@@ -28,9 +28,10 @@ pub fn spawn_detached_daemon(uhoh_dir: &Path) -> Result<()> {
         let mut cmd = std::process::Command::new(&exe);
         cmd.args(["start", "--service"]);
         // Detach from controlling terminal
-        // SAFETY: setsid() is safe to call in a pre_exec context — it creates a new
-        // session for the child process. Failure is non-fatal and only prevents
-        // terminal detach; the child continues regardless.
+        // SAFETY: CommandExt::pre_exec requires unsafe because the closure runs between
+        // fork and exec. This closure calls setsid() (async-signal-safe) and eprintln!
+        // (not async-signal-safe but acceptable in single-threaded CLI context). setsid()
+        // failure is non-fatal — the child continues regardless.
         unsafe {
             cmd.pre_exec(|| {
                 if libc::setsid() == -1 {

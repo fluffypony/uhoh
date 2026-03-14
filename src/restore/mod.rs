@@ -31,14 +31,12 @@ pub struct RestoreOutcome {
     pub files_to_delete: Vec<String>,
 }
 
-#[non_exhaustive]
 pub struct PreRestoreSnapshot<'a> {
     pub trigger: &'a str,
     pub message: Option<String>,
     pub snapshot_runtime: &'a crate::snapshot::SnapshotRuntime,
 }
 
-#[non_exhaustive]
 pub struct RestoreRequest<'a> {
     pub snapshot_id: &'a str,
     pub target_path: Option<&'a str>,

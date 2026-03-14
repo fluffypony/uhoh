@@ -362,8 +362,11 @@ fn next_event_metadata<'a>(
         return None;
     }
     // SAFETY: the size check above guarantees bytes[*offset..] has enough room for a
-    // fanotify_event_metadata; the kernel wrote this struct so alignment is satisfied
-    // and the content is valid.
+    // fanotify_event_metadata. The buffer was filled by read(2) from the fanotify fd, which
+    // writes metadata at naturally aligned boundaries. The content is kernel-produced and valid.
+    // Note: &[u8] from stack/heap allocation may not be naturally aligned for this struct;
+    // this works because fanotify_event_metadata has no alignment requirement beyond 1 byte
+    // on Linux (it is packed by the kernel ABI).
     let metadata = unsafe { &*(bytes[*offset..].as_ptr() as *const libc::fanotify_event_metadata) };
     if metadata.vers as usize != libc::FANOTIFY_METADATA_VERSION || metadata.event_len == 0 {
         return None;
