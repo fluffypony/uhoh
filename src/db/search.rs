@@ -1,7 +1,19 @@
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Row};
 
 use super::{row_u64, Database, DbConn, SearchResult};
+
+fn map_search_result_row(row: &Row) -> rusqlite::Result<SearchResult> {
+    Ok(SearchResult {
+        snapshot_rowid: row.get(0)?,
+        snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
+        timestamp: row.get(2)?,
+        trigger: row.get(3)?,
+        message: row.get(4)?,
+        ai_summary: row.get(5)?,
+        match_context: row.get(6)?,
+    })
+}
 
 impl Database {
     pub fn set_ai_summary(&self, snapshot_rowid: i64, summary: &str) -> Result<()> {
@@ -122,17 +134,7 @@ impl Database {
                  ORDER BY rank
                  LIMIT ?3",
             )?;
-            let rows = stmt.query_map(params![fts_query, project_hash, limit as i64], |row| {
-                Ok(SearchResult {
-                    snapshot_rowid: row.get(0)?,
-                    snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
-                    timestamp: row.get(2)?,
-                    trigger: row.get(3)?,
-                    message: row.get(4)?,
-                    ai_summary: row.get(5)?,
-                    match_context: row.get(6)?,
-                })
-            })?;
+            let rows = stmt.query_map(params![fts_query, project_hash, limit as i64], map_search_result_row)?;
             for row in rows {
                 out.push(row?);
             }
@@ -146,17 +148,7 @@ impl Database {
                  ORDER BY rank
                  LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![fts_query, limit as i64], |row| {
-                Ok(SearchResult {
-                    snapshot_rowid: row.get(0)?,
-                    snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
-                    timestamp: row.get(2)?,
-                    trigger: row.get(3)?,
-                    message: row.get(4)?,
-                    ai_summary: row.get(5)?,
-                    match_context: row.get(6)?,
-                })
-            })?;
+            let rows = stmt.query_map(params![fts_query, limit as i64], map_search_result_row)?;
             for row in rows {
                 out.push(row?);
             }

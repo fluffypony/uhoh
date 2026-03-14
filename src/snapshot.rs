@@ -503,6 +503,25 @@ fn deleted_manifest_entry(path: &str, cached: &CachedFileState) -> crate::db::De
     }
 }
 
+/// Records a file entry in the scan result: pushes to manifest, updates hashes, marks changes.
+fn apply_manifest_entry(
+    prev_files: &HashMap<String, CachedFileState>,
+    rel_path: &str,
+    entry: crate::db::SnapFileEntry,
+    stored: bool,
+    is_new_check: impl FnOnce(Option<&CachedFileState>) -> bool,
+    scan: &mut SnapshotScanResult,
+) {
+    let hash = entry.hash.clone();
+    if is_new_check(prev_files.get(rel_path)) {
+        scan.has_changes = true;
+        scan.new_files.push(rel_path.to_string());
+    }
+    scan.files_for_manifest.push(entry);
+    scan.current_hashes
+        .insert(rel_path.to_string(), (hash, stored));
+}
+
 fn record_symlink_entry(
     database: &Database,
     blob_root: &Path,
@@ -515,51 +534,47 @@ fn record_symlink_entry(
 ) {
     match cas::store_symlink_target(blob_root, abs_path) {
         Ok((hash, symlink_size, bytes_written)) => {
-            let is_new_or_changed = prev_files
-                .get(rel_path)
-                .map_or(true, |prev| prev.hash != hash || !prev.is_symlink);
-            if is_new_or_changed {
-                scan.has_changes = true;
-                scan.new_files.push(rel_path.to_string());
-            }
-            let mtime_i = mtime_to_millis(mtime);
-            scan.files_for_manifest.push(crate::db::SnapFileEntry {
-                path: rel_path.to_string(),
-                hash: hash.clone(),
-                size: symlink_size,
-                stored: true,
-                executable: false,
-                mtime: Some(mtime_i),
-                storage_method: cas::StorageMethod::Copy,
-                is_symlink: true,
-            });
-            scan.current_hashes
-                .insert(rel_path.to_string(), (hash, true));
+            let hash_clone = hash.clone();
+            apply_manifest_entry(
+                prev_files,
+                rel_path,
+                crate::db::SnapFileEntry {
+                    path: rel_path.to_string(),
+                    hash,
+                    size: symlink_size,
+                    stored: true,
+                    executable: false,
+                    mtime: Some(mtime_to_millis(mtime)),
+                    storage_method: cas::StorageMethod::Copy,
+                    is_symlink: true,
+                },
+                true,
+                |prev| prev.map_or(true, |p| p.hash != hash_clone || !p.is_symlink),
+                scan,
+            );
             if bytes_written > 0 {
                 let _ = database.add_blob_bytes(bytes_written as i64);
             }
         }
         Err(err) => {
             tracing::warn!("Failed to store symlink for {}: {}", rel_path, err);
-            let is_new_or_changed = prev_files
-                .get(rel_path)
-                .map_or(true, |prev| prev.stored || !prev.is_symlink);
-            if is_new_or_changed {
-                scan.has_changes = true;
-                scan.new_files.push(rel_path.to_string());
-            }
-            scan.files_for_manifest.push(crate::db::SnapFileEntry {
-                path: rel_path.to_string(),
-                hash: String::new(),
-                size,
-                stored: false,
-                executable: false,
-                mtime: Some(mtime_to_millis(mtime)),
-                storage_method: cas::StorageMethod::None,
-                is_symlink: true,
-            });
-            scan.current_hashes
-                .insert(rel_path.to_string(), (String::new(), false));
+            apply_manifest_entry(
+                prev_files,
+                rel_path,
+                crate::db::SnapFileEntry {
+                    path: rel_path.to_string(),
+                    hash: String::new(),
+                    size,
+                    stored: false,
+                    executable: false,
+                    mtime: Some(mtime_to_millis(mtime)),
+                    storage_method: cas::StorageMethod::None,
+                    is_symlink: true,
+                },
+                false,
+                |prev| prev.map_or(true, |p| p.stored || !p.is_symlink),
+                scan,
+            );
         }
     }
 }
@@ -586,45 +601,48 @@ fn record_file_entry(
         settings.storage.compress_level,
     ) {
         Ok((hash, stored_size, method, bytes_written)) => {
-            let is_new_or_changed = prev_files
-                .get(rel_path)
-                .map_or(true, |prev| prev.hash != hash);
-            if is_new_or_changed {
-                scan.has_changes = true;
-                scan.new_files.push(rel_path.to_string());
-            }
-            let mtime_i = mtime_to_millis(mtime);
             let stored = method.is_recoverable();
-            scan.files_for_manifest.push(crate::db::SnapFileEntry {
-                path: rel_path.to_string(),
-                hash: hash.clone(),
-                size: stored_size,
+            let hash_clone = hash.clone();
+            apply_manifest_entry(
+                prev_files,
+                rel_path,
+                crate::db::SnapFileEntry {
+                    path: rel_path.to_string(),
+                    hash,
+                    size: stored_size,
+                    stored,
+                    executable,
+                    mtime: Some(mtime_to_millis(mtime)),
+                    storage_method: method,
+                    is_symlink: false,
+                },
                 stored,
-                executable,
-                mtime: Some(mtime_i),
-                storage_method: method,
-                is_symlink: false,
-            });
-            scan.current_hashes
-                .insert(rel_path.to_string(), (hash, stored));
+                |prev| prev.map_or(true, |p| p.hash != hash_clone),
+                scan,
+            );
             if bytes_written > 0 {
                 let _ = database.add_blob_bytes(bytes_written as i64);
             }
         }
         Err(err) => {
             tracing::warn!("Failed to store blob for {}: {}", rel_path, err);
-            scan.files_for_manifest.push(crate::db::SnapFileEntry {
-                path: rel_path.to_string(),
-                hash: String::new(),
-                size,
-                stored: false,
-                executable,
-                mtime: Some(mtime_to_millis(mtime)),
-                storage_method: cas::StorageMethod::None,
-                is_symlink: false,
-            });
-            scan.current_hashes
-                .insert(rel_path.to_string(), (String::new(), false));
+            apply_manifest_entry(
+                prev_files,
+                rel_path,
+                crate::db::SnapFileEntry {
+                    path: rel_path.to_string(),
+                    hash: String::new(),
+                    size,
+                    stored: false,
+                    executable,
+                    mtime: Some(mtime_to_millis(mtime)),
+                    storage_method: cas::StorageMethod::None,
+                    is_symlink: false,
+                },
+                false,
+                |_| true,
+                scan,
+            );
         }
     }
 }

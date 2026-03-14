@@ -1,10 +1,7 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
 
-use super::{
-    protocol::{JsonRpcRequest, JsonRpcResponse},
-    McpApplication,
-};
+use super::{protocol::JsonRpcRequest, McpApplication};
 
 #[derive(Clone)]
 pub struct McpHttpState {
@@ -33,7 +30,7 @@ pub async fn delete_not_supported() -> impl IntoResponse {
 
 pub async fn handle_http_request(
     State(state): State<McpHttpState>,
-    headers: axum::http::HeaderMap,
+    _headers: axum::http::HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> axum::response::Response {
     // Host and Origin validation is handled by server middleware.
