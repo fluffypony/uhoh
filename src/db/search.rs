@@ -1,14 +1,15 @@
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension, Row};
 
-use super::{row_u64, Database, DbConn, SearchResult};
+use super::{row_u64, Database, DbConn, SearchResult, SnapshotTrigger};
 
 fn map_search_result_row(row: &Row) -> rusqlite::Result<SearchResult> {
+    let trigger_raw: String = row.get(3)?;
     Ok(SearchResult {
         snapshot_rowid: row.get(0)?,
         snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
         timestamp: row.get(2)?,
-        trigger: row.get(3)?,
+        trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
         message: row.get(4)?,
         ai_summary: row.get(5)?,
         match_context: row.get(6)?,

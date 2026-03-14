@@ -118,7 +118,6 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
                 let actual_hash = blake3::hash(&binary).to_hex().to_string();
                 if actual_hash == expected_hash {
                     println!("✓ DNS hash verification passed.");
-                    verified = true;
                 } else {
                     bail!(
                         "Hash mismatch! DNS expected {}, got {}. Aborting.",
@@ -131,10 +130,6 @@ pub async fn check_and_apply_update(uhoh_dir: &Path) -> Result<()> {
                 bail!("Cannot verify update (no signature, DNS failed: {e}). Aborting.");
             }
         }
-    }
-
-    if !verified {
-        bail!("Cannot verify update integrity. Aborting.");
     }
 
     // Apply update

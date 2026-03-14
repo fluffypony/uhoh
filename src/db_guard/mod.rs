@@ -22,12 +22,8 @@ pub use commands::handle_cli_action;
 
 fn normalize_guard_mode(engine: DbGuardEngine, mode: DbGuardMode) -> DbGuardMode {
     match engine {
-        DbGuardEngine::Postgres => match mode {
-            DbGuardMode::SchemaPolling => DbGuardMode::SchemaPolling,
-            DbGuardMode::Triggers => DbGuardMode::Triggers,
-        },
+        DbGuardEngine::Postgres | DbGuardEngine::Sqlite => mode,
         DbGuardEngine::Mysql => DbGuardMode::SchemaPolling,
-        DbGuardEngine::Sqlite => mode,
     }
 }
 

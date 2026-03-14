@@ -82,7 +82,7 @@ pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) ->
                 dry_run: false,
                 force: true,
                 pre_restore_snapshot: Some(crate::restore::PreRestoreSnapshot {
-                    trigger: "pre-restore",
+                    trigger: crate::db::SnapshotTrigger::PreRestore,
                     message: Some(format!("Before restore to {id_str}")),
                     snapshot_runtime: &snapshot_runtime,
                 }),

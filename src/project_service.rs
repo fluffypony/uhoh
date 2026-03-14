@@ -46,7 +46,7 @@ pub fn create_project_snapshot(
     database: &Database,
     snapshot_runtime: &crate::snapshot::SnapshotRuntime,
     project: &ProjectEntry,
-    trigger: &str,
+    trigger: crate::db::SnapshotTrigger,
     message: Option<&str>,
 ) -> Result<SnapshotCreateResult> {
     let snapshot_id = crate::snapshot::create_snapshot(
@@ -88,7 +88,7 @@ pub fn restore_project_snapshot(
             dry_run,
             force: true,
             pre_restore_snapshot: Some(crate::restore::PreRestoreSnapshot {
-                trigger: "pre-restore",
+                trigger: crate::db::SnapshotTrigger::PreRestore,
                 message: Some(format!("Before restore to {snapshot_id}")),
                 snapshot_runtime,
             }),
@@ -102,7 +102,7 @@ fn build_snapshot_created_event(
     database: &Database,
     project: &ProjectEntry,
     snapshot_id: u64,
-    trigger: &str,
+    trigger: crate::db::SnapshotTrigger,
     message: Option<&str>,
 ) -> Option<ServerEvent> {
     let rowid = database.latest_snapshot_rowid(&project.hash).ok()??;
@@ -111,7 +111,7 @@ fn build_snapshot_created_event(
         project_hash: project.hash.clone(),
         snapshot_id: crate::cas::id_to_base58(snapshot_id),
         timestamp: row.timestamp,
-        trigger: trigger.to_string(),
+        trigger,
         file_count: row.file_count as usize,
         message: message.map(str::to_string),
     })

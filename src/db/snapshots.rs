@@ -5,7 +5,7 @@ use crate::cas::StorageMethod;
 
 use super::{
     checked_db_u64, row_u64, CreateSnapshotRow, Database, DeletedFile, FileEntryRow,
-    FileHistoryRow, SnapFileEntry, SnapshotRow, SnapshotSummary,
+    FileHistoryRow, SnapFileEntry, SnapshotRow, SnapshotSummary, SnapshotTrigger,
 };
 
 #[non_exhaustive]
@@ -13,7 +13,7 @@ pub struct SnapshotInsert<'a> {
     pub project_hash: &'a str,
     pub snapshot_id: u64,
     pub timestamp: &'a str,
-    pub trigger: &'a str,
+    pub trigger: SnapshotTrigger,
     pub message: &'a str,
     pub pinned: bool,
     pub files: &'a [SnapFileEntry],
@@ -42,7 +42,7 @@ pub fn create_snapshot_tx(
             project_hash,
             snapshot_id,
             timestamp,
-            trigger,
+            trigger.as_str(),
             message,
             pinned as i32
         ],
@@ -144,11 +144,12 @@ impl Database {
              ORDER BY s.snapshot_id DESC LIMIT 1",
             params![project_hash, snapshot_id],
             |row| {
+                let trigger_raw: String = row.get(3)?;
                 Ok(SnapshotRow {
                     rowid: row.get(0)?,
                     snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                     timestamp: row.get(2)?,
-                    trigger: row.get(3)?,
+                    trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
                     message: row.get(4)?,
                     pinned: row.get::<_, i32>(5)? != 0,
                     ai_summary: row.get(6)?,
@@ -172,11 +173,12 @@ impl Database {
              ORDER BY s.snapshot_id ASC",
         )?;
         let rows = stmt.query_map(params![project_hash], |row| {
+            let trigger_raw: String = row.get(3)?;
             Ok(SnapshotRow {
                 rowid: row.get(0)?,
                 snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                 timestamp: row.get(2)?,
-                trigger: row.get(3)?,
+                trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
                 message: row.get(4)?,
                 pinned: row.get::<_, i32>(5)? != 0,
                 ai_summary: row.get(6)?,
@@ -273,11 +275,12 @@ impl Database {
              ORDER BY s.timestamp DESC, s.rowid DESC",
         )?;
         let rows = stmt.query_map(params![project_hash], |row| {
+            let trigger_raw: String = row.get(3)?;
             Ok(SnapshotRow {
                 rowid: row.get(0)?,
                 snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                 timestamp: row.get(2)?,
-                trigger: row.get(3)?,
+                trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
                 message: row.get(4)?,
                 pinned: row.get::<_, i32>(5)? != 0,
                 ai_summary: row.get(6)?,
@@ -308,11 +311,12 @@ impl Database {
              LIMIT ?2 OFFSET ?3",
         )?;
         let rows = stmt.query_map(params![project_hash, limit as i64, offset as i64], |row| {
+            let trigger_raw: String = row.get(3)?;
             Ok(SnapshotRow {
                 rowid: row.get(0)?,
                 snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                 timestamp: row.get(2)?,
-                trigger: row.get(3)?,
+                trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
                 message: row.get(4)?,
                 pinned: row.get::<_, i32>(5)? != 0,
                 ai_summary: row.get(6)?,
@@ -343,11 +347,12 @@ impl Database {
                      ORDER BY s.timestamp DESC, s.snapshot_id DESC",
                 )?;
                 let rows = stmt.query_map(params![project_hash], |row| {
+                    let trigger_raw: String = row.get(3)?;
                     Ok(SnapshotSummary {
                         rowid: row.get(0)?,
                         snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                         timestamp: row.get(2)?,
-                        trigger: row.get(3)?,
+                        trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
                         message: row.get(4)?,
                         pinned: row.get::<_, i32>(5)? != 0,
                         file_count: row_u64(row, 6, "snapshots.file_count")?,
@@ -365,11 +370,12 @@ impl Database {
                      ORDER BY s.timestamp DESC, s.snapshot_id DESC",
                 )?;
                 let rows = stmt.query_map(params![project_hash, from], |row| {
+                    let trigger_raw: String = row.get(3)?;
                     Ok(SnapshotSummary {
                         rowid: row.get(0)?,
                         snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                         timestamp: row.get(2)?,
-                        trigger: row.get(3)?,
+                        trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
                         message: row.get(4)?,
                         pinned: row.get::<_, i32>(5)? != 0,
                         file_count: row_u64(row, 6, "snapshots.file_count")?,
@@ -387,11 +393,12 @@ impl Database {
                      ORDER BY s.timestamp DESC, s.snapshot_id DESC",
                 )?;
                 let rows = stmt.query_map(params![project_hash, to], |row| {
+                    let trigger_raw: String = row.get(3)?;
                     Ok(SnapshotSummary {
                         rowid: row.get(0)?,
                         snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                         timestamp: row.get(2)?,
-                        trigger: row.get(3)?,
+                        trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
                         message: row.get(4)?,
                         pinned: row.get::<_, i32>(5)? != 0,
                         file_count: row_u64(row, 6, "snapshots.file_count")?,
@@ -409,11 +416,12 @@ impl Database {
                      ORDER BY s.timestamp DESC, s.snapshot_id DESC",
                 )?;
                 let rows = stmt.query_map(params![project_hash, from, to], |row| {
+                    let trigger_raw: String = row.get(3)?;
                     Ok(SnapshotSummary {
                         rowid: row.get(0)?,
                         snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                         timestamp: row.get(2)?,
-                        trigger: row.get(3)?,
+                        trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
                         message: row.get(4)?,
                         pinned: row.get::<_, i32>(5)? != 0,
                         file_count: row_u64(row, 6, "snapshots.file_count")?,
@@ -435,11 +443,12 @@ impl Database {
                  FROM snapshots s WHERE s.rowid = ?1",
             params![rowid],
             |row| {
+                let trigger_raw: String = row.get(3)?;
                 Ok(SnapshotRow {
                     rowid: row.get(0)?,
                     snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                     timestamp: row.get(2)?,
-                    trigger: row.get(3)?,
+                    trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
                     message: row.get(4)?,
                     pinned: row.get::<_, i32>(5)? != 0,
                     ai_summary: row.get(6)?,
@@ -476,11 +485,12 @@ impl Database {
              WHERE s.project_hash = ?1 AND s.snapshot_id = ?2",
             params![project_hash, snapshot_id],
             |row| {
+                let trigger_raw: String = row.get(3)?;
                 Ok(SnapshotRow {
                     rowid: row.get(0)?,
                     snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
                     timestamp: row.get(2)?,
-                    trigger: row.get(3)?,
+                    trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
                     message: row.get(4)?,
                     pinned: row.get::<_, i32>(5)? != 0,
                     ai_summary: row.get(6)?,
@@ -577,11 +587,12 @@ impl Database {
              ORDER BY s.snapshot_id DESC",
         )?;
         let rows = stmt.query_map(params![project_hash, file_path], |row| {
+            let trigger_raw: String = row.get(3)?;
             Ok(FileHistoryRow {
                 snapshot_id: row_u64(row, 0, "snapshots.snapshot_id")?,
                 timestamp: row.get::<_, String>(1)?,
                 hash: row.get::<_, String>(2)?,
-                trigger: row.get::<_, String>(3)?,
+                trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
             })
         })?;
         let mut entries = Vec::new();

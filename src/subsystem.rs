@@ -40,7 +40,6 @@ pub struct SubsystemContext {
 
 pub type AgentContext = SubsystemContext;
 pub type DbGuardContext = SubsystemContext;
-pub type MaintenanceContext = SubsystemContext;
 
 #[async_trait]
 pub trait Subsystem: Send + Sync {
