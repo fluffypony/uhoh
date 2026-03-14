@@ -28,6 +28,9 @@ pub fn spawn_detached_daemon(uhoh_dir: &Path) -> Result<()> {
         let mut cmd = std::process::Command::new(&exe);
         cmd.args(["start", "--service"]);
         // Detach from controlling terminal
+        // SAFETY: setsid() is safe to call in a pre_exec context — it creates a new
+        // session for the child process. Failure is non-fatal and only prevents
+        // terminal detach; the child continues regardless.
         unsafe {
             cmd.pre_exec(|| {
                 if libc::setsid() == -1 {
@@ -88,6 +91,10 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
     }
 
     #[cfg(unix)]
+    // SAFETY: libc::kill with SIGTERM on a pid we verified is a running uhoh process
+    // via is_uhoh_process_alive_with_start above; sending SIGTERM is a graceful
+    // shutdown request and is safe even if the process exits between the check and
+    // the signal (the signal is simply discarded by the kernel).
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
     }

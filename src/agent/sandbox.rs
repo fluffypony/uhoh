@@ -33,6 +33,9 @@ fn runtime_probe() -> anyhow::Result<()> {
 
 #[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
 pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
+    // SAFETY: prctl(PR_SET_NO_NEW_PRIVS, 1) is safe to call — it restricts the
+    // current thread from gaining new privileges, which is a prerequisite for
+    // Landlock enforcement. Failure is checked and surfaced as an error.
     unsafe {
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
             return Err(anyhow::anyhow!("Failed to set PR_SET_NO_NEW_PRIVS"));
