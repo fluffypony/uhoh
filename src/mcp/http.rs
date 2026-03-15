@@ -29,6 +29,25 @@ pub async fn delete_not_supported() -> impl IntoResponse {
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn get_not_supported_returns_method_not_allowed() {
+        let response = get_not_supported().await.into_response();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn delete_not_supported_returns_method_not_allowed() {
+        let response = delete_not_supported().await.into_response();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+}
+
 pub async fn handle_http_request(
     State(state): State<McpHttpState>,
     _headers: axum::http::HeaderMap,

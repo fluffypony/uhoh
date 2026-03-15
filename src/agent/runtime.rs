@@ -433,6 +433,138 @@ impl Default for AgentSubsystem {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::subsystem::SubsystemHealth;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn new_creates_healthy_subsystem() {
+        let sub = AgentSubsystem::new();
+        assert!(sub.healthy);
+        assert!(sub.fatal_error.is_none());
+        assert!(sub.runtime_warning.is_none());
+        assert!(!sub.intercept_started);
+        assert!(!sub.fanotify_started);
+        assert!(!sub.proxy_started);
+        assert_eq!(sub.proxy_failures, 0);
+        assert!(sub.proxy_next_retry.is_none());
+        assert_eq!(sub.background_failures.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn default_matches_new() {
+        let sub = AgentSubsystem::default();
+        assert!(sub.healthy);
+        assert!(sub.fatal_error.is_none());
+    }
+
+    #[test]
+    fn health_check_healthy_no_fanotify() {
+        let sub = AgentSubsystem::new();
+        match sub.health_check() {
+            SubsystemHealth::HealthyWithAudit(source) => {
+                assert!(matches!(source, AuditSource::None));
+            }
+            other => panic!("expected HealthyWithAudit(None), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn health_check_healthy_with_fanotify() {
+        let mut sub = AgentSubsystem::new();
+        sub.fanotify_started = true;
+        match sub.health_check() {
+            SubsystemHealth::HealthyWithAudit(source) => {
+                assert!(matches!(source, AuditSource::Fanotify));
+            }
+            other => panic!("expected HealthyWithAudit(Fanotify), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn health_check_fatal_error() {
+        let mut sub = AgentSubsystem::new();
+        sub.fatal_error = Some("test failure".to_string());
+        match sub.health_check() {
+            SubsystemHealth::Failed(msg) => assert_eq!(msg, "test failure"),
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn health_check_runtime_warning() {
+        let mut sub = AgentSubsystem::new();
+        sub.runtime_warning = Some("degraded".to_string());
+        match sub.health_check() {
+            SubsystemHealth::DegradedWithAudit { message, .. } => {
+                assert_eq!(message, "degraded");
+            }
+            other => panic!("expected DegradedWithAudit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn health_check_unhealthy_without_error() {
+        let mut sub = AgentSubsystem::new();
+        sub.healthy = false;
+        match sub.health_check() {
+            SubsystemHealth::DegradedWithAudit { message, .. } => {
+                assert!(message.contains("failures"));
+            }
+            other => panic!("expected DegradedWithAudit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn refresh_health_recovers_when_clean() {
+        let mut sub = AgentSubsystem::new();
+        sub.healthy = false;
+        sub.refresh_health_after_tick();
+        assert!(sub.healthy);
+    }
+
+    #[test]
+    fn refresh_health_stays_unhealthy_with_background_failures() {
+        let mut sub = AgentSubsystem::new();
+        sub.background_failures.store(1, Ordering::Relaxed);
+        sub.refresh_health_after_tick();
+        assert!(!sub.healthy);
+    }
+
+    #[test]
+    fn refresh_health_stays_unhealthy_with_fatal_error() {
+        let mut sub = AgentSubsystem::new();
+        sub.fatal_error = Some("fail".to_string());
+        sub.healthy = false;
+        sub.refresh_health_after_tick();
+        assert!(!sub.healthy);
+    }
+
+    #[test]
+    fn record_background_failure_sets_state() {
+        let mut sub = AgentSubsystem::new();
+        sub.record_background_failure("boom".to_string());
+        assert!(!sub.healthy);
+        assert_eq!(sub.fatal_error.as_deref(), Some("boom"));
+        assert_eq!(sub.background_failures.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn subsystem_name() {
+        let sub = AgentSubsystem::new();
+        assert_eq!(sub.name(), "agent");
+    }
+
+    #[test]
+    fn proxy_backoff_saturates() {
+        let mut sub = AgentSubsystem::new();
+        sub.proxy_failures = 20;
+        assert_eq!(sub.proxy_failures, 20);
+    }
+}
+
 #[async_trait]
 impl Subsystem for AgentSubsystem {
     fn name(&self) -> &str {

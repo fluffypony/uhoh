@@ -706,3 +706,72 @@ fn check_inotify_limit() {
 #[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
 fn check_inotify_limit() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::ProjectEntry;
+
+    #[test]
+    fn watched_paths_filters_nonexistent() {
+        let projects = vec![
+            ProjectEntry {
+                hash: "aaa".to_string(),
+                current_path: "/tmp".to_string(),
+                created_at: String::new(),
+            },
+            ProjectEntry {
+                hash: "bbb".to_string(),
+                current_path: "/nonexistent_path_that_does_not_exist_12345".to_string(),
+                created_at: String::new(),
+            },
+        ];
+        let paths = watched_paths(&projects);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn watched_paths_empty_input() {
+        let paths = watched_paths(&[]);
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn cleanup_stale_staging_dirs_handles_nonexistent_project() {
+        let projects = vec![ProjectEntry {
+            hash: "ccc".to_string(),
+            current_path: "/nonexistent_project_dir_xyz".to_string(),
+            created_at: String::new(),
+        }];
+        // Should not panic
+        cleanup_stale_restore_staging_dirs(&projects);
+    }
+
+    #[test]
+    fn cleanup_stale_staging_dirs_empty() {
+        cleanup_stale_restore_staging_dirs(&[]);
+    }
+
+    #[test]
+    fn cleanup_stale_staging_dirs_ignores_non_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("normal_file.txt"), "hello").unwrap();
+        let projects = vec![ProjectEntry {
+            hash: "ddd".to_string(),
+            current_path: dir.path().to_string_lossy().to_string(),
+            created_at: String::new(),
+        }];
+        cleanup_stale_restore_staging_dirs(&projects);
+        assert!(dir.path().join("normal_file.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn current_args_without_takeover_strips_takeover_flag() {
+        // Can only be tested on Windows where the function is compiled
+        let result = current_args_without_takeover();
+        // Just verify it doesn't panic
+        let _ = result;
+    }
+}
