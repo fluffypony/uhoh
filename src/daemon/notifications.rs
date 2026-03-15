@@ -151,6 +151,130 @@ impl NotificationPipeline {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::LedgerSeverity;
+
+    #[test]
+    fn dedupe_key_snapshot_created() {
+        let event = ServerEvent::SnapshotCreated {
+            project_hash: "abc".to_string(),
+            snapshot_id: "1".to_string(),
+            timestamp: String::new(),
+            trigger: crate::db::SnapshotTrigger::Auto,
+            file_count: 0,
+            message: None,
+        };
+        assert_eq!(
+            NotificationPipeline::dedupe_key(&event),
+            "snapshot_created:abc"
+        );
+    }
+
+    #[test]
+    fn dedupe_key_emergency() {
+        let event = ServerEvent::EmergencyDeleteDetected {
+            project_hash: "xyz".to_string(),
+            deleted_count: 10,
+            baseline_count: 100,
+            ratio: 0.1,
+            threshold: 0.3,
+            min_files: 5,
+            cooldown_suppressed: false,
+            cooldown_remaining_secs: None,
+        };
+        assert_eq!(
+            NotificationPipeline::dedupe_key(&event),
+            "emergency_delete_detected:xyz"
+        );
+    }
+
+    #[test]
+    fn dedupe_key_db_guard_includes_guard_and_type() {
+        let event = ServerEvent::DbGuardAlert {
+            guard_name: "myguard".to_string(),
+            event_type: "drop_table".to_string(),
+            severity: LedgerSeverity::Critical,
+            detail: String::new(),
+        };
+        assert_eq!(
+            NotificationPipeline::dedupe_key(&event),
+            "db_guard_alert:myguard:drop_table"
+        );
+    }
+
+    #[test]
+    fn dedupe_key_agent_includes_agent_and_type() {
+        let event = ServerEvent::AgentAlert {
+            agent_name: "claude".to_string(),
+            event_type: "dangerous_agent_action".to_string(),
+            severity: LedgerSeverity::Warn,
+            detail: String::new(),
+        };
+        assert_eq!(
+            NotificationPipeline::dedupe_key(&event),
+            "agent_alert:claude:dangerous_agent_action"
+        );
+    }
+
+    #[test]
+    fn webhook_kind_mass_delete() {
+        let kind = ServerEventKind::DbGuard("mass_delete".to_string());
+        assert_eq!(
+            NotificationPipeline::webhook_kind(&kind),
+            Some(WebhookEventKind::MassDelete)
+        );
+    }
+
+    #[test]
+    fn webhook_kind_drop_table() {
+        let kind = ServerEventKind::DbGuard("drop_table".to_string());
+        assert_eq!(
+            NotificationPipeline::webhook_kind(&kind),
+            Some(WebhookEventKind::DropTable)
+        );
+    }
+
+    #[test]
+    fn webhook_kind_unknown_db_guard() {
+        let kind = ServerEventKind::DbGuard("unknown_event".to_string());
+        assert_eq!(NotificationPipeline::webhook_kind(&kind), None);
+    }
+
+    #[test]
+    fn webhook_kind_dangerous_agent() {
+        let kind = ServerEventKind::Agent("dangerous_agent_action".to_string());
+        assert_eq!(
+            NotificationPipeline::webhook_kind(&kind),
+            Some(WebhookEventKind::DangerousAgentAction)
+        );
+    }
+
+    #[test]
+    fn webhook_kind_emergency_delete() {
+        let kind = ServerEventKind::EmergencyDeleteDetected;
+        assert_eq!(
+            NotificationPipeline::webhook_kind(&kind),
+            Some(WebhookEventKind::EmergencyDeleteDetected)
+        );
+    }
+
+    #[test]
+    fn webhook_kind_snapshot_created_returns_none() {
+        let kind = ServerEventKind::SnapshotCreated;
+        assert_eq!(NotificationPipeline::webhook_kind(&kind), None);
+    }
+
+    #[test]
+    fn notification_pipeline_new() {
+        let cfg = NotificationsConfig::default();
+        let pipeline = NotificationPipeline::new(cfg);
+        // Should construct without panic
+        let _ = pipeline;
+    }
+}
+
 async fn send_desktop_notification(title: &str, message: &str) -> std::io::Result<()> {
     let is_critical = title.contains("EMERGENCY");
 
