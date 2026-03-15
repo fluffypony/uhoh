@@ -421,7 +421,7 @@ pub(crate) fn apply_restore(
 
         let now = chrono::Utc::now();
         let nanos_i64: i64 = now.timestamp_nanos_opt().unwrap_or_else(|| {
-            ((now.timestamp() as i128) * 1_000_000_000)
+            (i128::from(now.timestamp()) * 1_000_000_000)
                 .try_into()
                 .unwrap_or(0)
         });

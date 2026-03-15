@@ -93,12 +93,12 @@ pub fn config_action(uhoh: &Path, action: Option<ConfigAction>) -> Result<()> {
             let out = match parts.as_slice() {
                 [key] => doc
                     .get(key)
-                    .map(|value| value.to_string())
+                    .map(std::string::ToString::to_string)
                     .unwrap_or_default(),
                 [section, key] => doc
                     .get(section)
                     .and_then(|table| table.get(*key))
-                    .map(|value| value.to_string())
+                    .map(std::string::ToString::to_string)
                     .unwrap_or_default(),
                 _ => String::new(),
             };
@@ -402,7 +402,7 @@ async fn run_doctor(
         let backups = uhoh_dir.join("backups");
         if backups.exists() {
             let mut files: Vec<_> = std::fs::read_dir(&backups)?.flatten().collect();
-            files.sort_by_key(|e| e.file_name());
+            files.sort_by_key(std::fs::DirEntry::file_name);
             if let Some(last) = files.last() {
                 let src = last.path();
                 let dst = uhoh_dir.join("uhoh.db");

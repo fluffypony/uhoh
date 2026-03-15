@@ -893,8 +893,8 @@ pub fn millis_to_mtime(millis: i64) -> SystemTime {
     if millis >= 0 {
         std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis as u64)
     } else {
-        let before_epoch = (-(millis as i128) - 1).max(0) as u128;
-        let clamped = before_epoch.min(u64::MAX as u128) as u64;
+        let before_epoch = (-i128::from(millis) - 1).max(0) as u128;
+        let clamped = before_epoch.min(u128::from(u64::MAX)) as u64;
         std::time::UNIX_EPOCH - std::time::Duration::from_millis(clamped)
     }
 }

@@ -159,7 +159,7 @@ async fn process_jsonl_event(
     let target_path = event
         .get("path")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
     let session_id = event
         .get("session_id")
         .or_else(|| event.get("session"))

@@ -212,7 +212,7 @@ impl DaemonMaintenanceSubsystem {
         }
         if let Ok(entries) = std::fs::read_dir(&backups_dir) {
             let mut files: Vec<_> = entries.flatten().collect();
-            files.sort_by_key(|entry| entry.file_name());
+            files.sort_by_key(std::fs::DirEntry::file_name);
             if files.len() > 14 {
                 let to_remove = files.len() - 14;
                 for entry in files.iter().take(to_remove) {

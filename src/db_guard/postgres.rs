@@ -370,7 +370,7 @@ fn reconcile_wildcard_delete_triggers(
         .split(',')
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .map(|v| v.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
 
     let mut added = Vec::new();
@@ -882,7 +882,7 @@ pub(super) fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
         .split(',')
         .map(str::trim)
         .filter(|table| !table.is_empty())
-        .map(|table| table.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 

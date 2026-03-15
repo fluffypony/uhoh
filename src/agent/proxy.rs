@@ -237,11 +237,11 @@ async fn intercept_tool_call(
         let candidate_path = args
             .get("path")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .or_else(|| {
                 args.get("file")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
             });
         if let Some(candidate_path) = candidate_path {
             path = Some(candidate_path.clone());

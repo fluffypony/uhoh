@@ -74,14 +74,14 @@ fn extract_matched_protocol(headers: &HeaderMap) -> Option<String> {
     let protocol_header = headers.get("sec-websocket-protocol")?;
     let protocols = protocol_header.to_str().ok()?;
     // Check "bearer, <token>" format
-    let mut iter = protocols.split(',').map(|s| s.trim());
+    let mut iter = protocols.split(',').map(str::trim);
     while let Some(name) = iter.next() {
         if name.eq_ignore_ascii_case("bearer") && iter.next().is_some() {
             return Some("bearer".to_string());
         }
     }
     // Check "bearer.<token>" format
-    for value in protocols.split(',').map(|s| s.trim()) {
+    for value in protocols.split(',').map(str::trim) {
         if value.starts_with("bearer.") {
             return Some(value.to_string());
         }
@@ -90,7 +90,7 @@ fn extract_matched_protocol(headers: &HeaderMap) -> Option<String> {
 }
 
 fn extract_protocol_token(protocols: &str) -> Option<&str> {
-    let mut iter = protocols.split(',').map(|s| s.trim());
+    let mut iter = protocols.split(',').map(str::trim);
     while let Some(name) = iter.next() {
         if name.eq_ignore_ascii_case("bearer") {
             if let Some(token) = iter.next() {
@@ -98,7 +98,7 @@ fn extract_protocol_token(protocols: &str) -> Option<&str> {
             }
         }
     }
-    for value in protocols.split(',').map(|s| s.trim()) {
+    for value in protocols.split(',').map(str::trim) {
         if let Some(token) = value.strip_prefix("bearer.") {
             if !token.is_empty() {
                 return Some(token);

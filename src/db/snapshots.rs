@@ -44,7 +44,7 @@ pub fn create_snapshot_tx(
             timestamp,
             trigger.as_str(),
             message,
-            pinned as i32
+            i32::from(pinned)
         ],
     )?;
     let rowid = tx.last_insert_rowid();
@@ -70,11 +70,11 @@ pub fn create_snapshot_tx(
                 path,
                 hash,
                 size,
-                *stored as i32,
-                *executable as i32,
+                i32::from(*stored),
+                i32::from(*executable),
                 mtime,
                 storage_method.to_db(),
-                *is_symlink as i32,
+                i32::from(*is_symlink),
             ])?;
         }
     }
@@ -90,7 +90,7 @@ pub fn create_snapshot_tx(
                 entry.path,
                 entry.hash,
                 entry.size,
-                entry.stored as i32,
+                i32::from(entry.stored),
                 entry.storage_method.to_db()
             ])?;
         }
@@ -112,7 +112,7 @@ impl Database {
         let conn = self.conn()?;
         conn.execute(
             "UPDATE snapshots SET pinned = ?1 WHERE rowid = ?2",
-            params![pinned as i32, rowid],
+            params![i32::from(pinned), rowid],
         )?;
         Ok(())
     }
