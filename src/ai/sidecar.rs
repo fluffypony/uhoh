@@ -328,6 +328,27 @@ fn detect_backend(uhoh_dir: &Path) -> Result<Backend> {
     })
 }
 
+/// Map a model file path to a HuggingFace MLX model repo ID.
+/// Longer/more-specific patterns come first to avoid "3b" matching "35b" filenames.
+fn mlx_model_id_from_path(model_path: &Path) -> String {
+    let stem = model_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    match stem {
+        s if s.contains("0.5b") => "mlx-community/Qwen3.5-0.5B-Instruct-4bit".to_string(),
+        s if s.contains("35b") || s.contains("a3b") => {
+            "mlx-community/Qwen3.5-35B-A3B-4bit".to_string()
+        }
+        s if s.contains("32b") => "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string(),
+        s if s.contains("9b") => "mlx-community/Qwen3.5-9B-Instruct-4bit".to_string(),
+        s if s.contains("8b") => "mlx-community/Qwen3.5-8B-Instruct-4bit".to_string(),
+        s if s.contains("7b") => "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string(),
+        s if s.contains("3b") => "mlx-community/Qwen3.5-3B-Instruct-4bit".to_string(),
+        _ => stem.to_string(),
+    }
+}
+
 fn spawn_backend(
     backend: &Backend,
     model_path: &Path,
@@ -364,28 +385,7 @@ fn spawn_backend(
         }
         Backend::MlxLm { python } => {
             // MLX expects a HuggingFace repo ID; map Qwen3.5 tiers or fall back to filename stem
-            let model_id = {
-                let stem = model_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                // Longer/more-specific patterns must come first to avoid
-                // "3b" matching "35b" or "32b" filenames.
-                match stem {
-                    s if s.contains("0.5b") => {
-                        "mlx-community/Qwen3.5-0.5B-Instruct-4bit".to_string()
-                    }
-                    s if s.contains("35b") || s.contains("a3b") => {
-                        "mlx-community/Qwen3.5-35B-A3B-4bit".to_string()
-                    }
-                    s if s.contains("32b") => "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string(),
-                    s if s.contains("9b") => "mlx-community/Qwen3.5-9B-Instruct-4bit".to_string(),
-                    s if s.contains("8b") => "mlx-community/Qwen3.5-8B-Instruct-4bit".to_string(),
-                    s if s.contains("7b") => "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string(),
-                    s if s.contains("3b") => "mlx-community/Qwen3.5-3B-Instruct-4bit".to_string(),
-                    _ => stem.to_string(),
-                }
-            };
+            let model_id = mlx_model_id_from_path(model_path);
             let mut cmd = Command::new(python);
             cmd.args([
                 "-m",
@@ -459,43 +459,49 @@ mod tests {
 
     #[test]
     fn mlx_model_id_mapping() {
-        // Simulating the model ID mapping logic from spawn_backend
+        // Test the actual production function with various model filenames
         let test_cases = [
-            ("qwen3.5-0.5b-instruct", "mlx-community/Qwen3.5-0.5B-Instruct-4bit"),
-            ("qwen3.5-35b-a3b-q4_k_m", "mlx-community/Qwen3.5-35B-A3B-4bit"),
-            ("some-model-a3b-variant", "mlx-community/Qwen3.5-35B-A3B-4bit"),
-            ("qwen3.5-32b-instruct", "mlx-community/Qwen3.5-32B-Instruct-4bit"),
-            ("qwen3.5-9b-q4_k_m", "mlx-community/Qwen3.5-9B-Instruct-4bit"),
-            ("qwen3.5-8b-instruct", "mlx-community/Qwen3.5-8B-Instruct-4bit"),
-            ("qwen3.5-7b-instruct", "mlx-community/Qwen3.5-7B-Instruct-4bit"),
-            ("qwen3.5-3b-instruct", "mlx-community/Qwen3.5-3B-Instruct-4bit"),
-            ("unknown-model", "unknown-model"),
+            ("qwen3.5-0.5b-instruct.gguf", "mlx-community/Qwen3.5-0.5B-Instruct-4bit"),
+            ("qwen3.5-35b-a3b-q4_k_m.gguf", "mlx-community/Qwen3.5-35B-A3B-4bit"),
+            ("some-model-a3b-variant.gguf", "mlx-community/Qwen3.5-35B-A3B-4bit"),
+            ("qwen3.5-32b-instruct.gguf", "mlx-community/Qwen3.5-32B-Instruct-4bit"),
+            ("qwen3.5-9b-q4_k_m.gguf", "mlx-community/Qwen3.5-9B-Instruct-4bit"),
+            ("qwen3.5-8b-instruct.gguf", "mlx-community/Qwen3.5-8B-Instruct-4bit"),
+            ("qwen3.5-7b-instruct.gguf", "mlx-community/Qwen3.5-7B-Instruct-4bit"),
+            ("qwen3.5-3b-instruct.gguf", "mlx-community/Qwen3.5-3B-Instruct-4bit"),
+            ("unknown-model.gguf", "unknown-model"),
         ];
 
-        for (stem, expected) in test_cases {
-            let model_id = match stem {
-                s if s.contains("0.5b") => "mlx-community/Qwen3.5-0.5B-Instruct-4bit".to_string(),
-                s if s.contains("35b") || s.contains("a3b") => {
-                    "mlx-community/Qwen3.5-35B-A3B-4bit".to_string()
-                }
-                s if s.contains("32b") => "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string(),
-                s if s.contains("9b") => "mlx-community/Qwen3.5-9B-Instruct-4bit".to_string(),
-                s if s.contains("8b") => "mlx-community/Qwen3.5-8B-Instruct-4bit".to_string(),
-                s if s.contains("7b") => "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string(),
-                s if s.contains("3b") => "mlx-community/Qwen3.5-3B-Instruct-4bit".to_string(),
-                _ => stem.to_string(),
-            };
-            assert_eq!(model_id, expected, "Failed for stem '{stem}'");
+        for (filename, expected) in test_cases {
+            let path = PathBuf::from(filename);
+            let model_id = mlx_model_id_from_path(&path);
+            assert_eq!(model_id, expected, "Failed for filename '{filename}'");
         }
     }
 
     #[test]
     fn mlx_model_id_35b_before_3b() {
         // "35b" must match before "3b" to avoid misclassification
-        let stem = "qwen3.5-35b-a3b-q4_k_m";
-        let matches_35b = stem.contains("35b") || stem.contains("a3b");
-        let matches_3b = stem.contains("3b");
-        assert!(matches_35b, "should match 35b/a3b pattern");
-        assert!(matches_3b, "also matches 3b, but 35b should take priority");
+        // Test the actual production function
+        let path = PathBuf::from("qwen3.5-35b-a3b-q4_k_m.gguf");
+        let model_id = mlx_model_id_from_path(&path);
+        assert_eq!(model_id, "mlx-community/Qwen3.5-35B-A3B-4bit",
+            "35b/a3b pattern should take priority over 3b");
+    }
+
+    #[test]
+    fn mlx_model_id_no_extension() {
+        // Without .gguf extension, file_stem returns "qwen3" (up to first dot)
+        // and the rest is considered extension — so use a name with no dots
+        let path = PathBuf::from("qwen35-9b-instruct.gguf");
+        let model_id = mlx_model_id_from_path(&path);
+        assert_eq!(model_id, "mlx-community/Qwen3.5-9B-Instruct-4bit");
+    }
+
+    #[test]
+    fn mlx_model_id_empty_path() {
+        let path = PathBuf::from("");
+        let model_id = mlx_model_id_from_path(&path);
+        assert_eq!(model_id, "");
     }
 }

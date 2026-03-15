@@ -955,4 +955,93 @@ mod tests {
         let event = super::WatchEvent::WatcherDied;
         assert!(should_skip_event_during_restore(&states, &event, Some("hash1")));
     }
+
+    #[test]
+    fn skip_event_matching_project_returns_true() {
+        let mut states = HashMap::new();
+        states.insert(
+            "/tmp/project".to_string(),
+            ProjectDaemonState {
+                hash: "hash1".to_string(),
+                last_snapshot: std::time::Instant::now(),
+                pending_changes: std::collections::HashSet::new(),
+                first_change_at: None,
+                last_change_at: None,
+                deleted_paths: std::collections::HashSet::new(),
+                cumulative_deletes: 0,
+                cumulative_window_start: None,
+                last_emergency_at: None,
+                cached_prev_file_count: None,
+                cached_prev_manifest: None,
+                overflow_occurred: false,
+                restore_completed_at: None,
+            },
+        );
+        let event = WatchEvent::FileChanged(PathBuf::from("/tmp/project/src/main.rs"));
+        assert!(should_skip_event_during_restore(
+            &states,
+            &event,
+            Some("hash1")
+        ));
+    }
+
+    #[test]
+    fn skip_event_non_matching_project_returns_false() {
+        let mut states = HashMap::new();
+        states.insert(
+            "/tmp/project".to_string(),
+            ProjectDaemonState {
+                hash: "hash1".to_string(),
+                last_snapshot: std::time::Instant::now(),
+                pending_changes: std::collections::HashSet::new(),
+                first_change_at: None,
+                last_change_at: None,
+                deleted_paths: std::collections::HashSet::new(),
+                cumulative_deletes: 0,
+                cumulative_window_start: None,
+                last_emergency_at: None,
+                cached_prev_file_count: None,
+                cached_prev_manifest: None,
+                overflow_occurred: false,
+                restore_completed_at: None,
+            },
+        );
+        // Event is for a different project hash
+        let event = WatchEvent::FileChanged(PathBuf::from("/tmp/project/src/main.rs"));
+        assert!(!should_skip_event_during_restore(
+            &states,
+            &event,
+            Some("different_hash")
+        ));
+    }
+
+    #[test]
+    fn skip_event_path_outside_project_returns_false() {
+        let mut states = HashMap::new();
+        states.insert(
+            "/tmp/project".to_string(),
+            ProjectDaemonState {
+                hash: "hash1".to_string(),
+                last_snapshot: std::time::Instant::now(),
+                pending_changes: std::collections::HashSet::new(),
+                first_change_at: None,
+                last_change_at: None,
+                deleted_paths: std::collections::HashSet::new(),
+                cumulative_deletes: 0,
+                cumulative_window_start: None,
+                last_emergency_at: None,
+                cached_prev_file_count: None,
+                cached_prev_manifest: None,
+                overflow_occurred: false,
+                restore_completed_at: None,
+            },
+        );
+        // Event path is outside the project
+        let event = WatchEvent::FileChanged(PathBuf::from("/tmp/other/src/main.rs"));
+        assert!(!should_skip_event_during_restore(
+            &states,
+            &event,
+            Some("hash1")
+        ));
+    }
 }
