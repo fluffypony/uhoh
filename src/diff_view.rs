@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashSet;
@@ -15,10 +15,10 @@ use syntect::easy::HighlightLines;
 use syntect::util::as_24_bit_terminal_escaped;
 
 // Lazy-load syntect assets (avoid ~100ms hit per invocation)
-static SYNTAX_SET: Lazy<syntect::parsing::SyntaxSet> =
-    Lazy::new(syntect::parsing::SyntaxSet::load_defaults_newlines);
-static THEME_SET: Lazy<syntect::highlighting::ThemeSet> =
-    Lazy::new(syntect::highlighting::ThemeSet::load_defaults);
+static SYNTAX_SET: LazyLock<syntect::parsing::SyntaxSet> =
+    LazyLock::new(syntect::parsing::SyntaxSet::load_defaults_newlines);
+static THEME_SET: LazyLock<syntect::highlighting::ThemeSet> =
+    LazyLock::new(syntect::highlighting::ThemeSet::load_defaults);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

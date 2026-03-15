@@ -50,7 +50,17 @@ pub async fn process_summary_queue(
         };
         let prev_files_vec = prev
             .as_ref()
-            .and_then(|snapshot| database.get_snapshot_files(snapshot.rowid).ok())
+            .and_then(|snapshot| {
+                match database.get_snapshot_files(snapshot.rowid) {
+                    Ok(files) => Some(files),
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed to fetch previous snapshot files for AI diff: {err}"
+                        );
+                        None
+                    }
+                }
+            })
             .unwrap_or_default();
 
         let mut prev_map: HashMap<String, (String, bool, u64)> = HashMap::new();

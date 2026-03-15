@@ -891,6 +891,7 @@ pub fn mtime_to_millis(t: SystemTime) -> i64 {
         Err(e) => {
             let dur = e.duration();
             let millis = i64::try_from(dur.as_millis()).unwrap_or(i64::MAX);
+            // +1 ensures millis=0 is reserved for the epoch itself; pre-epoch times start at -1
             -(millis + 1)
         }
     }
@@ -900,6 +901,7 @@ pub fn millis_to_mtime(millis: i64) -> SystemTime {
     if millis >= 0 {
         std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis as u64)
     } else {
+        // Reverse the +1 offset from mtime_to_millis: -1 maps back to epoch, -2 to 1ms before, etc.
         let before_epoch = (-i128::from(millis) - 1).max(0) as u128;
         let clamped = before_epoch.min(u128::from(u64::MAX)) as u64;
         std::time::UNIX_EPOCH - std::time::Duration::from_millis(clamped)

@@ -372,8 +372,20 @@ pub fn remove_hook(project_path: &Path) -> Result<()> {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("git")
-        .current_dir(cwd)
+    run_git_impl(cwd, None, args)
+}
+
+fn run_git_with_index(cwd: &Path, index_file: &Path, args: &[&str]) -> Result<()> {
+    run_git_impl(cwd, Some(index_file), args)
+}
+
+fn run_git_impl(cwd: &Path, index_file: Option<&Path>, args: &[&str]) -> Result<()> {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd);
+    if let Some(idx) = index_file {
+        cmd.env("GIT_INDEX_FILE", idx);
+    }
+    let status = cmd
         .args(args)
         .status()
         .with_context(|| format!("Failed to run git {}", args.join(" ")))?;
@@ -384,34 +396,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
 }
 
 fn run_git_output(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .with_context(|| format!("Failed to run git {}", args.join(" ")))?;
-    if !output.status.success() {
-        bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(String::from_utf8(output.stdout)?)
-}
-
-fn run_git_with_index(cwd: &Path, index_file: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("git")
-        .current_dir(cwd)
-        .env("GIT_INDEX_FILE", index_file)
-        .args(args)
-        .status()
-        .with_context(|| format!("Failed to run git {}", args.join(" ")))?;
-    if !status.success() {
-        bail!("git {} failed with status {}", args.join(" "), status);
-    }
-    Ok(())
+    run_git_output_impl(cwd, None, args)
 }
 
 /// Returns true if the path is safe for inclusion in a git index entry.
@@ -426,9 +411,16 @@ fn is_safe_git_path(path: &str) -> bool {
 }
 
 fn run_git_output_with_index(cwd: &Path, index_file: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .env("GIT_INDEX_FILE", index_file)
+    run_git_output_impl(cwd, Some(index_file), args)
+}
+
+fn run_git_output_impl(cwd: &Path, index_file: Option<&Path>, args: &[&str]) -> Result<String> {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd);
+    if let Some(idx) = index_file {
+        cmd.env("GIT_INDEX_FILE", idx);
+    }
+    let output = cmd
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

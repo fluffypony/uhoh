@@ -3,26 +3,33 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 #[non_exhaustive]
-#[allow(dead_code)]
 pub struct AgentProfile {
     pub name: String,
     #[serde(default)]
     pub session_log_pattern: String,
     #[serde(default)]
+    #[allow(dead_code)] // deserialized from TOML, reserved for future use
     pub process_names: Vec<String>,
     #[serde(default)]
+    #[allow(dead_code)] // used by sandbox.rs behind feature gate
     pub data_dirs: Vec<String>,
     #[serde(default)]
+    #[allow(dead_code)] // used by sandbox.rs behind feature gate
     pub config_files: Vec<String>,
     #[serde(default)]
+    #[allow(dead_code)] // used by sandbox.rs behind feature gate
     pub personality_files: Vec<String>,
     #[serde(default)]
+    #[allow(dead_code)] // used by sandbox.rs behind feature gate
     pub memory_dirs: Vec<String>,
     #[serde(default)]
+    #[allow(dead_code)] // deserialized from TOML, reserved for future use
     pub tool_names_write: Vec<String>,
     #[serde(default)]
+    #[allow(dead_code)] // deserialized from TOML, reserved for future use
     pub tool_names_exec: Vec<String>,
     #[serde(default)]
+    #[allow(dead_code)] // deserialized from TOML, reserved for future use
     pub tool_call_format: Option<String>,
 }
 

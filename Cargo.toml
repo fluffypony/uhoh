@@ -2,7 +2,7 @@
 name = "uhoh"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.80"
 description = "Local filesystem snapshots — ctrl-z for AI agents"
 license = "BSD-3-Clause"
 repository = "https://github.com/fluffypony/uhoh"
@@ -119,9 +119,6 @@ sha2 = "0.10"
 zip = "2"
 flate2 = "1"
 tar = "0.4"
-
-# Lazy statics
-once_cell = "1.0"
 
 # Crypto for at-rest protection of recovery artifacts
 chacha20poly1305 = "0.10"
