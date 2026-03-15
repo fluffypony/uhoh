@@ -232,12 +232,12 @@ fn append_diff_truncation_marker(diff_text: &mut String, diff_truncated: &mut bo
 pub fn generate_summary_blocking(
     uhoh_dir: &std::path::Path,
     ai_config: &AiConfig,
-    sidecar_manager: &crate::ai::sidecar::SidecarManager,
+    sidecar_manager: &super::sidecar::SidecarManager,
     diff_text: &str,
     files: &FileChangeSummary,
 ) -> Result<Option<String>> {
     // Choose a model tier using centralized selector
-    let Some(model) = crate::ai::models::select_model(ai_config) else {
+    let Some(model) = super::models::select_model(ai_config) else {
         tracing::warn!("No suitable AI model tier for available RAM; skipping summary generation");
         return Ok(None);
     };
@@ -245,12 +245,12 @@ pub fn generate_summary_blocking(
     // On Apple Silicon with MLX, skip GGUF download — MLX fetches its own model from HuggingFace.
     // Only download GGUF when using llama-server backend.
     let uses_mlx = cfg!(all(target_os = "macos", target_arch = "aarch64"))
-        && crate::ai::sidecar::is_mlx_available(uhoh_dir);
+        && super::sidecar::is_mlx_available(uhoh_dir);
     let model_path = if uses_mlx {
         // MLX doesn't use the local GGUF; provide the filename for sidecar mapping
         uhoh_dir.join("models").join(&model.filename)
     } else {
-        crate::ai::models::ensure_model_downloaded(uhoh_dir, &model)
+        super::models::ensure_model_downloaded(uhoh_dir, &model)
             .with_context(|| format!("Cannot download model {}", model.name))?
     };
 

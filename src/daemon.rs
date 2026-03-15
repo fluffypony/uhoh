@@ -3,6 +3,7 @@ mod maintenance;
 pub(crate) mod notifications;
 mod runtime;
 mod snapshots;
+mod watch_event;
 mod watcher;
 
 use anyhow::{Context, Result};

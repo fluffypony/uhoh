@@ -125,7 +125,7 @@ struct ForegroundDaemonRuntime {
     subsystem_manager: Arc<Mutex<SubsystemManager>>,
     server_handle: Option<tokio::task::JoinHandle<()>>,
     watcher_runtime: WatcherRuntime,
-    watch_event_rx: mpsc::Receiver<super::watcher::WatchEvent>,
+    watch_event_rx: mpsc::Receiver<super::watch_event::WatchEvent>,
     binary_watcher: BinaryChangeWatcher,
     project_states: HashMap<String, snapshots::ProjectDaemonState>,
     moved_folder_retries: snapshots::MovedFolderRetryState,

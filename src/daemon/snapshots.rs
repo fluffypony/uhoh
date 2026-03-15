@@ -13,7 +13,7 @@ use crate::event_ledger::EventLedger;
 use crate::events::{publish_event, ServerEvent};
 use crate::snapshot;
 
-use super::watcher::WatchEvent;
+use super::watch_event::WatchEvent;
 
 #[derive(Debug)]
 enum SnapshotResult {

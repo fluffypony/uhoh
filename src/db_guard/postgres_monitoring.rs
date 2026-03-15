@@ -168,15 +168,15 @@ pub fn drop_monitoring_infrastructure(
                 .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
         } else {
             for table in tables {
-                let trigger_ident = crate::db_guard::quote_pg_ident(&format!(
+                let trigger_ident = super::quote_pg_ident(&format!(
                     "uhoh_delete_counter_{}",
                     blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
                 ))?;
-                let fn_ident = crate::db_guard::quote_pg_ident(&format!(
+                let fn_ident = super::quote_pg_ident(&format!(
                     "_uhoh_count_deletes_{}",
                     blake3::hash(table.as_bytes()).to_hex()
                 ))?;
-                let table_quoted = crate::db_guard::quote_pg_ident(&table)?;
+                let table_quoted = super::quote_pg_ident(&table)?;
                 let sql = format!(
                     "DROP TRIGGER IF EXISTS {trigger_ident} ON {table_quoted}; DROP FUNCTION IF EXISTS {fn_ident}();"
                 );

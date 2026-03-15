@@ -459,12 +459,12 @@ pub(super) async fn install_delete_counter_trigger_sql(
     table: &str,
 ) -> Result<()> {
     let table_safe = table.replace('\'', "''");
-    let table_quoted = crate::db_guard::quote_pg_ident(table)?;
-    let fn_ident = crate::db_guard::quote_pg_ident(&format!(
+    let table_quoted = super::quote_pg_ident(table)?;
+    let fn_ident = super::quote_pg_ident(&format!(
         "_uhoh_count_deletes_{}",
         blake3::hash(table.as_bytes()).to_hex()
     ))?;
-    let trigger_ident = crate::db_guard::quote_pg_ident(&format!(
+    let trigger_ident = super::quote_pg_ident(&format!(
         "uhoh_delete_counter_{}",
         blake3::hash(format!("trigger:{table}").as_bytes()).to_hex()
     ))?;
@@ -904,7 +904,7 @@ mod tests {
         PostgresGuardRuntime,
     };
     use crate::db::{DbGuardEngine, DbGuardEntry, DbGuardMode};
-    use crate::db_guard::postgres_connection::ResolvedPostgresConnection;
+    use super::ResolvedPostgresConnection;
     use tokio_util::sync::CancellationToken;
 
     fn guard(name: &str, engine: DbGuardEngine, connection_ref: &str) -> DbGuardEntry {

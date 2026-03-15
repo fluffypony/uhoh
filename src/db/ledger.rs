@@ -507,7 +507,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::compute_event_chain_hash_with_id;
-    use crate::db::{LedgerSeverity, LedgerSource, NewEventLedgerEntry};
+    use super::{LedgerSeverity, LedgerSource, NewEventLedgerEntry};
 
     fn test_event(causal_parent: Option<i64>) -> NewEventLedgerEntry {
         NewEventLedgerEntry {

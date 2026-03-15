@@ -4,7 +4,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::db::{DbGuardEntry, LedgerSeverity, LedgerSource};
-use crate::db_guard::recovery;
+use super::recovery;
 use crate::event_ledger::new_event;
 use crate::subsystem::DbGuardContext;
 

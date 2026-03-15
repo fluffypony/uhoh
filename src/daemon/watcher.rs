@@ -9,14 +9,7 @@ use crate::db::Database;
 use crate::restore::RestoreCoordinator;
 
 use super::snapshots::{self, ProjectDaemonState};
-
-#[derive(Debug)]
-pub(super) enum WatchEvent {
-    FileChanged(PathBuf),
-    FileDeleted(PathBuf),
-    Overflow,
-    WatcherDied,
-}
+use super::watch_event::WatchEvent;
 
 pub(super) struct WatcherRuntime {
     event_tx: mpsc::Sender<WatchEvent>,
