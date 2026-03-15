@@ -30,7 +30,6 @@ pub mod storage;
 pub mod subsystem;
 pub(crate) mod update;
 
-// Single source of truth for ~/.uhoh directory
 pub fn uhoh_dir() -> std::path::PathBuf {
     crate::platform::uhoh_dir()
 }

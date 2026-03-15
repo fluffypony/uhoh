@@ -20,12 +20,9 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
     let max_age = std::time::Duration::from_secs(3600);
     crate::cas::cleanup_stale_temp_files(&blob_root, max_age);
 
-    // Get all referenced hashes
     let referenced = database.all_referenced_blob_hashes()?;
-    // Include blobs recently written (temp files promoted within last grace period) by ignoring too-young files below
     println!("Referenced blobs: {}", referenced.len());
 
-    // Walk blob directory
     let mut orphaned = Vec::new();
     let mut total_size = 0u64;
     let grace_period = std::time::Duration::from_secs(900); // 15 minutes to cover long snapshots
@@ -40,7 +37,6 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
             let name = blob_entry.file_name();
             let name_str = name.to_string_lossy();
 
-            // Skip temp files (cleaned up by cas::cleanup_stale_temp_files above)
             if name_str.starts_with(".tmp.") || name_str.starts_with(".blob.") {
                 continue;
             }

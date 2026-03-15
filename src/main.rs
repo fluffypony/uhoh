@@ -8,7 +8,6 @@ use uhoh::db;
 #[cfg(windows)]
 use uhoh::platform;
 
-// Deduplicated: use library function for ~/.uhoh
 fn uhoh_dir() -> PathBuf {
     std::env::var_os("UHOH_DIR")
         .map(PathBuf::from)

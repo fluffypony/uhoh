@@ -168,9 +168,9 @@ pub enum Commands {
     },
 
     Timeline {
-        /// Filter by event source (`fs`, `db_guard`, `agent`)
+        /// Filter by event source (`fs`, `db_guard`, `agent`, `daemon`, `mlx`)
         #[arg(long)]
-        source: Option<String>,
+        source: Option<crate::db::LedgerSource>,
         /// Relative lookback window (examples: `30m`, `1h`, `2d`)
         #[arg(long)]
         since: Option<String>,

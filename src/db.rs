@@ -363,10 +363,14 @@ impl LedgerSource {
 }
 
 impl FromStr for LedgerSource {
-    type Err = ();
+    type Err = String;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        Self::parse(value).ok_or(())
+        Self::parse(value).ok_or_else(|| {
+            format!(
+                "invalid source '{value}'; expected one of: fs, db_guard, agent, daemon, mlx"
+            )
+        })
     }
 }
 
@@ -675,16 +679,6 @@ pub struct DbGuardEntry {
     pub created_at: String,
     pub last_baseline_at: Option<String>,
     pub active: bool,
-}
-
-impl DbGuardEntry {
-    pub fn engine_kind(&self) -> DbGuardEngine {
-        self.engine
-    }
-
-    pub fn mode_kind(&self) -> DbGuardMode {
-        self.mode
-    }
 }
 
 #[derive(Debug, Clone)]

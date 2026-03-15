@@ -951,7 +951,10 @@ fn enforce_storage_limit(
         }
         // Estimate how much this snapshot frees
         let freed = database.estimate_snapshot_blob_size(snap.rowid)?;
-        let _ = database.delete_snapshot(snap.rowid);
+        if let Err(err) = database.delete_snapshot(snap.rowid) {
+            tracing::warn!("Failed to delete snapshot {} during storage limit enforcement: {err}", snap.rowid);
+            continue;
+        }
         blob_size = blob_size.saturating_sub(freed);
         // Actual blob GC happens via `uhoh gc` or next scheduled GC
     }
