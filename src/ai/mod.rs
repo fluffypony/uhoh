@@ -90,3 +90,79 @@ fn memory_available(min_gb: u64) -> bool {
     let available_mb = sys.available_memory() / (1024 * 1024);
     available_mb >= min_gb * 1024
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_run_ai_disabled() {
+        let config = AiConfig {
+            enabled: false,
+            ..AiConfig::default()
+        };
+        assert!(!should_run_ai(&config));
+    }
+
+    #[test]
+    fn should_run_ai_enabled_with_enough_memory() {
+        let config = AiConfig {
+            enabled: true,
+            skip_on_battery: false,
+            min_available_memory_gb: 0, // very low threshold
+            ..AiConfig::default()
+        };
+        // Should succeed on any machine with > 0 GB available
+        assert!(should_run_ai(&config));
+    }
+
+    #[test]
+    fn should_run_ai_insufficient_memory() {
+        let config = AiConfig {
+            enabled: true,
+            skip_on_battery: false,
+            min_available_memory_gb: 999_999, // impossibly high
+            ..AiConfig::default()
+        };
+        assert!(!should_run_ai(&config));
+    }
+
+    #[test]
+    fn should_run_ai_with_disabled() {
+        let config = AiConfig {
+            enabled: false,
+            ..AiConfig::default()
+        };
+        let sys = sysinfo::System::new();
+        assert!(!should_run_ai_with(&config, &sys));
+    }
+
+    #[test]
+    fn should_run_ai_with_enabled_low_threshold() {
+        let config = AiConfig {
+            enabled: true,
+            skip_on_battery: false,
+            min_available_memory_gb: 0,
+            ..AiConfig::default()
+        };
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        assert!(should_run_ai_with(&config, &sys));
+    }
+
+    #[test]
+    fn on_ac_power_returns_bool() {
+        // Just verify it doesn't panic
+        let _ = on_ac_power();
+    }
+
+    #[test]
+    fn memory_available_zero_always_true() {
+        assert!(memory_available(0));
+    }
+
+    #[test]
+    fn memory_available_huge_always_false() {
+        assert!(!memory_available(999_999));
+    }
+}

@@ -158,3 +158,95 @@ impl Database {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::SnapshotTrigger;
+
+    fn temp_db() -> (tempfile::TempDir, Database) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = Database::open(&tmp.path().join("test.db")).unwrap();
+        db.add_project("proj1", "/fake").unwrap();
+        (tmp, db)
+    }
+
+    fn insert_snapshot_with_search(db: &Database, id: u64, message: &str) {
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_snapshot(crate::db::CreateSnapshotRow::new(
+            "proj1", id, &ts, SnapshotTrigger::Auto, message, false, &[], &[],
+        )).unwrap();
+        let rowid = db.latest_snapshot_rowid("proj1").unwrap().unwrap();
+        db.index_snapshot_for_search(rowid, "proj1", "auto", message, "", "src/main.rs")
+            .unwrap();
+    }
+
+    #[test]
+    fn search_empty_query_returns_empty() {
+        let (_tmp, db) = temp_db();
+        let results = db.search_snapshots("", None, 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_special_chars_only_returns_empty() {
+        let (_tmp, db) = temp_db();
+        let results = db.search_snapshots("!@#$%^&*()", None, 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_finds_matching_message() {
+        let (_tmp, db) = temp_db();
+        insert_snapshot_with_search(&db, 1, "refactored database layer");
+        let results = db.search_snapshots("database", Some("proj1"), 10).unwrap();
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn search_no_match_returns_empty() {
+        let (_tmp, db) = temp_db();
+        insert_snapshot_with_search(&db, 1, "fixed bug in parser");
+        let results = db.search_snapshots("nonexistent_term_xyz", Some("proj1"), 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_respects_limit() {
+        let (_tmp, db) = temp_db();
+        for i in 1..=5 {
+            insert_snapshot_with_search(&db, i, &format!("update {i}"));
+        }
+        let results = db.search_snapshots("update", None, 2).unwrap();
+        assert!(results.len() <= 2);
+    }
+
+    #[test]
+    fn search_strips_sql_operators() {
+        let (_tmp, db) = temp_db();
+        insert_snapshot_with_search(&db, 1, "added feature");
+        // "AND" and "OR" should be stripped, leaving just "added"
+        let results = db.search_snapshots("added AND OR", Some("proj1"), 10).unwrap();
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn index_and_update_summary() {
+        let (_tmp, db) = temp_db();
+        insert_snapshot_with_search(&db, 1, "initial commit");
+        let rowid = db.latest_snapshot_rowid("proj1").unwrap().unwrap();
+
+        db.set_ai_summary(rowid, "AI generated summary of changes").unwrap();
+        // Search should find the AI summary
+        let results = db.search_snapshots("generated summary", Some("proj1"), 10).unwrap();
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn search_without_project_filter() {
+        let (_tmp, db) = temp_db();
+        insert_snapshot_with_search(&db, 1, "global search test");
+        let results = db.search_snapshots("global", None, 10).unwrap();
+        assert!(!results.is_empty());
+    }
+}

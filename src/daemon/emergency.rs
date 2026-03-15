@@ -317,6 +317,75 @@ fn parse_emergency_message(msg: &str) -> (usize, u64, f64) {
     parse_emergency_message_opt(msg).unwrap_or((0, 0, 0.0))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_emergency_message_standard_format() {
+        let (deleted, baseline, ratio) =
+            parse_emergency_message("Mass delete detected: 50/100 files (50.0%)");
+        assert_eq!(deleted, 50);
+        assert_eq!(baseline, 100);
+        assert!((ratio - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_emergency_message_different_numbers() {
+        let (deleted, baseline, ratio) =
+            parse_emergency_message("Mass delete detected: 3/10 files (30.0%)");
+        assert_eq!(deleted, 3);
+        assert_eq!(baseline, 10);
+        assert!((ratio - 0.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_emergency_message_empty_returns_zeros() {
+        let (deleted, baseline, ratio) = parse_emergency_message("");
+        assert_eq!(deleted, 0);
+        assert_eq!(baseline, 0);
+        assert!((ratio - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_emergency_message_no_numbers_returns_zeros() {
+        let (deleted, baseline, ratio) = parse_emergency_message("no numbers here");
+        assert_eq!(deleted, 0);
+        assert_eq!(baseline, 0);
+        assert!((ratio - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_emergency_message_opt_valid() {
+        let result =
+            parse_emergency_message_opt("Emergency delete detected: 25/50 files (50.0%)");
+        assert!(result.is_some());
+        let (deleted, baseline, _) = result.unwrap();
+        assert_eq!(deleted, 25);
+        assert_eq!(baseline, 50);
+    }
+
+    #[test]
+    fn parse_emergency_message_opt_no_slash() {
+        assert!(parse_emergency_message_opt("just numbers 42").is_none());
+    }
+
+    #[test]
+    fn parse_emergency_message_zero_baseline() {
+        let result = parse_emergency_message_opt("delete 5/0 files");
+        assert!(result.is_some());
+        let (deleted, baseline, ratio) = result.unwrap();
+        assert_eq!(deleted, 5);
+        assert_eq!(baseline, 0);
+        assert!((ratio - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn post_restore_grace_secs_constant() {
+        assert_eq!(POST_RESTORE_GRACE_SECS, 10);
+    }
+}
+
 fn parse_emergency_message_opt(msg: &str) -> Option<(usize, u64, f64)> {
     let after = msg
         .find("delete")

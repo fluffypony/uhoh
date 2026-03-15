@@ -112,6 +112,74 @@ fn revert_event(uhoh_dir: &Path, database: &Database, event: &EventLedgerEntry) 
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_no_symlink_parents_normal_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let subdir = root.join("src");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let target = subdir.join("main.rs");
+        std::fs::write(&target, "fn main() {}").unwrap();
+
+        assert!(check_no_symlink_parents(root, &target).is_ok());
+    }
+
+    #[test]
+    fn check_no_symlink_parents_outside_root() {
+        let tmp1 = tempfile::tempdir().unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+        let target = tmp2.path().join("outside.txt");
+        std::fs::write(&target, "outside").unwrap();
+
+        let result = check_no_symlink_parents(tmp1.path(), &target);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("outside project root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_no_symlink_parents_rejects_symlink_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("secret.txt");
+        std::fs::write(&outside_file, "secret").unwrap();
+
+        // Create a symlink inside root pointing outside
+        std::os::unix::fs::symlink(outside.path(), root.join("linked")).unwrap();
+        let target = root.join("linked").join("secret.txt");
+
+        let result = check_no_symlink_parents(root, &target);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("symlinked directory"));
+    }
+
+    #[test]
+    fn check_no_symlink_parents_deeply_nested() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let deep = root.join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).unwrap();
+        let target = deep.join("file.txt");
+        std::fs::write(&target, "content").unwrap();
+
+        assert!(check_no_symlink_parents(root, &target).is_ok());
+    }
+
+    #[test]
+    fn check_no_symlink_parents_file_at_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("root_file.txt");
+        std::fs::write(&target, "content").unwrap();
+
+        assert!(check_no_symlink_parents(tmp.path(), &target).is_ok());
+    }
+}
+
 pub fn resolve_event(
     database: &Database,
     _event_ledger: &EventLedger,
