@@ -264,107 +264,43 @@ pub fn store_blob_from_file(
         return Ok((hash, actual_size, StorageMethod::Reflink, 0));
     }
 
-    let bytes_on_disk: u64 = if do_compress {
-        #[cfg(feature = "compression")]
-        {
-            let level = if (1..=22).contains(&params.compress_level) {
-                params.compress_level
-            } else {
-                3
-            };
-            // Read from temp file (already consistent) and compress
-            let src_file = std::fs::File::open(&tmp_path)?;
-            let mut src_reader = std::io::BufReader::with_capacity(64 * 1024, src_file);
-
-            let compressed_tmp = tmp_dir.join(format!(
-                ".cblob.{}.{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ));
-            // Ensure compressed_tmp is cleaned up if compression fails
-            let compress_result: anyhow::Result<_> = (|| {
-                let cfile = create_restricted_file(&compressed_tmp)?;
-                let mut cwriter = std::io::BufWriter::new(cfile);
-                cwriter.write_all(COMPRESSION_MAGIC)?;
-                let mut encoder = zstd::stream::write::Encoder::new(cwriter, level)?;
-                loop {
-                    let n = src_reader.read(&mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    encoder.write_all(&buf[..n])?;
-                }
-                let mut writer = encoder.finish()?;
-                writer.flush()?;
-                Ok(writer)
-            })();
-            let writer = match compress_result {
-                Ok(w) => w,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&compressed_tmp);
-                    return Err(e);
-                }
-            };
-            let finalize_result: anyhow::Result<u64> = (|| {
-                let file_handle = writer
-                    .into_inner()
-                    .map_err(|e| anyhow::anyhow!("Failed to get temp file handle: {e}"))?;
-                file_handle.sync_all()?;
-                Ok(file_handle.metadata()?.len())
-            })();
-            let compressed_size = match finalize_result {
-                Ok(sz) => sz,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&compressed_tmp);
-                    return Err(e);
-                }
-            };
-
-            if compressed_size < actual_size + COMPRESSION_MAGIC.len() as u64 {
-                // Compressed is smaller: use it
-                let _ = std::fs::remove_file(&tmp_path);
-                match std::fs::rename(&compressed_tmp, &blob_path) {
-                    Ok(()) => {
-                        set_blob_readonly(&blob_path);
-                        fsync_parent_dir(&blob_path);
-                        return Ok((hash, actual_size, StorageMethod::Copy, compressed_size));
-                    }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&compressed_tmp);
-                        if blob_path.exists() {
-                            return Ok((hash, actual_size, StorageMethod::Copy, 0));
-                        }
-                        return Err(e).context("Failed to rename compressed blob");
-                    }
-                }
-            } else {
-                // Uncompressed is smaller or equal
-                let _ = std::fs::remove_file(&compressed_tmp);
-                actual_size
-            }
+    // Attempt compression if enabled; returns Some((compressed_size)) if the
+    // compressed blob was placed at blob_path, None if we should use uncompressed.
+    if do_compress {
+        if let Some(result) = try_compress_and_place(
+            &tmp_path,
+            &tmp_dir,
+            &blob_path,
+            actual_size,
+            params.compress_level,
+            &mut buf,
+        )? {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Ok((hash, actual_size, result.0, result.1));
         }
-        #[cfg(not(feature = "compression"))]
-        {
-            actual_size
-        }
-    } else {
-        actual_size
-    };
+    }
 
-    // Rename uncompressed temp file to final location
-    match std::fs::rename(&tmp_path, &blob_path) {
+    // Place uncompressed temp file at final location
+    place_blob(&tmp_path, &blob_path, &hash, actual_size)
+}
+
+/// Rename a temp blob file to its final location, handling race conditions.
+fn place_blob(
+    tmp_path: &Path,
+    blob_path: &Path,
+    hash: &str,
+    actual_size: u64,
+) -> Result<(String, u64, StorageMethod, u64)> {
+    match std::fs::rename(tmp_path, blob_path) {
         Ok(()) => {
-            set_blob_readonly(&blob_path);
-            fsync_parent_dir(&blob_path);
-            Ok((hash, actual_size, StorageMethod::Copy, bytes_on_disk))
+            set_blob_readonly(blob_path);
+            fsync_parent_dir(blob_path);
+            Ok((hash.to_string(), actual_size, StorageMethod::Copy, actual_size))
         }
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp_path);
+            let _ = std::fs::remove_file(tmp_path);
             if blob_path.exists() {
-                Ok((hash, actual_size, StorageMethod::Copy, 0))
+                Ok((hash.to_string(), actual_size, StorageMethod::Copy, 0))
             } else {
                 Err(e).with_context(|| {
                     format!(
@@ -376,6 +312,98 @@ pub fn store_blob_from_file(
             }
         }
     }
+}
+
+/// Try to compress a temp blob and place it at blob_path.
+/// Returns Ok(Some((method, compressed_size))) if compressed blob was placed,
+/// Ok(None) if compression didn't help (caller should place uncompressed),
+/// Err on failure.
+#[allow(unused_variables)]
+fn try_compress_and_place(
+    tmp_path: &Path,
+    tmp_dir: &Path,
+    blob_path: &Path,
+    actual_size: u64,
+    compress_level: i32,
+    buf: &mut [u8],
+) -> Result<Option<(StorageMethod, u64)>> {
+    #[cfg(feature = "compression")]
+    {
+        let level = if (1..=22).contains(&compress_level) {
+            compress_level
+        } else {
+            3
+        };
+        let src_file = std::fs::File::open(tmp_path)?;
+        let mut src_reader = std::io::BufReader::with_capacity(64 * 1024, src_file);
+
+        let compressed_tmp = tmp_dir.join(format!(
+            ".cblob.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+
+        let compress_result: anyhow::Result<_> = (|| {
+            let cfile = create_restricted_file(&compressed_tmp)?;
+            let mut cwriter = std::io::BufWriter::new(cfile);
+            cwriter.write_all(COMPRESSION_MAGIC)?;
+            let mut encoder = zstd::stream::write::Encoder::new(cwriter, level)?;
+            loop {
+                let n = src_reader.read(buf)?;
+                if n == 0 {
+                    break;
+                }
+                encoder.write_all(&buf[..n])?;
+            }
+            let mut writer = encoder.finish()?;
+            writer.flush()?;
+            Ok(writer)
+        })();
+        let writer = match compress_result {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = std::fs::remove_file(&compressed_tmp);
+                return Err(e);
+            }
+        };
+
+        let finalize_result: anyhow::Result<u64> = (|| {
+            let file_handle = writer
+                .into_inner()
+                .map_err(|e| anyhow::anyhow!("Failed to get temp file handle: {e}"))?;
+            file_handle.sync_all()?;
+            Ok(file_handle.metadata()?.len())
+        })();
+        let compressed_size = match finalize_result {
+            Ok(sz) => sz,
+            Err(e) => {
+                let _ = std::fs::remove_file(&compressed_tmp);
+                return Err(e);
+            }
+        };
+
+        if compressed_size < actual_size + COMPRESSION_MAGIC.len() as u64 {
+            match std::fs::rename(&compressed_tmp, blob_path) {
+                Ok(()) => {
+                    set_blob_readonly(blob_path);
+                    fsync_parent_dir(blob_path);
+                    return Ok(Some((StorageMethod::Copy, compressed_size)));
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&compressed_tmp);
+                    if blob_path.exists() {
+                        return Ok(Some((StorageMethod::Copy, 0)));
+                    }
+                    return Err(e).context("Failed to rename compressed blob");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&compressed_tmp);
+    }
+    Ok(None)
 }
 
 /// Read a blob from the CAS with integrity verification.

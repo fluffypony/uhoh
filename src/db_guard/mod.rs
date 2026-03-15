@@ -66,6 +66,86 @@ impl DbGuardSubsystem {
             shutdown: None,
         }
     }
+
+    /// Execute one guard tick cycle: re-read guards, log new registrations,
+    /// spawn a blocking worker for the actual tick, and transfer state back.
+    async fn tick_and_transfer(
+        &mut self,
+        ctx: &SubsystemContext,
+        last_guard_names: &mut Vec<String>,
+    ) -> Result<()> {
+        let guards = match ctx.database.list_db_guards() {
+            Ok(g) => g,
+            Err(err) => {
+                tracing::error!("failed to list db guards: {err}");
+                return Ok(());
+            }
+        };
+
+        // Log newly registered guards
+        for guard in &guards {
+            if !last_guard_names.contains(&guard.name) {
+                let mut event = new_event(
+                    LedgerSource::DbGuard,
+                    LedgerEventType::GuardStarted,
+                    LedgerSeverity::Info,
+                );
+                event.guard_name = Some(guard.name.clone());
+                event.detail =
+                    Some(format!("engine={}, mode={}", guard.engine, guard.mode));
+                if let Err(err) = ctx.event_ledger.append(event) {
+                    tracing::error!("failed to append guard_started event: {err}");
+                }
+            }
+        }
+        *last_guard_names = guards.iter().map(|g| g.name.clone()).collect();
+
+        let ctx_cl = ctx.clone();
+        let guards_cl = guards.clone();
+        let sqlite_versions = std::mem::take(&mut self.sqlite_versions);
+        let mysql_states = std::mem::take(&mut self.mysql_states);
+        let postgres_runtime = Arc::clone(&self.postgres_runtime);
+        let shutdown = self.shutdown.clone();
+        let tick_result = tokio::task::spawn_blocking(move || {
+            let mut worker = DbGuardSubsystem {
+                healthy: true,
+                last_failure: None,
+                sqlite_versions,
+                mysql_states,
+                postgres_runtime,
+                shutdown,
+            };
+            let result = worker.tick_guards(&ctx_cl, &guards_cl);
+            (
+                result,
+                worker.healthy,
+                worker.last_failure,
+                worker.sqlite_versions,
+                worker.mysql_states,
+            )
+        })
+        .await;
+
+        match tick_result {
+            Ok((result, healthy, last_failure, sqlite_versions, mysql_states)) => {
+                self.healthy = healthy;
+                self.last_failure = last_failure;
+                self.sqlite_versions = sqlite_versions;
+                self.mysql_states = mysql_states;
+                if let Err(err) = result {
+                    self.healthy = false;
+                    self.last_failure = Some(format!("db guard tick failed: {err}"));
+                    return Err(err);
+                }
+            }
+            Err(err) => {
+                tracing::error!("db_guard tick worker panicked: {err}");
+                self.healthy = false;
+                self.last_failure = Some(format!("db guard tick worker panicked: {err}"));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for DbGuardSubsystem {
@@ -94,78 +174,8 @@ impl Subsystem for DbGuardSubsystem {
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 () = tokio::time::sleep(std::time::Duration::from_secs(GUARD_TICK_INTERVAL_SECS as u64)) => {
-                    // Re-read guards each tick so `uhoh db add` takes effect without restart
-                    let guards = match ctx.database.list_db_guards() {
-                        Ok(g) => g,
-                        Err(err) => {
-                            tracing::error!("failed to list db guards: {err}");
-                            continue;
-                        }
-                    };
-
-                    // Log newly registered guards
-                    for guard in &guards {
-                        if !last_guard_names.contains(&guard.name) {
-                            let mut event = new_event(
-                                LedgerSource::DbGuard,
-                                LedgerEventType::GuardStarted,
-                                LedgerSeverity::Info,
-                            );
-                            event.guard_name = Some(guard.name.clone());
-                            event.detail = Some(format!("engine={}, mode={}", guard.engine, guard.mode));
-                            if let Err(err) = ctx.event_ledger.append(event) {
-                                tracing::error!("failed to append guard_started event: {err}");
-                            }
-                        }
-                    }
-                    last_guard_names = guards.iter().map(|g| g.name.clone()).collect();
-
-                    let ctx_cl = ctx.clone();
-                    let guards_cl = guards.clone();
-                    let sqlite_versions = std::mem::take(&mut self.sqlite_versions);
-                    let mysql_states = std::mem::take(&mut self.mysql_states);
-                    let postgres_runtime = Arc::clone(&self.postgres_runtime);
-                    let shutdown = self.shutdown.clone();
-                    let tick_result = tokio::task::spawn_blocking(move || {
-                        let mut worker = DbGuardSubsystem {
-                            healthy: true,
-                            last_failure: None,
-                            sqlite_versions,
-                            mysql_states,
-                            postgres_runtime,
-                            shutdown,
-                        };
-                        let result = worker.tick_guards(&ctx_cl, &guards_cl);
-                        (
-                            result,
-                            worker.healthy,
-                            worker.last_failure,
-                            worker.sqlite_versions,
-                            worker.mysql_states,
-                        )
-                    })
-                    .await;
-
-                    match tick_result {
-                        Ok((result, healthy, last_failure, sqlite_versions, mysql_states)) => {
-                            self.healthy = healthy;
-                            self.last_failure = last_failure;
-                            self.sqlite_versions = sqlite_versions;
-                            self.mysql_states = mysql_states;
-                            match result {
-                                Ok(()) => {}
-                                Err(err) => {
-                                    self.healthy = false;
-                                    self.last_failure = Some(format!("db guard tick failed: {err}"));
-                                    return Err(err);
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            tracing::error!("db_guard tick worker panicked: {err}");
-                            self.healthy = false;
-                            self.last_failure = Some(format!("db guard tick worker panicked: {err}"));
-                        }
+                    if let Err(err) = self.tick_and_transfer(&ctx, &mut last_guard_names).await {
+                        return Err(err);
                     }
                 }
             }
