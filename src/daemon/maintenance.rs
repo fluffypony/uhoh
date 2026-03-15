@@ -125,7 +125,13 @@ impl DaemonMaintenanceSubsystem {
         let projects = db_projects.to_vec();
         tokio::spawn(async move {
             let freed = tokio::task::spawn_blocking(move || {
-                let db = crate::db::Database::open(&db_path).ok();
+                let db = match crate::db::Database::open(&db_path) {
+                    Ok(db) => Some(db),
+                    Err(err) => {
+                        tracing::warn!("Failed to open database for compaction: {err}");
+                        None
+                    }
+                };
                 let mut freed = 0u64;
                 if let Some(d) = db {
                     let project = &projects[idx % projects.len()];
