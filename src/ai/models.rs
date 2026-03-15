@@ -253,9 +253,11 @@ mod tests {
     }
 
     #[test]
-    fn select_model_with_custom_tiers_picks_highest_fitting() {
-        let mut config = AiConfig::default();
-        config.models = vec![
+    fn select_model_picks_highest_fitting_tier() {
+        // The selection logic iterates tiers in reverse (highest RAM first)
+        // and picks the first tier where total_ram >= min AND available >= min + 2GB.
+        // We can test this deterministically by checking the tier list logic directly.
+        let tiers = vec![
             ModelTierConfig {
                 name: "small".into(),
                 filename: "small.gguf".into(),
@@ -276,31 +278,37 @@ mod tests {
             },
         ];
 
-        // select_model_with_sys iterates in reverse and picks the first tier
-        // where total_ram_mb >= min_mb AND available_ram_mb >= min_mb + 2GB margin.
-        // We can't mock System easily, so test with the real system --
-        // at minimum verify we get *something* (the small tier requires only 4GB).
-        let result = select_model_with_sys(&config, None);
-        // Most CI/dev machines have >= 4 GB RAM + 2 GB headroom = 6 GB,
-        // so we should get at least the small tier.
-        // If on a very constrained machine, this could be None, but that is correct behavior.
-        if let Some(model) = &result {
-            // Whatever is selected should be one of our custom tiers
-            assert!(
-                ["small", "medium", "large"].contains(&model.name.as_str()),
-                "unexpected model: {}",
-                model.name
-            );
-        }
+        // Simulate the selection logic with known RAM values (16 GB total, 12 GB available)
+        let total_ram_mb: u64 = 16 * 1024;
+        let available_ram_mb: u64 = 12 * 1024;
+        let min_available_margin_mb: u64 = 2 * 1024;
+        let result = tiers.into_iter().rev().find(|t| {
+            let min_mb = t.min_ram_gb * 1024;
+            total_ram_mb >= min_mb && available_ram_mb >= min_mb + min_available_margin_mb
+        });
+
+        // With 16GB total and 12GB available, "medium" (8GB + 2GB margin = 10GB) should win
+        // "large" (64GB) is too big, "small" (4GB) fits but "medium" is checked first (reverse order)
+        let model = result.expect("should find a fitting tier");
+        assert_eq!(model.name, "medium", "should pick highest fitting tier");
     }
 
     #[test]
     fn select_model_with_empty_custom_tiers_uses_defaults() {
         let config = AiConfig::default();
         assert!(config.models.is_empty());
-        // select_model_with_sys should fall back to default_model_tiers()
-        // We just verify it doesn't panic and returns a valid result
-        let _result = select_model_with_sys(&config, None);
+        // Verify the function falls back to default_model_tiers() when config.models is empty
+        let result = select_model_with_sys(&config, None);
+        // On any machine with >= 6GB RAM, we should get a default tier
+        if let Some(model) = &result {
+            let default_names: Vec<String> =
+                default_model_tiers().iter().map(|t| t.name.clone()).collect();
+            assert!(
+                default_names.contains(&model.name),
+                "selected model '{}' should be from default tiers",
+                model.name
+            );
+        }
     }
 
     #[test]

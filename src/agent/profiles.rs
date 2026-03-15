@@ -247,17 +247,22 @@ name = "test-agent"
     }
 
     #[test]
-    fn validate_profile_path_rejects_ssh_dir() {
+    fn validate_profile_path_rejects_sensitive_dir() {
+        // Create a real file inside a sensitive directory pattern to test the check
         let home = dirs::home_dir().expect("home dir");
-        let ssh_path = home.join(".ssh").join("profile.toml");
-        // Only test if .ssh exists (it does on most systems)
-        if ssh_path.parent().unwrap().exists() {
-            // We need an actual file for canonicalize to succeed; if .ssh/profile.toml doesn't
-            // exist, canonicalize will fail before we reach the check.
-            // Instead, test with an existing file in .ssh if any, or skip gracefully.
-            let err = validate_profile_path(&ssh_path);
-            // Either canonicalize fails (file doesn't exist) or the sensitive-dir check triggers.
-            assert!(err.is_err(), "paths in .ssh should be rejected");
+        let ssh_dir = home.join(".ssh");
+        if ssh_dir.exists() {
+            // Create a temp file inside .ssh to ensure canonicalize succeeds
+            let test_file = ssh_dir.join(".uhoh_test_profile.toml");
+            std::fs::write(&test_file, "name = \"test\"\nsession_log_pattern = \"*.log\"")
+                .expect("write test file");
+            let result = validate_profile_path(&test_file);
+            let _ = std::fs::remove_file(&test_file);
+            let err = result.expect_err("paths in .ssh should be rejected");
+            assert!(
+                err.to_string().contains("sensitive directory"),
+                "expected sensitive directory error, got: {err}"
+            );
         }
     }
 }
