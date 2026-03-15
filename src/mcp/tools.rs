@@ -407,14 +407,15 @@ fn parse_tool_args<T: DeserializeOwned>(value: Value) -> Result<T, McpToolError>
 }
 
 fn classify_lookup_error(err: anyhow::Error) -> McpToolError {
-    let message = err.to_string();
-    if message.to_ascii_lowercase().contains("not registered")
-        || message.to_ascii_lowercase().contains("no project matching")
-        || message.to_ascii_lowercase().contains("not found")
+    let lower = err.to_string().to_ascii_lowercase();
+    if lower.contains("not found")
+        || lower.contains("not within a tracked project")
+        || lower.contains("no tracked projects")
+        || lower.contains("no project found")
     {
-        McpToolError::not_found(message)
+        McpToolError::not_found(err.to_string())
     } else {
-        McpToolError::internal(message)
+        McpToolError::internal(err.to_string())
     }
 }
 
@@ -541,15 +542,22 @@ mod tests {
     // ---- Error classification ----
 
     #[test]
-    fn classify_not_found_error() {
-        let err = anyhow::anyhow!("Project not found");
+    fn classify_no_project_found() {
+        let err = anyhow::anyhow!("No project found matching 'abc'");
         let mcp_err = classify_lookup_error(err);
         assert_eq!(mcp_err.code, -32004);
     }
 
     #[test]
-    fn classify_not_registered_error() {
-        let err = anyhow::anyhow!("Path not registered as a project");
+    fn classify_not_within_tracked_project() {
+        let err = anyhow::anyhow!("Path '/tmp' is not within a tracked project");
+        let mcp_err = classify_lookup_error(err);
+        assert_eq!(mcp_err.code, -32004);
+    }
+
+    #[test]
+    fn classify_no_tracked_projects() {
+        let err = anyhow::anyhow!("No tracked projects. Run 'uhoh add' to register one.");
         let mcp_err = classify_lookup_error(err);
         assert_eq!(mcp_err.code, -32004);
     }
@@ -557,6 +565,13 @@ mod tests {
     #[test]
     fn classify_generic_error_as_internal() {
         let err = anyhow::anyhow!("Database connection failed");
+        let mcp_err = classify_lookup_error(err);
+        assert_eq!(mcp_err.code, -32000);
+    }
+
+    #[test]
+    fn classify_ambiguous_hash_as_internal() {
+        let err = anyhow::anyhow!("Ambiguous hash prefix 'abc': matches 3 projects");
         let mcp_err = classify_lookup_error(err);
         assert_eq!(mcp_err.code, -32000);
     }
