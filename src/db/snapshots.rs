@@ -163,33 +163,7 @@ impl Database {
 
     /// List snapshots oldest-first for pruning
     pub fn list_snapshots_oldest_first(&self, project_hash: &str) -> Result<Vec<SnapshotRow>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
-                    s.ai_summary,
-                    s.file_count
-             FROM snapshots s
-             WHERE s.project_hash = ?1
-             ORDER BY s.snapshot_id ASC",
-        )?;
-        let rows = stmt.query_map(params![project_hash], |row| {
-            let trigger_raw: String = row.get(3)?;
-            Ok(SnapshotRow {
-                rowid: row.get(0)?,
-                snapshot_id: row_u64(row, 1, "snapshots.snapshot_id")?,
-                timestamp: row.get(2)?,
-                trigger: SnapshotTrigger::parse_persisted(&trigger_raw, 3)?,
-                message: row.get(4)?,
-                pinned: row.get::<_, i32>(5)? != 0,
-                ai_summary: row.get(6)?,
-                file_count: row_u64(row, 7, "snapshots.file_count")?,
-            })
-        })?;
-        let mut snapshots = Vec::new();
-        for row in rows {
-            snapshots.push(row?);
-        }
-        Ok(snapshots)
+        self.list_snapshots_with_order(project_hash, "ORDER BY s.snapshot_id ASC")
     }
 
     /// Total size of stored blobs referenced by a project's snapshots (approximate, counts duplicates)
@@ -265,15 +239,24 @@ impl Database {
     }
 
     pub fn list_snapshots(&self, project_hash: &str) -> Result<Vec<SnapshotRow>> {
+        self.list_snapshots_with_order(project_hash, "ORDER BY s.timestamp DESC, s.rowid DESC")
+    }
+
+    fn list_snapshots_with_order(
+        &self,
+        project_hash: &str,
+        order_clause: &str,
+    ) -> Result<Vec<SnapshotRow>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
+        let sql = format!(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,
                     s.ai_summary,
                     s.file_count
              FROM snapshots s
              WHERE s.project_hash = ?1
-             ORDER BY s.timestamp DESC, s.rowid DESC",
-        )?;
+             {order_clause}"
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![project_hash], |row| {
             let trigger_raw: String = row.get(3)?;
             Ok(SnapshotRow {
