@@ -11,6 +11,8 @@ use crate::db::Database;
 use crate::event_ledger::EventLedger;
 use crate::events::ServerEvent;
 
+pub type SubsystemRefList = Vec<(String, Arc<Mutex<Box<dyn Subsystem>>>)>;
+
 #[derive(Debug, Clone)]
 pub enum AuditSource {
     None,
@@ -107,7 +109,7 @@ impl SubsystemManager {
 
     /// Collect cloned references to each subsystem so callers can release the
     /// manager lock before iterating individual subsystems.
-    pub fn subsystem_refs(&self) -> Vec<(String, Arc<Mutex<Box<dyn Subsystem>>>)> {
+    pub fn subsystem_refs(&self) -> SubsystemRefList {
         self.runners
             .iter()
             .map(|r| (r.name.clone(), Arc::clone(&r.subsystem)))

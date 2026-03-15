@@ -206,7 +206,7 @@ mod tests {
         let this_files: Vec<FileEntryRow> = vec![];
         let prev_map: HashMap<String, (String, bool, u64)> = HashMap::new();
 
-        let result = build_summary_inputs(&blob_root, &ai_config, &this_files, &prev_map);
+        let result = build_summary_inputs(blob_root, &ai_config, &this_files, &prev_map);
 
         assert!(result.files.added.is_empty());
         assert!(result.files.deleted.is_empty());
@@ -224,7 +224,7 @@ mod tests {
         ];
         let prev_map: HashMap<String, (String, bool, u64)> = HashMap::new();
 
-        let result = build_summary_inputs(&blob_root, &ai_config, &this_files, &prev_map);
+        let result = build_summary_inputs(blob_root, &ai_config, &this_files, &prev_map);
 
         assert_eq!(result.files.added.len(), 2);
         assert!(result.files.added.contains(&"src/main.rs".to_string()));
@@ -251,7 +251,7 @@ mod tests {
             ("hash_d".to_string(), true, 50),
         );
 
-        let result = build_summary_inputs(&blob_root, &ai_config, &this_files, &prev_map);
+        let result = build_summary_inputs(blob_root, &ai_config, &this_files, &prev_map);
 
         assert_eq!(result.files.added, vec!["src/new.rs".to_string()]);
         assert_eq!(result.files.deleted, vec!["src/deleted.rs".to_string()]);
@@ -271,7 +271,7 @@ mod tests {
             ("same_hash".to_string(), true, 100),
         );
 
-        let result = build_summary_inputs(&blob_root, &ai_config, &this_files, &prev_map);
+        let result = build_summary_inputs(blob_root, &ai_config, &this_files, &prev_map);
 
         assert!(result.files.added.is_empty());
         assert!(result.files.deleted.is_empty());

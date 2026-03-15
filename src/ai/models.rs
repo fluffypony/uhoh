@@ -313,13 +313,15 @@ mod tests {
 
     #[test]
     fn select_model_with_impossible_ram_returns_none() {
-        let mut config = AiConfig::default();
-        config.models = vec![ModelTierConfig {
-            name: "impossible".into(),
-            filename: "impossible.gguf".into(),
-            url: "https://example.com/impossible.gguf".into(),
-            min_ram_gb: 999_999, // No machine has this much RAM
-        }];
+        let config = AiConfig {
+            models: vec![ModelTierConfig {
+                name: "impossible".into(),
+                filename: "impossible.gguf".into(),
+                url: "https://example.com/impossible.gguf".into(),
+                min_ram_gb: 999_999, // No machine has this much RAM
+            }],
+            ..AiConfig::default()
+        };
 
         let result = select_model_with_sys(&config, None);
         assert!(

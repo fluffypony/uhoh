@@ -14,7 +14,6 @@ pub use sidecar::SidecarManager;
 pub use sidecar_update::read_manifest;
 pub use sidecar_update::run_update_check;
 pub use summary::SummaryBlobRef;
-pub use summary::SummaryDiffEntry;
 pub use summary::build_diff_entries;
 pub use summary::generate_summary_blocking;
 pub use summary::prepare_summary_inputs;

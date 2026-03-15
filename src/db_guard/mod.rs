@@ -174,9 +174,7 @@ impl Subsystem for DbGuardSubsystem {
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 () = tokio::time::sleep(std::time::Duration::from_secs(GUARD_TICK_INTERVAL_SECS as u64)) => {
-                    if let Err(err) = self.tick_and_transfer(&ctx, &mut last_guard_names).await {
-                        return Err(err);
-                    }
+                    self.tick_and_transfer(&ctx, &mut last_guard_names).await?;
                 }
             }
         }
