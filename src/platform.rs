@@ -339,19 +339,22 @@ pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
         use winapi::um::processthreadsapi::{GetProcessTimes, OpenProcess};
         use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
 
+        // Initialize FILETIME structs with safe zero-valued struct literals instead
+        // of mem::zeroed(). FILETIME contains only two u32 fields, so this is
+        // equivalent but requires no unsafe block for initialization.
+        let mut creation = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut exit_time = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+
         // SAFETY: OpenProcess with QUERY_LIMITED_INFORMATION opens a minimal handle;
-        // null is checked. FILETIME is a plain-old-data struct where all-zero bytes
-        // are valid. GetProcessTimes writes into properly aligned stack variables.
-        // CloseHandle releases the handle before returning.
+        // null is checked. GetProcessTimes writes into properly aligned stack
+        // variables. CloseHandle releases the handle before returning.
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if handle.is_null() {
                 return None;
             }
-            let mut creation: FILETIME = std::mem::zeroed();
-            let mut exit_time: FILETIME = std::mem::zeroed();
-            let mut kernel: FILETIME = std::mem::zeroed();
-            let mut user: FILETIME = std::mem::zeroed();
             let ok = GetProcessTimes(
                 handle,
                 &mut creation,

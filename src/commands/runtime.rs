@@ -293,15 +293,17 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
         }
         if pidfd >= 0 {
             tracing::info!("pidfd supervision enabled for pid {}", pid);
-            // SAFETY: siginfo_t is a plain-old-data struct where all-zero bytes are valid.
-            let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            // SAFETY: waitid with P_PIDFD on a valid pidfd obtained above; status is a
-            // properly aligned, zero-initialized siginfo_t with sufficient size.
+            // SAFETY: MaybeUninit<siginfo_t> does not require initialization; waitid writes
+            // into the pointer on success. We zero-initialize defensively so that even on
+            // failure the memory is in a well-defined state.
+            let mut status = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+            // SAFETY: waitid with P_PIDFD on a valid pidfd obtained above; status points to
+            // a properly aligned, sufficiently sized MaybeUninit<siginfo_t> buffer.
             let waited = unsafe {
                 libc::waitid(
                     libc::P_PIDFD,
                     pidfd as u32,
-                    &mut status,
+                    status.as_mut_ptr(),
                     libc::WEXITED | libc::WNOWAIT,
                 )
             };

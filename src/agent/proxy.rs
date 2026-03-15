@@ -138,6 +138,9 @@ async fn handle_connection_async(
     let client_writer_relay = client_writer.clone();
     let upstream_to_client = tokio::spawn(async move {
         while let Some(line) = upstream_lines.next_line().await? {
+            // Lock is intentionally held across these awaits to ensure each
+            // complete message (line + newline + flush) is written atomically
+            // without interleaving from the error-response path below.
             let mut w = client_writer_relay.lock().await;
             w.write_all(line.as_bytes()).await?;
             w.write_all(b"\n").await?;
@@ -174,6 +177,8 @@ async fn handle_connection_async(
                         });
                         let mut err_line = serde_json::to_string(&error_response)?;
                         err_line.push('\n');
+                        // Lock is intentionally held across these awaits to write
+                        // the complete error response atomically (see relay task above).
                         let mut w = client_writer.lock().await;
                         w.write_all(err_line.as_bytes()).await?;
                         w.flush().await?;

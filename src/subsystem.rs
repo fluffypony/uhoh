@@ -150,6 +150,11 @@ impl SubsystemManager {
         self.shutdown.cancel();
         for runner in &mut self.runners {
             {
+                // The lock is intentionally held across shutdown().await because
+                // Subsystem::shutdown() requires &mut self.  The scoped block
+                // ensures the guard is dropped before we await the task join below,
+                // which is the longer-running await.  Each subsystem's shutdown()
+                // implementation should return promptly.
                 let mut subsystem = runner.subsystem.lock().await;
                 let _ = subsystem.shutdown().await;
             }

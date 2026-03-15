@@ -254,10 +254,14 @@ fn build_app(
 }
 
 async fn health_check(State(state): State<HealthState>) -> axum::Json<serde_json::Value> {
-    let manager = state.subsystem_manager.lock().await;
-    let subsystems = manager
-        .health_snapshot()
-        .await
+    // Acquire the manager lock, take the snapshot, and drop the lock before
+    // doing any further processing to avoid holding it across awaits.
+    let snapshot = {
+        let manager = state.subsystem_manager.lock().await;
+        manager.health_snapshot().await
+    };
+
+    let subsystems = snapshot
         .into_iter()
         .map(|(name, health)| {
             let status = match health {

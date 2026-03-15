@@ -721,6 +721,8 @@ async fn run_listen_worker(
 ) {
     let mut backoff = std::time::Duration::from_secs(1);
     let max_backoff = std::time::Duration::from_secs(30);
+    // std::sync::Mutex is intentional here: the lock is held only for a brief
+    // HashMap lookup with no await, so it will not block the async executor.
     let mut last_seen_id = match ddl_cursor.lock() {
         Ok(cache) => cache.get(&connection_ref).copied().unwrap_or(0),
         Err(_) => 0,
@@ -834,6 +836,8 @@ async fn poll_and_enqueue(
         fresh.push(payload);
     }
 
+    // std::sync::Mutex is intentional here: these locks are held only for brief
+    // HashMap/Vec mutations with no await, so they will not block the async executor.
     if let Ok(mut cache) = ddl_cursor.lock() {
         cache.insert(connection_ref.to_string(), *last_seen_id);
     }
