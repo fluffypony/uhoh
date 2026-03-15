@@ -546,8 +546,8 @@ fn derive_argon2_key_zeroizing(master: &mut String, salt: &[u8; 16]) -> Result<[
 }
 
 fn resolve_env_credentials(engine_prefix: &str) -> Option<CredentialMaterial> {
-    let user = std::env::var(format!("UHOH_{}_USER", engine_prefix)).ok();
-    let password = std::env::var(format!("UHOH_{}_PASSWORD", engine_prefix)).ok();
+    let user = std::env::var(format!("UHOH_{engine_prefix}_USER")).ok();
+    let password = std::env::var(format!("UHOH_{engine_prefix}_PASSWORD")).ok();
     if user
         .as_deref()
         .map(str::trim)
@@ -589,10 +589,7 @@ fn set_mode_600(path: &std::path::Path) -> Result<()> {
 }
 
 fn resolve_pgpass(connection_ref: &str) -> Result<Option<CredentialMaterial>> {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return Ok(None),
-    };
+    let Some(home) = dirs::home_dir() else { return Ok(None) };
     let pgpass = home.join(".pgpass");
     if !pgpass.exists() {
         return Ok(None);
@@ -603,10 +600,7 @@ fn resolve_pgpass(connection_ref: &str) -> Result<Option<CredentialMaterial>> {
         .or_else(|| connection_ref.strip_prefix("postgresql://"))
         .unwrap_or(connection_ref);
 
-    let (user_host, dbname) = match uri.split_once('/') {
-        Some(parts) => parts,
-        None => return Ok(None),
-    };
+    let Some((user_host, dbname)) = uri.split_once('/') else { return Ok(None) };
     let (user, host_port) = match user_host.split_once('@') {
         Some((u, hp)) => (Some(u.to_string()), hp),
         None => (None, user_host),
@@ -712,7 +706,7 @@ mod tests {
         let second_password = std::str::from_utf8(&[116, 119, 111]).expect("valid utf8");
         let first_dsn = build_dsn("postgres", "alice", first_password, "localhost", "db1");
         let second_dsn = build_dsn("postgres", "bob", second_password, "localhost", "db2");
-        let msg = format!("first {} second {}", first_dsn, second_dsn);
+        let msg = format!("first {first_dsn} second {second_dsn}");
         let scrubbed = scrub_error_message(&msg);
         assert!(!scrubbed.contains(&format!(":{first_password}@")));
         assert!(!scrubbed.contains(&format!(":{second_password}@")));
@@ -726,7 +720,7 @@ mod tests {
         let mysql_password = std::str::from_utf8(&[102, 111, 117, 114]).expect("valid utf8");
         let pg_dsn = build_dsn("postgresql", "carol", pg_password, "db.local", "app");
         let mysql_dsn = build_dsn("mysql", "dave", mysql_password, "mysql.local", "shop");
-        let msg = format!("pg {} {}", pg_dsn, mysql_dsn);
+        let msg = format!("pg {pg_dsn} {mysql_dsn}");
         let scrubbed = scrub_error_message(&msg);
         assert!(!scrubbed.contains(&format!(":{pg_password}@")));
         assert!(!scrubbed.contains(&format!(":{mysql_password}@")));

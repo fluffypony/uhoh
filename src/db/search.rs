@@ -100,7 +100,7 @@ impl Database {
 
         let terms = safe
             .split_whitespace()
-            .map(|term| format!("{}*", term))
+            .map(|term| format!("{term}*"))
             .collect::<Vec<_>>();
         if terms.is_empty() {
             return Ok(Vec::new());

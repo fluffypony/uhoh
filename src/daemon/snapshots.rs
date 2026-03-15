@@ -260,7 +260,7 @@ pub(super) fn handle_watch_event(
         let mut new_deletes = 0usize;
         if let Some(manifest) = state.cached_prev_manifest.as_ref() {
             if let Ok(relative) = path.strip_prefix(project_path_key.as_str()) {
-                let rel_path = crate::cas::encode_relpath(relative);
+                let rel_path = crate::encoding::encode_relpath(relative);
                 if manifest.contains(&rel_path) {
                     if state.deleted_paths.insert(path.clone()) {
                         new_deletes += 1;
@@ -460,7 +460,7 @@ async fn execute_snapshot_plan(ctx: SnapshotExecutionCtx<'_>, plan: SnapshotExec
         event_ledger,
     } = ctx;
 
-    let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let logical = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let concurrency = std::cmp::max(1, (logical / 2).max(1));
     let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
     let mut join: tokio::task::JoinSet<SnapshotTaskResult> = tokio::task::JoinSet::new();
@@ -646,15 +646,12 @@ async fn spawn_snapshot_task(
     snapshot_runtime: &snapshot::SnapshotRuntime,
     request: SnapshotSpawnRequest,
 ) {
-    let permit = match semaphore.clone().acquire_owned().await {
-        Ok(permit) => permit,
-        Err(_) => {
-            tracing::warn!(
-                "Semaphore closed while scheduling {} task",
-                request.kind.trigger()
-            );
-            return;
-        }
+    let Ok(permit) = semaphore.clone().acquire_owned().await else {
+        tracing::warn!(
+            "Semaphore closed while scheduling {} task",
+            request.kind.trigger()
+        );
+        return;
     };
 
     let uhoh_dir = uhoh_dir.to_path_buf();
@@ -788,7 +785,7 @@ fn handle_created_snapshot(
                 event_tx,
                 ServerEvent::SnapshotCreated {
                     project_hash: state.hash.clone(),
-                    snapshot_id: crate::cas::id_to_base58(snapshot_id),
+                    snapshot_id: crate::encoding::id_to_base58(snapshot_id),
                     timestamp: row.timestamp,
                     trigger: row.trigger,
                     file_count: row.file_count as usize,

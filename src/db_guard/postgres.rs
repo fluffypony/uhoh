@@ -370,7 +370,7 @@ fn reconcile_wildcard_delete_triggers(
         .split(',')
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .map(|v| v.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
 
     let mut added = Vec::new();
@@ -767,50 +767,20 @@ async fn run_listen_worker(
 
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => {
+                () = shutdown.cancelled() => {
                     return;
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
-                    let rows = client
-                        .query(
-                            "SELECT id, payload::text
-                             FROM _uhoh_ddl_events
-                             WHERE id > $1
-                             ORDER BY id ASC
-                             LIMIT 64",
-                            &[&last_seen_id],
-                        )
-                        .await;
-                    match rows {
-                        Ok(values) => {
-                            if !values.is_empty() {
-                                let mut fresh = Vec::with_capacity(values.len());
-                                for row in values {
-                                    let id: i64 = row.get(0);
-                                    let payload: String = row.get(1);
-                                    last_seen_id = last_seen_id.max(id);
-                                    fresh.push(payload);
-                                }
-                                if let Ok(mut cache) = ddl_cursor.lock() {
-                                    cache.insert(connection_ref.clone(), last_seen_id);
-                                }
-                                if let Ok(mut pending) = queue.lock() {
-                                    pending.extend(fresh);
-                                    if pending.len() > 1024 {
-                                        let drain = pending.len().saturating_sub(1024);
-                                        pending.drain(0..drain);
-                                    }
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                "postgres DDL poll failed for {}: {}",
-                                connection.scrubbed_ref(),
-                                credentials::scrub_error_message(&err.to_string())
-                            );
-                            break;
-                        }
+                () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    match poll_and_enqueue(
+                        &client,
+                        &mut last_seen_id,
+                        &connection_ref,
+                        &connection,
+                        &ddl_cursor,
+                        &queue,
+                    ).await {
+                        Ok(()) => {}
+                        Err(_) => break, // reconnect on poll failure
                     }
                 }
             }
@@ -821,6 +791,62 @@ async fn run_listen_worker(
         }
         backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
     }
+}
+
+/// Execute a single poll cycle: query new DDL events, update the cursor, and enqueue payloads.
+/// Returns Err on query failure to signal the caller to reconnect.
+async fn poll_and_enqueue(
+    client: &tokio_postgres::Client,
+    last_seen_id: &mut i64,
+    connection_ref: &str,
+    connection: &ResolvedPostgresConnection,
+    ddl_cursor: &Arc<Mutex<HashMap<String, i64>>>,
+    queue: &std::sync::Arc<Mutex<Vec<String>>>,
+) -> Result<()> {
+    let rows = client
+        .query(
+            "SELECT id, payload::text
+             FROM _uhoh_ddl_events
+             WHERE id > $1
+             ORDER BY id ASC
+             LIMIT 64",
+            &[last_seen_id],
+        )
+        .await
+        .map_err(|err| {
+            tracing::warn!(
+                "postgres DDL poll failed for {}: {}",
+                connection.scrubbed_ref(),
+                credentials::scrub_error_message(&err.to_string())
+            );
+            anyhow::anyhow!("poll failed")
+        })?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut fresh = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id: i64 = row.get(0);
+        let payload: String = row.get(1);
+        *last_seen_id = (*last_seen_id).max(id);
+        fresh.push(payload);
+    }
+
+    if let Ok(mut cache) = ddl_cursor.lock() {
+        cache.insert(connection_ref.to_string(), *last_seen_id);
+    }
+    if let Ok(mut pending) = queue.lock() {
+        pending.extend(fresh);
+        // Cap queue to prevent unbounded memory growth
+        if pending.len() > 1024 {
+            let drain = pending.len().saturating_sub(1024);
+            pending.drain(0..drain);
+        }
+    }
+
+    Ok(())
 }
 
 fn drain_listen_payloads(
@@ -843,8 +869,8 @@ fn drain_listen_payloads(
 
 async fn sleep_or_cancel(duration: std::time::Duration, shutdown: &CancellationToken) -> bool {
     tokio::select! {
-        _ = shutdown.cancelled() => true,
-        _ = tokio::time::sleep(duration) => false,
+        () = shutdown.cancelled() => true,
+        () = tokio::time::sleep(duration) => false,
     }
 }
 
@@ -856,7 +882,7 @@ pub(super) fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
         .split(',')
         .map(str::trim)
         .filter(|table| !table.is_empty())
-        .map(|table| table.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 

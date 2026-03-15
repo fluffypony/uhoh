@@ -286,8 +286,8 @@ fn tool_create_snapshot(
             publish_event(&tx, event);
         }
         Ok(json!({
-            "content": [{"type": "text", "text": format!("Snapshot created: {}", crate::cas::id_to_base58(snapshot_id))}],
-            "snapshot_id": crate::cas::id_to_base58(snapshot_id)
+            "content": [{"type": "text", "text": format!("Snapshot created: {}", crate::encoding::id_to_base58(snapshot_id))}],
+            "snapshot_id": crate::encoding::id_to_base58(snapshot_id)
         }))
     } else {
         Ok(json!({
@@ -311,7 +311,7 @@ fn tool_list_snapshots(
         .iter()
         .map(|s| {
             json!({
-                "id": crate::cas::id_to_base58(s.snapshot_id),
+                "id": crate::encoding::id_to_base58(s.snapshot_id),
                 "timestamp": s.timestamp,
                 "trigger": s.trigger,
                 "message": s.message,
@@ -407,14 +407,15 @@ fn parse_tool_args<T: DeserializeOwned>(value: Value) -> Result<T, McpToolError>
 }
 
 fn classify_lookup_error(err: anyhow::Error) -> McpToolError {
-    let message = err.to_string();
-    if message.to_ascii_lowercase().contains("not registered")
-        || message.to_ascii_lowercase().contains("no project matching")
-        || message.to_ascii_lowercase().contains("not found")
+    let lower = err.to_string().to_ascii_lowercase();
+    if lower.contains("not found")
+        || lower.contains("not within a tracked project")
+        || lower.contains("no tracked projects")
+        || lower.contains("no project found")
     {
-        McpToolError::not_found(message)
+        McpToolError::not_found(err.to_string())
     } else {
-        McpToolError::internal(message)
+        McpToolError::internal(err.to_string())
     }
 }
 
@@ -424,5 +425,207 @@ fn classify_restore_error(err: RestoreProjectError) -> McpToolError {
         RestoreProjectError::Conflict(message) => McpToolError::conflict(message),
         RestoreProjectError::InvalidInput(message) => McpToolError::invalid_params(message),
         RestoreProjectError::Internal(err) => McpToolError::internal(err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ---- McpToolName::parse ----
+
+    #[test]
+    fn parse_valid_tool_names() {
+        assert!(matches!(
+            McpToolName::parse("create_snapshot"),
+            Some(McpToolName::CreateSnapshot)
+        ));
+        assert!(matches!(
+            McpToolName::parse("list_snapshots"),
+            Some(McpToolName::ListSnapshots)
+        ));
+        assert!(matches!(
+            McpToolName::parse("restore_snapshot"),
+            Some(McpToolName::RestoreSnapshot)
+        ));
+        assert!(matches!(
+            McpToolName::parse("uhoh_pre_notify"),
+            Some(McpToolName::PreNotify)
+        ));
+    }
+
+    #[test]
+    fn parse_unknown_tool_name_returns_none() {
+        assert!(McpToolName::parse("unknown_tool").is_none());
+        assert!(McpToolName::parse("").is_none());
+        assert!(McpToolName::parse("CREATE_SNAPSHOT").is_none());
+    }
+
+    // ---- parse_mcp_tool_call ----
+
+    #[test]
+    fn parse_tool_call_with_valid_params() {
+        let params = json!({
+            "name": "create_snapshot",
+            "arguments": {"path": "/tmp/project"}
+        });
+        let (name, args) = parse_mcp_tool_call(Some(params)).unwrap();
+        assert!(matches!(name, McpToolName::CreateSnapshot));
+        assert_eq!(args["path"], "/tmp/project");
+    }
+
+    #[test]
+    fn parse_tool_call_missing_params() {
+        let err = parse_mcp_tool_call(None).unwrap_err();
+        assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn parse_tool_call_unknown_tool() {
+        let params = json!({"name": "nonexistent", "arguments": {}});
+        let err = parse_mcp_tool_call(Some(params)).unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("Unknown tool"));
+    }
+
+    #[test]
+    fn parse_tool_call_rejects_unknown_fields() {
+        let params = json!({
+            "name": "create_snapshot",
+            "arguments": {},
+            "extra_field": true
+        });
+        let err = parse_mcp_tool_call(Some(params)).unwrap_err();
+        assert_eq!(err.code, -32602);
+    }
+
+    // ---- Arg struct parsing ----
+
+    #[test]
+    fn create_snapshot_args_rejects_unknown_fields() {
+        let args = json!({"path": "/tmp", "unknown_field": "value"});
+        let result: Result<CreateSnapshotArgs, _> = serde_json::from_value(args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_snapshots_args_defaults() {
+        let args: ListSnapshotsArgs = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(args.limit, 20);
+        assert_eq!(args.offset, 0);
+        assert!(args.project.path.is_none());
+    }
+
+    #[test]
+    fn restore_args_defaults_to_dry_run() {
+        let args: RestoreSnapshotArgs =
+            serde_json::from_value(json!({"snapshot_id": "abc"})).unwrap();
+        assert!(args.dry_run);
+        assert!(!args.confirm);
+    }
+
+    #[test]
+    fn project_selector_prefers_path() {
+        let args: ProjectSelectorArgs =
+            serde_json::from_value(json!({"path": "/tmp", "project_hash": "abc"})).unwrap();
+        assert_eq!(args.selection(), Some("/tmp"));
+    }
+
+    #[test]
+    fn project_selector_falls_back_to_hash() {
+        let args: ProjectSelectorArgs =
+            serde_json::from_value(json!({"project_hash": "abc"})).unwrap();
+        assert_eq!(args.selection(), Some("abc"));
+    }
+
+    // ---- Error classification ----
+
+    #[test]
+    fn classify_no_project_found() {
+        let err = anyhow::anyhow!("No project found matching 'abc'");
+        let mcp_err = classify_lookup_error(err);
+        assert_eq!(mcp_err.code, -32004);
+    }
+
+    #[test]
+    fn classify_not_within_tracked_project() {
+        let err = anyhow::anyhow!("Path '/tmp' is not within a tracked project");
+        let mcp_err = classify_lookup_error(err);
+        assert_eq!(mcp_err.code, -32004);
+    }
+
+    #[test]
+    fn classify_no_tracked_projects() {
+        let err = anyhow::anyhow!("No tracked projects. Run 'uhoh add' to register one.");
+        let mcp_err = classify_lookup_error(err);
+        assert_eq!(mcp_err.code, -32004);
+    }
+
+    #[test]
+    fn classify_generic_error_as_internal() {
+        let err = anyhow::anyhow!("Database connection failed");
+        let mcp_err = classify_lookup_error(err);
+        assert_eq!(mcp_err.code, -32000);
+    }
+
+    #[test]
+    fn classify_ambiguous_hash_as_internal() {
+        let err = anyhow::anyhow!("Ambiguous hash prefix 'abc': matches 3 projects");
+        let mcp_err = classify_lookup_error(err);
+        assert_eq!(mcp_err.code, -32000);
+    }
+
+    #[test]
+    fn classify_restore_errors() {
+        let not_found = classify_restore_error(RestoreProjectError::NotFound("gone".into()));
+        assert_eq!(not_found.code, -32004);
+
+        let conflict = classify_restore_error(RestoreProjectError::Conflict("busy".into()));
+        assert_eq!(conflict.code, -32009);
+
+        let invalid = classify_restore_error(RestoreProjectError::InvalidInput("bad".into()));
+        assert_eq!(invalid.code, -32602);
+
+        let internal =
+            classify_restore_error(RestoreProjectError::Internal(anyhow::anyhow!("boom")));
+        assert_eq!(internal.code, -32000);
+    }
+
+    // ---- tool_definitions structure ----
+
+    #[test]
+    fn tool_definitions_has_all_tools() {
+        let defs = tool_definitions();
+        let tools = defs["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 4);
+
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"create_snapshot"));
+        assert!(names.contains(&"list_snapshots"));
+        assert!(names.contains(&"restore_snapshot"));
+        assert!(names.contains(&"uhoh_pre_notify"));
+    }
+
+    #[test]
+    fn tool_definitions_have_input_schemas() {
+        let defs = tool_definitions();
+        for tool in defs["tools"].as_array().unwrap() {
+            assert!(
+                tool["inputSchema"].is_object(),
+                "Tool '{}' missing inputSchema",
+                tool["name"]
+            );
+        }
+    }
+
+    // ---- McpToolError constructors ----
+
+    #[test]
+    fn error_constructors_set_correct_codes() {
+        assert_eq!(McpToolError::invalid_params("x").code, -32602);
+        assert_eq!(McpToolError::not_found("x").code, -32004);
+        assert_eq!(McpToolError::conflict("x").code, -32009);
+        assert_eq!(McpToolError::internal("x").code, -32000);
     }
 }

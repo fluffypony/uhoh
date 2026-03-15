@@ -205,7 +205,7 @@ fn start_watching(paths: &[PathBuf], tx: mpsc::Sender<WatchEvent>) -> Result<Rec
     for path in paths {
         if path.exists() {
             match watcher.watch(path, RecursiveMode::Recursive) {
-                Ok(_) => tracing::debug!("Watching: {}", path.display()),
+                Ok(()) => tracing::debug!("Watching: {}", path.display()),
                 Err(e) => tracing::warn!("Cannot watch {}: {}", path.display(), e),
             }
         }

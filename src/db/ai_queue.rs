@@ -25,7 +25,7 @@ impl Database {
              ORDER BY queued_at ASC
              LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
+        let rows = stmt.query_map(params![i64::from(limit)], |row| {
             Ok(PendingAiSummaryRow {
                 snapshot_rowid: row.get::<_, i64>(0)?,
                 project_hash: row.get::<_, String>(1)?,

@@ -8,6 +8,7 @@ use std::path::Path;
 
 use crate::cas;
 use crate::db::{Database, ProjectEntry};
+use crate::encoding;
 use chrono::TimeZone;
 use syntect::easy::HighlightLines;
 // Style imported implicitly via ranges; suppress unused warnings by not importing it explicitly
@@ -19,10 +20,26 @@ static SYNTAX_SET: Lazy<syntect::parsing::SyntaxSet> =
 static THEME_SET: Lazy<syntect::highlighting::ThemeSet> =
     Lazy::new(syntect::highlighting::ThemeSet::load_defaults);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeType {
+    Context,
+    Add,
+    Remove,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffStatus {
+    Added,
+    Deleted,
+    Modified,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct DiffLine {
-    pub change_type: String,
+    pub change_type: ChangeType,
     pub old_line: Option<usize>,
     pub new_line: Option<usize>,
     pub content: String,
@@ -43,7 +60,7 @@ pub struct DiffHunk {
 #[non_exhaustive]
 pub struct FileDiff {
     pub path: String,
-    pub status: String,
+    pub status: DiffStatus,
     pub hunks: Vec<DiffHunk>,
     pub too_large: bool,
     pub binary: bool,
@@ -63,7 +80,7 @@ pub fn compute_structured_diff(
     if is_binary {
         return FileDiff {
             path: file_path.to_string(),
-            status: "modified".to_string(),
+            status: DiffStatus::Modified,
             hunks: Vec::new(),
             too_large: false,
             binary: true,
@@ -75,7 +92,7 @@ pub fn compute_structured_diff(
     {
         return FileDiff {
             path: file_path.to_string(),
-            status: "modified".to_string(),
+            status: DiffStatus::Modified,
             hunks: Vec::new(),
             too_large: true,
             binary: false,
@@ -85,11 +102,11 @@ pub fn compute_structured_diff(
     let old_str = String::from_utf8_lossy(old_content);
     let new_str = String::from_utf8_lossy(new_content);
     let status = if old_str.is_empty() && !new_str.is_empty() {
-        "added"
+        DiffStatus::Added
     } else if !old_str.is_empty() && new_str.is_empty() {
-        "deleted"
+        DiffStatus::Deleted
     } else {
-        "modified"
+        DiffStatus::Modified
     };
 
     let diff = TextDiff::from_lines(old_str.as_ref(), new_str.as_ref());
@@ -116,15 +133,15 @@ pub fn compute_structured_diff(
             ChangeTag::Equal => {
                 old_line += 1;
                 new_line += 1;
-                ("context", Some(old_line), Some(new_line))
+                (ChangeType::Context, Some(old_line), Some(new_line))
             }
             ChangeTag::Delete => {
                 old_line += 1;
-                ("remove", Some(old_line), None)
+                (ChangeType::Remove, Some(old_line), None)
             }
             ChangeTag::Insert => {
                 new_line += 1;
-                ("add", None, Some(new_line))
+                (ChangeType::Add, None, Some(new_line))
             }
         };
 
@@ -147,7 +164,7 @@ pub fn compute_structured_diff(
         };
 
         lines.push(DiffLine {
-            change_type: change_type.to_string(),
+            change_type,
             old_line: o_line,
             new_line: n_line,
             content,
@@ -171,7 +188,7 @@ pub fn compute_structured_diff(
 
     FileDiff {
         path: file_path.to_string(),
-        status: status.to_string(),
+        status,
         hunks: vec![hunk],
         too_large: false,
         binary: false,
@@ -252,7 +269,7 @@ pub fn cmd_diff(
 
         let old_bytes = old_hash.and_then(|h| cas::read_blob(&blob_root, h).ok().flatten());
         let new_bytes = if is_current_tree {
-            let file_on_disk = project_path.join(cas::decode_relpath_to_os(path));
+            let file_on_disk = project_path.join(encoding::decode_relpath_to_os(path));
             // Use symlink_metadata to avoid following symlinks; read symlink target as content
             if let Ok(meta) = std::fs::symlink_metadata(&file_on_disk) {
                 if meta.file_type().is_symlink() {
@@ -281,7 +298,7 @@ pub fn cmd_diff(
 
         if old_is_binary || new_is_binary {
             let display_path = if path.strip_prefix("b64:").is_some() {
-                crate::cas::decode_relpath_to_os(path)
+                crate::encoding::decode_relpath_to_os(path)
                     .to_string_lossy()
                     .into_owned()
             } else {
@@ -311,7 +328,7 @@ pub fn cmd_diff(
         }
 
         let display_path = if path.strip_prefix("b64:").is_some() {
-            let os = crate::cas::decode_relpath_to_os(path);
+            let os = crate::encoding::decode_relpath_to_os(path);
             os.to_string_lossy().into_owned()
         } else {
             path.to_string()
@@ -380,7 +397,7 @@ pub fn cmd_cat(
                     .map(|d| d.with_timezone(&chrono::Utc) <= target)
                     .unwrap_or(false)
             })
-    } else if crate::cas::base58_to_id(id_str).is_some() {
+    } else if crate::encoding::base58_to_id(id_str).is_some() {
         database.find_snapshot_by_base58(&project.hash, id_str)?
     } else {
         None
@@ -398,7 +415,7 @@ pub fn cmd_cat(
                 return f.path == file_path;
             }
             // Try decoding stored path for non-UTF8 encoding
-            let stored_os = crate::cas::decode_relpath_to_os(&f.path);
+            let stored_os = crate::encoding::decode_relpath_to_os(&f.path);
             stored_os.to_string_lossy() == file_path
         })
         .ok_or_else(|| anyhow::anyhow!("File '{file_path}' not in snapshot {id_str}"))?;
@@ -425,7 +442,7 @@ pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> 
     println!("History of '{file_path}':");
     let mut prev_hash = String::new();
     for item in &history {
-        let id_str = cas::id_to_base58(item.snapshot_id);
+        let id_str = encoding::id_to_base58(item.snapshot_id);
         let changed = if item.hash != prev_hash {
             "changed"
         } else {
@@ -440,36 +457,167 @@ pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> 
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_diff_identical_content() {
+        let content = b"line1\nline2\nline3\n";
+        let diff = compute_structured_diff(content, content, "test.rs", false);
+        assert_eq!(diff.status, DiffStatus::Modified);
+        assert!(!diff.binary);
+        assert!(!diff.too_large);
+        // All lines are context (equal), no adds or removes
+        for hunk in &diff.hunks {
+            for line in &hunk.lines {
+                assert_eq!(line.change_type, ChangeType::Context);
+            }
+        }
+    }
+
+    #[test]
+    fn structured_diff_added_file() {
+        let diff = compute_structured_diff(b"", b"new content\n", "new.rs", false);
+        assert_eq!(diff.status, DiffStatus::Added);
+        assert_eq!(diff.hunks.len(), 1);
+        let hunk = &diff.hunks[0];
+        assert_eq!(hunk.old_count, 0);
+        assert!(hunk.new_count > 0);
+        assert!(hunk.lines.iter().all(|l| l.change_type == ChangeType::Add));
+    }
+
+    #[test]
+    fn structured_diff_deleted_file() {
+        let diff = compute_structured_diff(b"old content\n", b"", "deleted.rs", false);
+        assert_eq!(diff.status, DiffStatus::Deleted);
+        assert_eq!(diff.hunks.len(), 1);
+        let hunk = &diff.hunks[0];
+        assert!(hunk.old_count > 0);
+        assert_eq!(hunk.new_count, 0);
+        assert!(hunk.lines.iter().all(|l| l.change_type == ChangeType::Remove));
+    }
+
+    #[test]
+    fn structured_diff_modified_file() {
+        let old = b"line1\nline2\nline3\n";
+        let new = b"line1\nchanged\nline3\n";
+        let diff = compute_structured_diff(old, new, "mod.rs", false);
+        assert_eq!(diff.status, DiffStatus::Modified);
+        assert_eq!(diff.hunks.len(), 1);
+        let hunk = &diff.hunks[0];
+
+        // Should have context, remove, add, context lines
+        let types: Vec<ChangeType> = hunk.lines.iter().map(|l| l.change_type).collect();
+        assert!(types.contains(&ChangeType::Context));
+        assert!(types.contains(&ChangeType::Remove));
+        assert!(types.contains(&ChangeType::Add));
+    }
+
+    #[test]
+    fn structured_diff_line_numbers() {
+        let old = b"a\nb\nc\n";
+        let new = b"a\nB\nc\n";
+        let diff = compute_structured_diff(old, new, "test.txt", false);
+        let hunk = &diff.hunks[0];
+
+        // First line (context "a") should be old_line=1, new_line=1
+        assert_eq!(hunk.lines[0].old_line, Some(1));
+        assert_eq!(hunk.lines[0].new_line, Some(1));
+        assert_eq!(hunk.lines[0].change_type, ChangeType::Context);
+
+        // Remove "b" should have old_line=2, no new_line
+        let remove = hunk.lines.iter().find(|l| l.change_type == ChangeType::Remove).unwrap();
+        assert_eq!(remove.old_line, Some(2));
+        assert_eq!(remove.new_line, None);
+
+        // Add "B" should have new_line=2, no old_line
+        let add = hunk.lines.iter().find(|l| l.change_type == ChangeType::Add).unwrap();
+        assert_eq!(add.old_line, None);
+        assert_eq!(add.new_line, Some(2));
+    }
+
+    #[test]
+    fn structured_diff_hunk_counts() {
+        let old = b"a\nb\nc\nd\n";
+        let new = b"a\nX\nY\nc\nd\n";
+        let diff = compute_structured_diff(old, new, "test.txt", false);
+        let hunk = &diff.hunks[0];
+
+        // old has 4 lines, new has 5 lines
+        assert_eq!(hunk.old_count, 4);
+        assert_eq!(hunk.new_count, 5);
+    }
+
+    #[test]
+    fn structured_diff_binary_detection() {
+        let binary = &[0u8, 1, 2, 3, 0, 0, 0xFF, 0xFE];
+        let diff = compute_structured_diff(binary, b"text", "test.bin", false);
+        assert!(diff.binary);
+        assert!(diff.hunks.is_empty());
+    }
+
+    #[test]
+    fn structured_diff_too_large() {
+        let big = vec![b'x'; MAX_STRUCTURED_DIFF_BYTES + 1];
+        let diff = compute_structured_diff(&big, b"small", "big.txt", false);
+        assert!(diff.too_large);
+        assert!(diff.hunks.is_empty());
+    }
+
+    #[test]
+    fn structured_diff_with_highlighting() {
+        let old = b"fn main() {}\n";
+        let new = b"fn main() {\n    println!(\"hello\");\n}\n";
+        let diff = compute_structured_diff(old, new, "test.rs", true);
+
+        // Lines with highlighting should have highlighted_html set
+        let has_html = diff
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .any(|l| l.highlighted_html.is_some());
+        assert!(has_html);
+    }
+
+    #[test]
+    fn structured_diff_path_preserved() {
+        let diff = compute_structured_diff(b"a", b"b", "src/deep/path.rs", false);
+        assert_eq!(diff.path, "src/deep/path.rs");
+    }
+
+    #[test]
+    fn structured_diff_no_trailing_newline() {
+        // Content without trailing newlines shouldn't break
+        let old = b"no newline";
+        let new = b"different no newline";
+        let diff = compute_structured_diff(old, new, "test.txt", false);
+        assert_eq!(diff.status, DiffStatus::Modified);
+        assert!(!diff.hunks.is_empty());
+    }
+}
+
 /// Build a file list from the current working directory (for diffing against current state).
 fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db::FileEntryRow>> {
     let walker = crate::ignore_rules::build_walker(project_path);
     let mut entries = Vec::new();
     for entry in walker {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
         if path.file_name().is_some_and(|n| n == ".uhoh") {
             continue;
         }
-        let meta = match std::fs::symlink_metadata(path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+        let Ok(meta) = std::fs::symlink_metadata(path) else { continue };
         let ft = meta.file_type();
         if !ft.is_file() && !ft.is_symlink() {
             continue;
         }
         let rel_path = match path.strip_prefix(project_path) {
-            Ok(r) => cas::encode_relpath(r),
+            Ok(r) => encoding::encode_relpath(r),
             Err(_) => continue,
         };
         let (hash, size, is_symlink, executable) = if ft.is_symlink() {
-            let target = match std::fs::read_link(path) {
-                Ok(t) => t,
-                Err(_) => continue, // Skip unreadable symlinks
-            };
+            let Ok(target) = std::fs::read_link(path) else { continue }; // Skip unreadable symlinks
             #[cfg(unix)]
             let target_bytes = {
                 use std::os::unix::ffi::OsStrExt;
@@ -500,11 +648,8 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
                 }
                 Ok((hasher.finalize().to_hex().to_string(), total))
             })();
-            let (hash, size) = match hash_result {
-                Ok(v) => v,
-                Err(_) => continue, // Skip unreadable files
-            };
-            (hash, size, false, cas::is_executable(path))
+            let Ok((hash, size)) = hash_result else { continue }; // Skip unreadable files
+            (hash, size, false, encoding::is_executable(path))
         };
         entries.push(crate::db::FileEntryRow {
             path: rel_path,

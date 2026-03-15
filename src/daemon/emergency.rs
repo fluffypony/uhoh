@@ -212,7 +212,9 @@ pub(super) fn emit_emergency_delete_detected(
     let mut ledger_event = new_event(LedgerSource::Fs, "emergency_delete_detected", severity);
     ledger_event.project_hash = Some(project_hash.to_string());
     ledger_event.detail = Some(detail.to_string());
-    let _ = event_ledger.append(ledger_event);
+    if let Err(err) = event_ledger.append(ledger_event) {
+        tracing::error!("failed to append emergency_delete_detected event: {err}");
+    }
 
     publish_event(
         event_tx,

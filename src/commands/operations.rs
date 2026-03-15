@@ -5,8 +5,8 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use crate::cas;
 use crate::db::{Database, ProjectEntry};
+use crate::encoding;
 
 pub fn cmd_mark(database: &Database, project: &ProjectEntry, label: &str) -> Result<()> {
     // If an operation is active, close it using the latest snapshot as last_snapshot_id
@@ -18,7 +18,7 @@ pub fn cmd_mark(database: &Database, project: &ProjectEntry, label: &str) -> Res
             .unwrap_or(0);
         database.close_operation_with_last(op.id, latest)?;
         tracing::info!("Closed previous active operation at {}", {
-            cas::id_to_base58(latest)
+            encoding::id_to_base58(latest)
         });
     }
 
@@ -34,7 +34,7 @@ pub fn cmd_mark(database: &Database, project: &ProjectEntry, label: &str) -> Res
     println!(
         "Operation marked: \"{}\" (from snapshot {})",
         label,
-        cas::id_to_base58(current)
+        encoding::id_to_base58(current)
     );
     println!("Changes until the next `uhoh mark` or `uhoh undo` will be grouped.");
     Ok(())
@@ -52,7 +52,7 @@ pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) ->
         tracing::info!(
             "Closed active operation: {} at {}",
             op.label,
-            cas::id_to_base58(latest)
+            encoding::id_to_base58(latest)
         );
     }
 
@@ -65,7 +65,7 @@ pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) ->
     // recorded when `uhoh mark` was called. Previous code incorrectly went one
     // snapshot further back via snapshot_before(), destroying a valid snapshot.
     if completed.first_snapshot_id > 0 {
-        let id_str = cas::id_to_base58(completed.first_snapshot_id);
+        let id_str = encoding::id_to_base58(completed.first_snapshot_id);
         println!(
             "Undoing operation \"{}\": restoring to snapshot {id_str}",
             completed.label
@@ -115,8 +115,8 @@ pub fn cmd_list_operations(database: &Database, project: &ProjectEntry) -> Resul
         let snap_range = match (op.first_snapshot_id, op.last_snapshot_id) {
             (Some(f), Some(l)) => format!(
                 "snapshots {}..{}",
-                cas::id_to_base58(f),
-                cas::id_to_base58(l)
+                encoding::id_to_base58(f),
+                encoding::id_to_base58(l)
             ),
             _ => "no snapshots".to_string(),
         };

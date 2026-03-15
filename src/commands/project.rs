@@ -3,8 +3,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tracing::warn;
 
-use crate::cas;
 use crate::config;
+use crate::encoding;
 use crate::db;
 use crate::diff_view;
 use crate::git;
@@ -109,7 +109,7 @@ fn print_project_status(database: &db::Database, project_hash: &str) -> Result<(
     if let Some(latest) = snaps.first() {
         println!(
             "Latest snapshot: {} ({})",
-            cas::id_to_base58(latest.snapshot_id),
+            encoding::id_to_base58(latest.snapshot_id),
             latest.timestamp
         );
         println!("Total snapshots: {}", snaps.len());
@@ -201,7 +201,7 @@ pub fn snapshots(database: &db::Database, target: Option<String>) -> Result<()> 
     }
 
     for snapshot in &snapshots {
-        let id_str = cas::id_to_base58(snapshot.snapshot_id);
+        let id_str = encoding::id_to_base58(snapshot.snapshot_id);
         let pin = if snapshot.pinned { " 📌" } else { "" };
         let msg = if snapshot.message.is_empty() {
             String::new()

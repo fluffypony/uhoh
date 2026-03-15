@@ -34,7 +34,7 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
 
     loop {
         tokio::select! {
-            _ = shutdown.cancelled() => break,
+            () = shutdown.cancelled() => break,
             accept = listener.accept() => match accept {
             Ok((stream, addr)) => {
                 let peer = stream
@@ -70,7 +70,7 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
                             "mcp_proxy_connection_failed",
                             LedgerSeverity::Warn,
                         );
-                        event.detail = Some(format!("peer={}, error={}", addr, e));
+                        event.detail = Some(format!("peer={addr}, error={e}"));
                         if let Err(err) = event_ledger.append(event) {
                             tracing::error!(
                                 "failed to append mcp_proxy_connection_failed event: {err}"
@@ -237,11 +237,11 @@ async fn intercept_tool_call(
         let candidate_path = args
             .get("path")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .or_else(|| {
                 args.get("file")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
             });
         if let Some(candidate_path) = candidate_path {
             path = Some(candidate_path.clone());
@@ -358,7 +358,7 @@ async fn intercept_tool_call(
                     let call_id = call.get("id").cloned().unwrap_or(serde_json::Value::Null);
                     return Ok(InterceptResult::Block {
                         id: call_id,
-                        reason: format!("Dangerous tool call '{}' was explicitly denied", tool),
+                        reason: format!("Dangerous tool call '{tool}' was explicitly denied"),
                     });
                 }
             }
@@ -755,7 +755,7 @@ fn ensure_secure_runtime_dir(path: &Path) -> Result<()> {
 }
 
 fn atomic_write_secure(path: &Path, payload: &[u8], label: &str) -> Result<()> {
-    let tmp = path.with_extension(format!("{}.tmp", label));
+    let tmp = path.with_extension(format!("{label}.tmp"));
     std::fs::write(&tmp, payload)
         .with_context(|| format!("Failed writing temporary file: {}", tmp.display()))?;
     #[cfg(unix)]

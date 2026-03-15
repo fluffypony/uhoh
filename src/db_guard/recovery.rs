@@ -275,7 +275,7 @@ fn wrap_in_transaction(sql: &str) -> String {
 fn enforce_max_payload_size(payload: &[u8], max_mb: u64, label: &str) -> Result<()> {
     let max_bytes = max_mb.saturating_mul(1024 * 1024);
     if max_bytes == 0 {
-        anyhow::bail!("{} maximum size must be greater than 0", label);
+        anyhow::bail!("{label} maximum size must be greater than 0");
     }
     if payload.len() as u64 > max_bytes {
         anyhow::bail!(

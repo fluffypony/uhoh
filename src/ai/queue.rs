@@ -37,22 +37,16 @@ pub async fn process_summary_queue(
             continue;
         }
 
-        let this = match database.get_snapshot_by_rowid(job.snapshot_rowid) {
-            Ok(Some(snapshot)) => snapshot,
-            _ => {
-                let _ = database.delete_pending_ai(job.snapshot_rowid);
-                continue;
-            }
+        let Ok(Some(this)) = database.get_snapshot_by_rowid(job.snapshot_rowid) else {
+            let _ = database.delete_pending_ai(job.snapshot_rowid);
+            continue;
         };
         let prev = database
             .snapshot_before(&job.project_hash, this.snapshot_id)
             .unwrap_or_default();
-        let this_files = match database.get_snapshot_files(this.rowid) {
-            Ok(files) => files,
-            Err(_) => {
-                let _ = database.increment_ai_attempts(job.snapshot_rowid);
-                continue;
-            }
+        let Ok(this_files) = database.get_snapshot_files(this.rowid) else {
+            let _ = database.increment_ai_attempts(job.snapshot_rowid);
+            continue;
         };
         let prev_files_vec = prev
             .as_ref()
@@ -94,7 +88,7 @@ pub async fn process_summary_queue(
                             event_tx,
                             ServerEvent::AiSummaryCompleted {
                                 project_hash: job.project_hash.clone(),
-                                snapshot_id: crate::cas::id_to_base58(snapshot.snapshot_id),
+                                snapshot_id: crate::encoding::id_to_base58(snapshot.snapshot_id),
                                 summary: text,
                             },
                         );

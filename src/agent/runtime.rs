@@ -141,7 +141,7 @@ impl AgentSubsystem {
     ) -> Option<String> {
         if !task
             .as_ref()
-            .map(|task| task.is_finished())
+            .map(tokio::task::JoinHandle::is_finished)
             .unwrap_or(false)
         {
             return None;
@@ -168,7 +168,7 @@ impl AgentSubsystem {
         let intercept_finished = self
             .intercept_task
             .as_ref()
-            .map(|task| task.is_finished())
+            .map(tokio::task::JoinHandle::is_finished)
             .unwrap_or(false);
         if let Some(message) =
             Self::poll_result_task(&mut self.intercept_task, "session tailer").await
@@ -184,7 +184,7 @@ impl AgentSubsystem {
         let proxy_finished = self
             .proxy_task
             .as_ref()
-            .map(|task| task.is_finished())
+            .map(tokio::task::JoinHandle::is_finished)
             .unwrap_or(false);
         if let Some(message) = Self::poll_result_task(&mut self.proxy_task, "mcp proxy").await {
             self.record_background_failure(message);
@@ -203,7 +203,7 @@ impl AgentSubsystem {
         if !self
             .fanotify_task
             .as_ref()
-            .map(|task| task.is_finished())
+            .map(tokio::task::JoinHandle::is_finished)
             .unwrap_or(false)
         {
             return;
@@ -449,8 +449,8 @@ impl Subsystem for AgentSubsystem {
         let mut last_agent_names = Vec::new();
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                () = shutdown.cancelled() => break,
+                () = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
                     self.tick(&ctx, &mut last_agent_names).await?;
                 }
             }

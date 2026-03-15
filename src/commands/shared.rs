@@ -73,14 +73,12 @@ pub fn confirm_restore_delete(count: usize) -> Result<bool> {
 
     if !io::stdin().is_terminal() {
         anyhow::bail!(
-            "Refusing to delete {} files without confirmation. Use --force or run in an interactive terminal.",
-            count
+            "Refusing to delete {count} files without confirmation. Use --force or run in an interactive terminal."
         );
     }
 
     eprintln!(
-        "⚠ This will delete {} tracked files. Use --force to skip this prompt.",
-        count
+        "⚠ This will delete {count} tracked files. Use --force to skip this prompt."
     );
     eprint!("Continue? [y/N] ");
     io::stdout().flush()?;

@@ -92,7 +92,7 @@ fn build_connect_dsn(
         PostgresConnectionShape::Keywords => {
             let mut parts: Vec<String> = connection_ref
                 .split_whitespace()
-                .map(|part| part.to_string())
+                .map(std::string::ToString::to_string)
                 .collect();
             let has_user = parts.iter().any(|part| {
                 part.split_once('=')

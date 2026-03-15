@@ -105,11 +105,25 @@ fn build_snapshot_created_event(
     trigger: crate::db::SnapshotTrigger,
     message: Option<&str>,
 ) -> Option<ServerEvent> {
-    let rowid = database.latest_snapshot_rowid(&project.hash).ok()??;
-    let row = database.get_snapshot_by_rowid(rowid).ok()??;
+    let rowid = match database.latest_snapshot_rowid(&project.hash) {
+        Ok(Some(r)) => r,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::error!("failed to query latest snapshot rowid: {err}");
+            return None;
+        }
+    };
+    let row = match database.get_snapshot_by_rowid(rowid) {
+        Ok(Some(r)) => r,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::error!("failed to fetch snapshot by rowid {rowid}: {err}");
+            return None;
+        }
+    };
     Some(ServerEvent::SnapshotCreated {
         project_hash: project.hash.clone(),
-        snapshot_id: crate::cas::id_to_base58(snapshot_id),
+        snapshot_id: crate::encoding::id_to_base58(snapshot_id),
         timestamp: row.timestamp,
         trigger,
         file_count: row.file_count as usize,

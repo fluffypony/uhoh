@@ -6,6 +6,7 @@ use std::time::SystemTime;
 
 use crate::cas;
 use crate::config::{AiConfig, CompactionConfig, Config, StorageConfig, WatchConfig};
+use crate::encoding;
 use crate::db::Database;
 use crate::ignore_rules;
 use crate::ai;
@@ -212,7 +213,7 @@ fn should_use_full_scan_for_changes(
         }
         if !path.exists() {
             if let Ok(rel) = path.strip_prefix(project_path) {
-                let prefix = cas::encode_relpath(rel);
+                let prefix = encoding::encode_relpath(rel);
                 let prefix_with_sep = format!("{prefix}/");
                 if prev_files
                     .keys()
@@ -239,7 +240,7 @@ fn collect_incremental_scan(
     let mut inserted = HashSet::new();
 
     for rel_path in &rel_changed {
-        let abs_path = project_path.join(cas::decode_relpath_to_os(rel_path));
+        let abs_path = project_path.join(encoding::decode_relpath_to_os(rel_path));
         if abs_path.file_name().is_some_and(|name| name == ".uhoh") {
             continue;
         }
@@ -332,7 +333,7 @@ fn filter_incremental_paths(project_path: &Path, paths: &[PathBuf]) -> HashSet<S
         }
 
         if let Ok(rel) = path.strip_prefix(project_path) {
-            rel_changed.insert(cas::encode_relpath(rel));
+            rel_changed.insert(encoding::encode_relpath(rel));
         }
     }
 
@@ -417,7 +418,7 @@ fn collect_current_files(project_path: &Path) -> HashMap<String, (PathBuf, std::
                 if file_type.is_file() || file_type.is_symlink() {
                     if let Ok(rel_path) = path.strip_prefix(project_path) {
                         current_files
-                            .insert(cas::encode_relpath(rel_path), (path.to_path_buf(), meta));
+                            .insert(encoding::encode_relpath(rel_path), (path.to_path_buf(), meta));
                     }
                 }
             }
@@ -450,7 +451,7 @@ fn record_current_entry(
 ) {
     let size = meta.len();
     let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    let executable = cas::is_executable(abs_path);
+    let executable = encoding::is_executable(abs_path);
     if let Some(cached) = prev_files.get(rel_path) {
         if cached_matches_metadata(cached, size, mtime, executable) {
             scan.files_for_manifest
@@ -740,7 +741,7 @@ fn run_snapshot_post_commit(
         &scan.deleted_for_manifest,
     );
 
-    let id_str = cas::id_to_base58(snapshot_id);
+    let id_str = encoding::id_to_base58(snapshot_id);
     tracing::info!(
         "Snapshot {} created for {} ({} files, {} deleted, trigger={})",
         id_str,
@@ -892,8 +893,8 @@ pub fn millis_to_mtime(millis: i64) -> SystemTime {
     if millis >= 0 {
         std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis as u64)
     } else {
-        let before_epoch = (-(millis as i128) - 1).max(0) as u128;
-        let clamped = before_epoch.min(u64::MAX as u128) as u64;
+        let before_epoch = (-i128::from(millis) - 1).max(0) as u128;
+        let clamped = before_epoch.min(u128::from(u64::MAX)) as u64;
         std::time::UNIX_EPOCH - std::time::Duration::from_millis(clamped)
     }
 }

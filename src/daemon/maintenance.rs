@@ -125,7 +125,13 @@ impl DaemonMaintenanceSubsystem {
         let projects = db_projects.to_vec();
         tokio::spawn(async move {
             let freed = tokio::task::spawn_blocking(move || {
-                let db = crate::db::Database::open(&db_path).ok();
+                let db = match crate::db::Database::open(&db_path) {
+                    Ok(db) => Some(db),
+                    Err(err) => {
+                        tracing::warn!("Failed to open database for compaction: {err}");
+                        None
+                    }
+                };
                 let mut freed = 0u64;
                 if let Some(d) = db {
                     let project = &projects[idx % projects.len()];
@@ -206,7 +212,7 @@ impl DaemonMaintenanceSubsystem {
         }
         if let Ok(entries) = std::fs::read_dir(&backups_dir) {
             let mut files: Vec<_> = entries.flatten().collect();
-            files.sort_by_key(|entry| entry.file_name());
+            files.sort_by_key(std::fs::DirEntry::file_name);
             if files.len() > 14 {
                 let to_remove = files.len() - 14;
                 for entry in files.iter().take(to_remove) {
@@ -323,7 +329,7 @@ impl Subsystem for DaemonMaintenanceSubsystem {
         let mut tick_interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => break,
+                () = shutdown.cancelled() => break,
                 _ = tick_interval.tick() => {
                     let settings = MaintenanceSettings::from_config(&ctx.config);
                     self.run_tick(&ctx, &settings).await;

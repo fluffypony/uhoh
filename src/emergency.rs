@@ -73,7 +73,7 @@ pub fn expand_directory_deletion(
     let prefix = if normalized.ends_with('/') {
         normalized
     } else {
-        format!("{}/", normalized)
+        format!("{normalized}/")
     };
 
     manifest
@@ -138,13 +138,10 @@ pub fn evaluate_emergency(input: EmergencyEvalInput<'_>) -> EmergencyEvaluation 
         return EmergencyEvaluation::NoEmergency;
     }
 
-    let manifest = match cached_manifest {
-        Some(m) => m,
-        None => {
-            return EmergencyEvaluation::Skipped {
-                reason: "no_cached_manifest_for_verification",
-            };
-        }
+    let Some(manifest) = cached_manifest else {
+        return EmergencyEvaluation::Skipped {
+            reason: "no_cached_manifest_for_verification",
+        };
     };
 
     let verified_deleted = verify_deletions_against_manifest(project_root, manifest);
@@ -305,7 +302,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut manifest = BTreeSet::new();
         for i in 0..10 {
-            let name = format!("file{}.rs", i);
+            let name = format!("file{i}.rs");
             manifest.insert(name);
             // Don't create the files -> they appear "deleted"
         }
@@ -347,7 +344,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut manifest = BTreeSet::new();
         for i in 0..10 {
-            manifest.insert(format!("file{}.rs", i));
+            manifest.insert(format!("file{i}.rs"));
         }
 
         let long_ago = Instant::now() - Duration::from_secs(300);
@@ -485,7 +482,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut manifest = BTreeSet::new();
         for i in 0..3 {
-            manifest.insert(format!("file{}.rs", i));
+            manifest.insert(format!("file{i}.rs"));
         }
 
         let result = evaluate_emergency(EmergencyEvalInput {

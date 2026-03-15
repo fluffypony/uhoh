@@ -77,7 +77,7 @@ pub fn install_monitoring_infrastructure(
             )
             .await
         {
-            Ok(_) => tracing::info!("DDL event trigger installed"),
+            Ok(()) => tracing::info!("DDL event trigger installed"),
             Err(err) => {
                 let message = credentials::scrub_error_message(&err.to_string());
                 if message.contains("permission denied") || message.contains("must be superuser") {
