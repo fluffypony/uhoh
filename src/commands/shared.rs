@@ -68,6 +68,62 @@ pub fn resolve_target_project(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_daemon_running_no_pid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_daemon_running(tmp.path()));
+    }
+
+    #[test]
+    fn is_daemon_running_invalid_pid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("daemon.pid"), "not_a_number").unwrap();
+        assert!(!is_daemon_running(tmp.path()));
+    }
+
+    #[test]
+    fn is_daemon_running_empty_pid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("daemon.pid"), "").unwrap();
+        assert!(!is_daemon_running(tmp.path()));
+    }
+
+    #[test]
+    fn is_daemon_running_stale_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Use PID 1 which exists but isn't uhoh, and a start time that won't match
+        std::fs::write(tmp.path().join("daemon.pid"), "999999999 99999999999").unwrap();
+        assert!(!is_daemon_running(tmp.path()));
+    }
+
+    #[test]
+    fn resolve_project_path_explicit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = resolve_project_path(Some(tmp.path().to_str().unwrap().to_string()));
+        assert!(result.is_ok());
+        // Should canonicalize
+        let resolved = result.unwrap();
+        assert!(resolved.is_absolute());
+    }
+
+    #[test]
+    fn resolve_project_path_none_uses_cwd() {
+        let result = resolve_project_path(None);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_absolute());
+    }
+
+    #[test]
+    fn resolve_project_path_nonexistent() {
+        let result = resolve_project_path(Some("/nonexistent/path/that/does/not/exist".to_string()));
+        assert!(result.is_err());
+    }
+}
+
 pub fn confirm_restore_delete(count: usize) -> Result<bool> {
     use std::io::{self, IsTerminal, Write};
 

@@ -221,3 +221,102 @@ pub fn read_restoring_project_hash(uhoh_dir: &Path) -> Option<String> {
 pub fn is_restore_active(coordinator: &RestoreCoordinator, uhoh_dir: &Path) -> bool {
     coordinator.in_progress.load(Ordering::SeqCst) || restore_marker_active(uhoh_dir)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_coordinator_default_not_in_progress() {
+        let coord = RestoreCoordinator::new();
+        assert!(!coord.in_progress.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn restore_coordinator_in_progress_flag() {
+        let coord = RestoreCoordinator::new();
+        let flag = coord.in_progress_flag();
+        assert!(!flag.load(Ordering::SeqCst));
+        flag.store(true, Ordering::SeqCst);
+        assert!(coord.in_progress.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn restore_marker_active_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!restore_marker_active(tmp.path()));
+    }
+
+    #[test]
+    fn restore_marker_active_corrupt_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".restore-in-progress"), "garbage").unwrap();
+        // Corrupt marker should be cleaned up and return false
+        assert!(!restore_marker_active(tmp.path()));
+        assert!(!tmp.path().join(".restore-in-progress").exists());
+    }
+
+    #[test]
+    fn restore_marker_active_stale_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".restore-in-progress"),
+            "project_hash=abc\npid=999999999\nstart_ticks=0\n",
+        ).unwrap();
+        // Non-existent PID should be cleaned up
+        assert!(!restore_marker_active(tmp.path()));
+    }
+
+    #[test]
+    fn read_restoring_project_hash_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".restore-in-progress"),
+            "project_hash=abc123\npid=1\n",
+        ).unwrap();
+        let hash = read_restoring_project_hash(tmp.path());
+        assert_eq!(hash.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn read_restoring_project_hash_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(read_restoring_project_hash(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn read_restoring_project_hash_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".restore-in-progress"),
+            "project_hash=\npid=1\n",
+        ).unwrap();
+        // Empty hash should return None
+        assert!(read_restoring_project_hash(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn read_restoring_project_hash_no_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".restore-in-progress"),
+            "pid=1\nstart_ticks=0\n",
+        ).unwrap();
+        assert!(read_restoring_project_hash(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn is_restore_active_neither() {
+        let coord = RestoreCoordinator::new();
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_restore_active(&coord, tmp.path()));
+    }
+
+    #[test]
+    fn is_restore_active_flag_set() {
+        let coord = RestoreCoordinator::new();
+        coord.in_progress.store(true, Ordering::SeqCst);
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(is_restore_active(&coord, tmp.path()));
+    }
+}

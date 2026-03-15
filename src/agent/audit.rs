@@ -19,6 +19,55 @@ pub enum AuditEvent {
     },
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_event_heartbeat_serde_roundtrip() {
+        let event = AuditEvent::Heartbeat {
+            agent: "test-agent".to_string(),
+            scope: crate::config::AgentAuditScope::Project,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: AuditEvent = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AuditEvent::Heartbeat { agent, .. } => assert_eq!(agent, "test-agent"),
+            _ => panic!("Expected Heartbeat"),
+        }
+    }
+
+    #[test]
+    fn audit_event_overflow_serde_roundtrip() {
+        let event = AuditEvent::Overflow { dropped: 42 };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: AuditEvent = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AuditEvent::Overflow { dropped } => assert_eq!(dropped, 42),
+            _ => panic!("Expected Overflow"),
+        }
+    }
+
+    #[test]
+    fn audit_event_fanotify_serde_roundtrip() {
+        let event = AuditEvent::FanotifyPreImage {
+            path: "/tmp/file.rs".to_string(),
+            pid: 1234,
+            pid_start_time_ticks: 999,
+            pre_state_ref: "abc123".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: AuditEvent = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AuditEvent::FanotifyPreImage { path, pid, .. } => {
+                assert_eq!(path, "/tmp/file.rs");
+                assert_eq!(pid, 1234);
+            }
+            _ => panic!("Expected FanotifyPreImage"),
+        }
+    }
+}
+
 pub fn tick_audit(ctx: &AgentContext, agents: &[AgentEntry]) {
     for agent in agents {
         let session_id = format!("agent:{}", agent.name);
