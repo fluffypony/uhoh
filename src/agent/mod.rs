@@ -19,7 +19,6 @@ pub(crate) fn expand_home(path: &str) -> String {
     }
     path.to_string()
 }
-pub use profiles::load_agent_profile;
 pub use proxy::{auth_handshake_line, ensure_proxy_token};
 pub use runtime::AgentSubsystem;
-pub use sandbox::{apply_landlock, sandbox_supported};
+pub use sandbox::sandbox_supported;
