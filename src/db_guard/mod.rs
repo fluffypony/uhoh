@@ -92,8 +92,8 @@ impl Subsystem for DbGuardSubsystem {
 
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(GUARD_TICK_INTERVAL_SECS as u64)) => {
+                () = shutdown.cancelled() => break,
+                () = tokio::time::sleep(std::time::Duration::from_secs(GUARD_TICK_INTERVAL_SECS as u64)) => {
                     // Re-read guards each tick so `uhoh db add` takes effect without restart
                     let guards = match ctx.database.list_db_guards() {
                         Ok(g) => g,

@@ -449,8 +449,8 @@ impl Subsystem for AgentSubsystem {
         let mut last_agent_names = Vec::new();
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                () = shutdown.cancelled() => break,
+                () = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
                     self.tick(&ctx, &mut last_agent_names).await?;
                 }
             }

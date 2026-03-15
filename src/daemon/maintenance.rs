@@ -329,7 +329,7 @@ impl Subsystem for DaemonMaintenanceSubsystem {
         let mut tick_interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => break,
+                () = shutdown.cancelled() => break,
                 _ = tick_interval.tick() => {
                     let settings = MaintenanceSettings::from_config(&ctx.config);
                     self.run_tick(&ctx, &settings).await;

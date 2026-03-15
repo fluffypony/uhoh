@@ -34,7 +34,7 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
 
     loop {
         tokio::select! {
-            _ = shutdown.cancelled() => break,
+            () = shutdown.cancelled() => break,
             accept = listener.accept() => match accept {
             Ok((stream, addr)) => {
                 let peer = stream

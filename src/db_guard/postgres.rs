@@ -767,10 +767,10 @@ async fn run_listen_worker(
 
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => {
+                () = shutdown.cancelled() => {
                     return;
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
                     match poll_and_enqueue(
                         &client,
                         &mut last_seen_id,
@@ -869,8 +869,8 @@ fn drain_listen_payloads(
 
 async fn sleep_or_cancel(duration: std::time::Duration, shutdown: &CancellationToken) -> bool {
     tokio::select! {
-        _ = shutdown.cancelled() => true,
-        _ = tokio::time::sleep(duration) => false,
+        () = shutdown.cancelled() => true,
+        () = tokio::time::sleep(duration) => false,
     }
 }
 
