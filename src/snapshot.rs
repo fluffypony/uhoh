@@ -989,3 +989,181 @@ fn load_previous_snapshot_files(
     Ok(map)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    // ---- mtime_to_millis / millis_to_mtime round-trip tests ----
+
+    #[test]
+    fn roundtrip_epoch() {
+        let t = UNIX_EPOCH;
+        let ms = mtime_to_millis(t);
+        assert_eq!(ms, 0);
+        let back = millis_to_mtime(ms);
+        assert_eq!(back, UNIX_EPOCH);
+    }
+
+    #[test]
+    fn roundtrip_post_epoch() {
+        let t = UNIX_EPOCH + Duration::from_millis(1_718_000_000_000);
+        let ms = mtime_to_millis(t);
+        assert_eq!(ms, 1_718_000_000_000);
+        let back = millis_to_mtime(ms);
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn roundtrip_one_millisecond() {
+        let t = UNIX_EPOCH + Duration::from_millis(1);
+        let ms = mtime_to_millis(t);
+        assert_eq!(ms, 1);
+        let back = millis_to_mtime(ms);
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn roundtrip_pre_epoch() {
+        // 1ms before epoch
+        let t = UNIX_EPOCH - Duration::from_millis(1);
+        let ms = mtime_to_millis(t);
+        assert!(ms < 0, "Pre-epoch should give negative millis");
+        let back = millis_to_mtime(ms);
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn roundtrip_pre_epoch_larger() {
+        // 5000ms before epoch
+        let t = UNIX_EPOCH - Duration::from_millis(5000);
+        let ms = mtime_to_millis(t);
+        assert_eq!(ms, -5001); // -(5000 + 1) per the +1 offset
+        let back = millis_to_mtime(ms);
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn mtime_to_millis_pre_epoch_offset() {
+        // The function adds +1 so that millis=0 is reserved for epoch itself.
+        // 1ms before epoch → -(1 + 1) = -2
+        let t = UNIX_EPOCH - Duration::from_millis(1);
+        let ms = mtime_to_millis(t);
+        assert_eq!(ms, -2);
+    }
+
+    #[test]
+    fn millis_to_mtime_negative_one() {
+        // -1 should map to exactly the epoch (the +1 offset reversal means -1 → 0ms before epoch)
+        let t = millis_to_mtime(-1);
+        assert_eq!(t, UNIX_EPOCH);
+    }
+
+    #[test]
+    fn millis_to_mtime_zero() {
+        let t = millis_to_mtime(0);
+        assert_eq!(t, UNIX_EPOCH);
+    }
+
+    #[test]
+    fn millis_to_mtime_large_positive() {
+        // Year ~2070
+        let ms: i64 = 3_155_760_000_000;
+        let t = millis_to_mtime(ms);
+        let expected = UNIX_EPOCH + Duration::from_millis(ms as u64);
+        assert_eq!(t, expected);
+    }
+
+    #[test]
+    fn mtime_to_millis_preserves_ordering() {
+        let t1 = UNIX_EPOCH + Duration::from_millis(100);
+        let t2 = UNIX_EPOCH + Duration::from_millis(200);
+        assert!(mtime_to_millis(t1) < mtime_to_millis(t2));
+    }
+
+    #[test]
+    fn mtime_to_millis_pre_epoch_preserves_ordering() {
+        let t1 = UNIX_EPOCH - Duration::from_millis(200);
+        let t2 = UNIX_EPOCH - Duration::from_millis(100);
+        assert!(
+            mtime_to_millis(t1) < mtime_to_millis(t2),
+            "Earlier time should have smaller (more negative) millis"
+        );
+    }
+
+    // ---- cached_matches_metadata tests ----
+
+    #[test]
+    fn cached_matches_when_all_equal() {
+        let mtime = UNIX_EPOCH + Duration::from_millis(12345);
+        let cached = CachedFileState {
+            hash: "abc".into(),
+            size: 100,
+            mtime,
+            stored: true,
+            executable: false,
+            storage_method: crate::cas::StorageMethod::Copy,
+            is_symlink: false,
+        };
+        assert!(cached_matches_metadata(&cached, 100, mtime, false));
+    }
+
+    #[test]
+    fn cached_mismatch_on_size() {
+        let mtime = UNIX_EPOCH + Duration::from_millis(12345);
+        let cached = CachedFileState {
+            hash: "abc".into(),
+            size: 100,
+            mtime,
+            stored: true,
+            executable: false,
+            storage_method: crate::cas::StorageMethod::Copy,
+            is_symlink: false,
+        };
+        assert!(!cached_matches_metadata(&cached, 101, mtime, false));
+    }
+
+    #[test]
+    fn cached_mismatch_on_mtime() {
+        let mtime = UNIX_EPOCH + Duration::from_millis(12345);
+        let cached = CachedFileState {
+            hash: "abc".into(),
+            size: 100,
+            mtime,
+            stored: true,
+            executable: false,
+            storage_method: crate::cas::StorageMethod::Copy,
+            is_symlink: false,
+        };
+        let other_mtime = UNIX_EPOCH + Duration::from_millis(99999);
+        assert!(!cached_matches_metadata(&cached, 100, other_mtime, false));
+    }
+
+    #[test]
+    fn cached_mismatch_on_executable() {
+        let mtime = UNIX_EPOCH + Duration::from_millis(12345);
+        let cached = CachedFileState {
+            hash: "abc".into(),
+            size: 100,
+            mtime,
+            stored: true,
+            executable: false,
+            storage_method: crate::cas::StorageMethod::Copy,
+            is_symlink: false,
+        };
+        assert!(!cached_matches_metadata(&cached, 100, mtime, true));
+    }
+
+    // ---- SnapshotScanResult tests ----
+
+    #[test]
+    fn scan_result_starts_empty() {
+        let scan = SnapshotScanResult::new();
+        assert!(!scan.has_changes);
+        assert!(scan.new_files.is_empty());
+        assert!(scan.files_for_manifest.is_empty());
+        assert!(scan.deleted_for_manifest.is_empty());
+        assert!(scan.current_hashes.is_empty());
+    }
+}
+

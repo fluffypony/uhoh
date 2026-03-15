@@ -499,4 +499,201 @@ mod tests {
         });
         assert!(matches!(result, EmergencyEvaluation::NoEmergency));
     }
+
+    // ---- Additional edge-case tests ----
+
+    #[test]
+    fn test_deletion_ratio_normal() {
+        let r = deletion_ratio(30, 100);
+        assert!((r - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_deletion_ratio_zero_deletes() {
+        assert_eq!(deletion_ratio(0, 100), 0.0);
+    }
+
+    #[test]
+    fn test_deletion_ratio_all_deleted() {
+        assert_eq!(deletion_ratio(100, 100), 1.0);
+    }
+
+    #[test]
+    fn test_deletion_ratio_more_deleted_than_baseline() {
+        // Can happen when baseline is stale
+        let r = deletion_ratio(150, 100);
+        assert!((r - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_severity_boundary_just_below_critical() {
+        assert_eq!(
+            severity_for_ratio(0.4999),
+            crate::db::LedgerSeverity::Warn
+        );
+    }
+
+    #[test]
+    fn test_severity_exactly_at_critical() {
+        assert_eq!(
+            severity_for_ratio(0.5),
+            crate::db::LedgerSeverity::Critical
+        );
+    }
+
+    #[test]
+    fn test_severity_at_zero() {
+        assert_eq!(severity_for_ratio(0.0), crate::db::LedgerSeverity::Warn);
+    }
+
+    #[test]
+    fn test_severity_at_one() {
+        assert_eq!(
+            severity_for_ratio(1.0),
+            crate::db::LedgerSeverity::Critical
+        );
+    }
+
+    #[test]
+    fn test_expand_backslash_normalized() {
+        let mut manifest = BTreeSet::new();
+        manifest.insert("src/main.rs".to_string());
+        manifest.insert("src/lib.rs".to_string());
+
+        // Windows-style backslash should be normalized
+        let expanded = expand_directory_deletion("src\\", &manifest);
+        assert_eq!(expanded.len(), 2);
+    }
+
+    #[test]
+    fn test_expand_empty_manifest() {
+        let manifest = BTreeSet::new();
+        let expanded = expand_directory_deletion("src", &manifest);
+        assert!(expanded.is_empty());
+    }
+
+    #[test]
+    fn test_expand_no_prefix_collision() {
+        // "src" should not match "srclib/foo.rs"
+        let mut manifest = BTreeSet::new();
+        manifest.insert("srclib/foo.rs".to_string());
+        manifest.insert("src/bar.rs".to_string());
+
+        let expanded = expand_directory_deletion("src", &manifest);
+        assert_eq!(expanded.len(), 1);
+        assert!(expanded.contains(&"src/bar.rs".to_string()));
+    }
+
+    #[test]
+    fn test_verify_deletions_empty_manifest() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = BTreeSet::new();
+        let verified = verify_deletions_against_manifest(tmp.path(), &manifest);
+        assert!(verified.is_empty());
+    }
+
+    #[test]
+    fn test_verify_deletions_all_present() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.rs"), "a").unwrap();
+        fs::write(tmp.path().join("b.rs"), "b").unwrap();
+
+        let mut manifest = BTreeSet::new();
+        manifest.insert("a.rs".to_string());
+        manifest.insert("b.rs".to_string());
+
+        let verified = verify_deletions_against_manifest(tmp.path(), &manifest);
+        assert!(verified.is_empty());
+    }
+
+    #[test]
+    fn test_verify_deletions_all_missing() {
+        let tmp = TempDir::new().unwrap();
+        let mut manifest = BTreeSet::new();
+        manifest.insert("gone1.rs".to_string());
+        manifest.insert("gone2.rs".to_string());
+
+        let verified = verify_deletions_against_manifest(tmp.path(), &manifest);
+        assert_eq!(verified.len(), 2);
+    }
+
+    #[test]
+    fn test_skipped_on_empty_baseline() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = BTreeSet::new();
+
+        let result = evaluate_emergency(EmergencyEvalInput {
+            deleted_paths_hint_count: 100,
+            cached_baseline_count: Some(0),
+            last_emergency_at: None,
+            cooldown_secs: 120,
+            threshold: 0.30,
+            min_files: 5,
+            restore_in_progress: false,
+            overflow_occurred: false,
+            project_root: tmp.path(),
+            cached_manifest: Some(&manifest),
+        });
+        assert!(matches!(
+            result,
+            EmergencyEvaluation::Skipped {
+                reason: "no_prior_snapshot_or_empty_baseline"
+            }
+        ));
+    }
+
+    #[test]
+    fn test_skipped_no_manifest() {
+        let tmp = TempDir::new().unwrap();
+
+        let result = evaluate_emergency(EmergencyEvalInput {
+            deleted_paths_hint_count: 100,
+            cached_baseline_count: Some(100),
+            last_emergency_at: None,
+            cooldown_secs: 120,
+            threshold: 0.30,
+            min_files: 5,
+            restore_in_progress: false,
+            overflow_occurred: false,
+            project_root: tmp.path(),
+            cached_manifest: None,
+        });
+        assert!(matches!(
+            result,
+            EmergencyEvaluation::Skipped {
+                reason: "no_cached_manifest_for_verification"
+            }
+        ));
+    }
+
+    #[test]
+    fn test_triggered_sample_capped_at_20() {
+        let tmp = TempDir::new().unwrap();
+        let mut manifest = BTreeSet::new();
+        for i in 0..50 {
+            manifest.insert(format!("file{i:03}.rs"));
+        }
+
+        let result = evaluate_emergency(EmergencyEvalInput {
+            deleted_paths_hint_count: 50,
+            cached_baseline_count: Some(50),
+            last_emergency_at: None,
+            cooldown_secs: 120,
+            threshold: 0.30,
+            min_files: 5,
+            restore_in_progress: false,
+            overflow_occurred: false,
+            project_root: tmp.path(),
+            cached_manifest: Some(&manifest),
+        });
+        match result {
+            EmergencyEvaluation::Triggered {
+                deleted_paths_sample,
+                ..
+            } => {
+                assert_eq!(deleted_paths_sample.len(), 20);
+            }
+            other => panic!("Expected Triggered, got {:?}", other),
+        }
+    }
 }

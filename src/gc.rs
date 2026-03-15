@@ -135,3 +135,170 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Helper: create a temp uhoh dir with database and blobs layout
+    fn setup_gc_env() -> (TempDir, Database) {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+        let blobs = tmp.path().join("blobs");
+        fs::create_dir_all(blobs.join("ab")).unwrap();
+        (tmp, db)
+    }
+
+    #[test]
+    fn gc_skips_during_restore() {
+        let (tmp, db) = setup_gc_env();
+        fs::write(tmp.path().join(".restore-in-progress"), "").unwrap();
+        // Should return Ok without doing anything
+        let result = run_gc(tmp.path(), &db);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn gc_no_orphans_when_empty() {
+        let (tmp, db) = setup_gc_env();
+        let result = run_gc(tmp.path(), &db);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn gc_removes_orphaned_blobs() {
+        let (tmp, db) = setup_gc_env();
+        let blobs = tmp.path().join("blobs");
+        let prefix_dir = blobs.join("ab");
+
+        // Create a blob file that is NOT referenced in the DB
+        let orphan = prefix_dir.join("abcdef123456");
+        fs::write(&orphan, "orphan data").unwrap();
+
+        // Backdate to well past the 15-minute grace period
+        let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::open(&orphan)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        assert!(orphan.exists());
+        run_gc(tmp.path(), &db).unwrap();
+        assert!(!orphan.exists(), "Orphaned blob should have been deleted");
+    }
+
+    #[test]
+    fn gc_skips_temp_files_from_orphan_scan() {
+        let (tmp, db) = setup_gc_env();
+        let blobs = tmp.path().join("blobs");
+        let prefix_dir = blobs.join("ab");
+
+        // Create a temp file that is fresh (within the stale-temp cleanup window of 1 hour),
+        // so cleanup_stale_temp_files won't remove it. The GC orphan scan itself should also
+        // skip files starting with ".tmp." or ".blob.".
+        let tmp_file = prefix_dir.join(".tmp.something");
+        fs::write(&tmp_file, "temp data").unwrap();
+        // File is fresh (just created), so both cleanup_stale_temp_files and GC skip it.
+
+        // Also create a .blob. prefixed file
+        let blob_file = prefix_dir.join(".blob.partial");
+        fs::write(&blob_file, "partial blob").unwrap();
+
+        run_gc(tmp.path(), &db).unwrap();
+        assert!(tmp_file.exists(), ".tmp file should NOT be deleted by GC orphan scan");
+        assert!(blob_file.exists(), ".blob file should NOT be deleted by GC orphan scan");
+    }
+
+    #[test]
+    fn gc_skips_blobs_within_grace_period() {
+        let (tmp, db) = setup_gc_env();
+        let blobs = tmp.path().join("blobs");
+        let prefix_dir = blobs.join("ab");
+
+        // Create a fresh blob file (within grace period)
+        let recent = prefix_dir.join("recenthash123");
+        fs::write(&recent, "recent blob").unwrap();
+        // Don't backdate — it's fresh
+
+        run_gc(tmp.path(), &db).unwrap();
+        assert!(
+            recent.exists(),
+            "Recent blob within grace period should NOT be deleted"
+        );
+    }
+
+    #[test]
+    fn gc_preserves_referenced_blobs() {
+        let (tmp, db) = setup_gc_env();
+        let blobs = tmp.path().join("blobs");
+        let prefix_dir = blobs.join("ab");
+
+        let blob_hash = "abcdef_referenced";
+        let blob_path = prefix_dir.join(blob_hash);
+        fs::write(&blob_path, "referenced data").unwrap();
+        let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::open(&blob_path)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        // Create a snapshot that references this blob
+        db.add_project("proj1", "/fake/path").unwrap();
+        let files = vec![crate::db::SnapFileEntry::new(
+            "file.rs".into(),
+            blob_hash.into(),
+            100,
+            true,
+            false,
+            None,
+            crate::cas::StorageMethod::Copy,
+            false,
+        )];
+        let ts = chrono::Utc::now().to_rfc3339();
+        db.create_snapshot(crate::db::CreateSnapshotRow::new(
+            "proj1",
+            0,
+            &ts,
+            crate::db::SnapshotTrigger::Auto,
+            "",
+            false,
+            &files,
+            &[],
+        ))
+        .unwrap();
+
+        run_gc(tmp.path(), &db).unwrap();
+        assert!(
+            blob_path.exists(),
+            "Referenced blob should NOT be deleted"
+        );
+    }
+
+    #[test]
+    fn gc_cleans_empty_prefix_dirs() {
+        let (tmp, db) = setup_gc_env();
+        let blobs = tmp.path().join("blobs");
+        let prefix_dir = blobs.join("cd");
+        fs::create_dir_all(&prefix_dir).unwrap();
+
+        // Create and backdate a file, then run GC which should remove it
+        // and then clean the empty prefix directory
+        let orphan = prefix_dir.join("orphan_blob");
+        fs::write(&orphan, "data").unwrap();
+        // Backdate to well past the 15-minute grace period
+        let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::open(&orphan)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        run_gc(tmp.path(), &db).unwrap();
+        assert!(
+            !prefix_dir.exists(),
+            "Empty prefix dir should be cleaned up"
+        );
+    }
+}

@@ -507,13 +507,14 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::compute_event_chain_hash_with_id;
+    use super::*;
     use super::{LedgerSeverity, LedgerSource, NewEventLedgerEntry};
+    use crate::db::{Database, LedgerEventType};
 
     fn test_event(causal_parent: Option<i64>) -> NewEventLedgerEntry {
         NewEventLedgerEntry {
             source: LedgerSource::Agent,
-            event_type: crate::db::LedgerEventType::ToolCall,
+            event_type: LedgerEventType::ToolCall,
             severity: LedgerSeverity::Info,
             project_hash: Some("project".to_string()),
             agent_name: Some("agent".to_string()),
@@ -527,11 +528,265 @@ mod tests {
         }
     }
 
+    fn temp_db() -> (Database, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+        (db, dir)
+    }
+
     #[test]
     fn chain_hash_changes_when_causal_parent_changes() {
         let ts = "2026-03-12T00:00:00Z";
         let first = compute_event_chain_hash_with_id("", 1, &test_event(Some(1)), ts);
         let second = compute_event_chain_hash_with_id("", 1, &test_event(Some(2)), ts);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn chain_hash_deterministic() {
+        let ts = "2026-03-12T00:00:00Z";
+        let h1 = compute_event_chain_hash_with_id("prev", 42, &test_event(None), ts);
+        let h2 = compute_event_chain_hash_with_id("prev", 42, &test_event(None), ts);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn chain_hash_changes_with_different_prev_hash() {
+        let ts = "2026-03-12T00:00:00Z";
+        let h1 = compute_event_chain_hash_with_id("aaa", 1, &test_event(None), ts);
+        let h2 = compute_event_chain_hash_with_id("bbb", 1, &test_event(None), ts);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn chain_hash_changes_with_different_id() {
+        let ts = "2026-03-12T00:00:00Z";
+        let h1 = compute_event_chain_hash_with_id("", 1, &test_event(None), ts);
+        let h2 = compute_event_chain_hash_with_id("", 2, &test_event(None), ts);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn chain_hash_changes_with_different_timestamp() {
+        let h1 = compute_event_chain_hash_with_id("", 1, &test_event(None), "2026-01-01T00:00:00Z");
+        let h2 = compute_event_chain_hash_with_id("", 1, &test_event(None), "2026-01-02T00:00:00Z");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn chain_hash_is_64_hex_chars() {
+        let ts = "2026-03-12T00:00:00Z";
+        let hash = compute_event_chain_hash_with_id("", 1, &test_event(None), ts);
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn chain_hash_with_all_optional_fields_none() {
+        let event = NewEventLedgerEntry {
+            source: LedgerSource::Fs,
+            event_type: LedgerEventType::EmergencyDeleteDetected,
+            severity: LedgerSeverity::Critical,
+            project_hash: None,
+            agent_name: None,
+            guard_name: None,
+            path: None,
+            detail: None,
+            pre_state_ref: None,
+            post_state_ref: None,
+            causal_parent: None,
+            prev_hash: None,
+        };
+        let hash = compute_event_chain_hash_with_id("", 1, &event, "2026-01-01T00:00:00Z");
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn chain_hash_with_all_optional_fields_set() {
+        let event = NewEventLedgerEntry {
+            source: LedgerSource::DbGuard,
+            event_type: LedgerEventType::SchemaChange,
+            severity: LedgerSeverity::Warn,
+            project_hash: Some("proj".into()),
+            agent_name: Some("myagent".into()),
+            guard_name: Some("myguard".into()),
+            path: Some("/some/path".into()),
+            detail: Some("some detail".into()),
+            pre_state_ref: Some("pre_hash".into()),
+            post_state_ref: Some("post_hash".into()),
+            causal_parent: Some(99),
+            prev_hash: Some("ignore_this".into()),
+        };
+        let hash = compute_event_chain_hash_with_id("prev", 5, &event, "2026-06-15T12:00:00Z");
+        assert_eq!(hash.len(), 64);
+    }
+
+    // --- build_recent_query tests ---
+
+    #[test]
+    fn build_recent_query_no_filters() {
+        let filters = LedgerRecentFilters::default();
+        let (sql, params) = build_recent_query(filters, 10);
+        assert!(sql.contains("ORDER BY id DESC LIMIT ?"));
+        assert!(!sql.contains("WHERE"));
+        assert_eq!(params.len(), 1); // just the limit
+    }
+
+    #[test]
+    fn build_recent_query_with_source_filter() {
+        let filters = LedgerRecentFilters {
+            source: Some(LedgerSource::Agent),
+            ..Default::default()
+        };
+        let (sql, params) = build_recent_query(filters, 5);
+        assert!(sql.contains("WHERE source = ?"));
+        assert_eq!(params.len(), 2); // source + limit
+    }
+
+    #[test]
+    fn build_recent_query_with_all_filters() {
+        let filters = LedgerRecentFilters {
+            source: Some(LedgerSource::Fs),
+            guard_name: Some("myguard"),
+            agent_name: Some("myagent"),
+            session: Some("sess-123"),
+            since: Some("2026-01-01T00:00:00Z"),
+        };
+        let (sql, params) = build_recent_query(filters, 20);
+        assert!(sql.contains("source = ?"));
+        assert!(sql.contains("guard_name = ?"));
+        assert!(sql.contains("agent_name = ?"));
+        assert!(sql.contains("session_id = ?"));
+        assert!(sql.contains("ts >= ?"));
+        assert!(sql.contains(" AND "));
+        assert_eq!(params.len(), 6); // 5 filters + limit
+    }
+
+    #[test]
+    fn build_recent_query_limit_clamped_to_at_least_one() {
+        let filters = LedgerRecentFilters::default();
+        let (_, params) = build_recent_query(filters, 0);
+        // limit should be clamped to 1
+        assert_eq!(params.last().unwrap(), &Value::Integer(1));
+
+        let (_, params_neg) = build_recent_query(LedgerRecentFilters::default(), -5);
+        assert_eq!(params_neg.last().unwrap(), &Value::Integer(1));
+    }
+
+    // --- Database integration tests ---
+
+    #[test]
+    fn insert_and_retrieve_event() {
+        let (db, _dir) = temp_db();
+        let event = test_event(None);
+        let id = db.insert_event_ledger(&event).unwrap();
+        assert!(id > 0);
+
+        let got = db.event_ledger_get(id).unwrap().unwrap();
+        assert_eq!(got.source, LedgerSource::Agent);
+        assert_eq!(got.event_type, LedgerEventType::ToolCall);
+        assert_eq!(got.severity, LedgerSeverity::Info);
+        assert_eq!(got.project_hash.as_deref(), Some("project"));
+        assert_eq!(got.agent_name.as_deref(), Some("agent"));
+        assert_eq!(got.path.as_deref(), Some("src/lib.rs"));
+        assert!(!got.resolved);
+    }
+
+    #[test]
+    fn event_ledger_get_nonexistent() {
+        let (db, _dir) = temp_db();
+        let result = db.event_ledger_get(9999).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn insert_batch_and_verify_chain() {
+        let (db, _dir) = temp_db();
+        let events: Vec<NewEventLedgerEntry> = (0..5).map(|_| test_event(None)).collect();
+        let count = db.insert_event_ledger_batch(&events).unwrap();
+        assert_eq!(count, 5);
+
+        let (verified, broken) = db.verify_event_ledger_chain().unwrap();
+        assert_eq!(verified, 5);
+        assert!(broken.is_empty(), "chain should be intact: {:?}", broken);
+    }
+
+    #[test]
+    fn insert_batch_empty() {
+        let (db, _dir) = temp_db();
+        let count = db.insert_event_ledger_batch(&[]).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn mark_resolved() {
+        let (db, _dir) = temp_db();
+        let id = db.insert_event_ledger(&test_event(None)).unwrap();
+
+        let before = db.event_ledger_get(id).unwrap().unwrap();
+        assert!(!before.resolved);
+
+        db.event_ledger_mark_resolved(id).unwrap();
+
+        let after = db.event_ledger_get(id).unwrap().unwrap();
+        assert!(after.resolved);
+    }
+
+    #[test]
+    fn event_ledger_recent_with_limit() {
+        let (db, _dir) = temp_db();
+        for _ in 0..10 {
+            db.insert_event_ledger(&test_event(None)).unwrap();
+        }
+
+        let recent = db.event_ledger_recent(LedgerRecentFilters::default(), 3).unwrap();
+        assert_eq!(recent.len(), 3);
+        // Newest first
+        assert!(recent[0].id > recent[1].id);
+    }
+
+    #[test]
+    fn event_ledger_trace_follows_causal_chain() {
+        let (db, _dir) = temp_db();
+        let id1 = db.insert_event_ledger(&test_event(None)).unwrap();
+        let id2 = db.insert_event_ledger(&test_event(Some(id1))).unwrap();
+        let id3 = db.insert_event_ledger(&test_event(Some(id2))).unwrap();
+
+        let trace = db.event_ledger_trace(id3).unwrap();
+        assert!(!trace.truncated);
+        assert_eq!(trace.entries.len(), 3);
+        assert_eq!(trace.entries[0].id, id3);
+        assert_eq!(trace.entries[1].id, id2);
+        assert_eq!(trace.entries[2].id, id1);
+    }
+
+    #[test]
+    fn mark_resolved_cascade() {
+        let (db, _dir) = temp_db();
+        let id1 = db.insert_event_ledger(&test_event(None)).unwrap();
+        let id2 = db.insert_event_ledger(&test_event(Some(id1))).unwrap();
+        let _id3 = db.insert_event_ledger(&test_event(Some(id1))).unwrap();
+
+        let changed = db.event_ledger_mark_resolved_cascade(id1).unwrap();
+        assert!(changed >= 3);
+
+        // All should be resolved now
+        for id in [id1, id2, _id3] {
+            assert!(db.event_ledger_get(id).unwrap().unwrap().resolved);
+        }
+    }
+
+    #[test]
+    fn descendant_ids() {
+        let (db, _dir) = temp_db();
+        let id1 = db.insert_event_ledger(&test_event(None)).unwrap();
+        let id2 = db.insert_event_ledger(&test_event(Some(id1))).unwrap();
+        let id3 = db.insert_event_ledger(&test_event(Some(id1))).unwrap();
+
+        let desc = db.event_ledger_descendant_ids(id1).unwrap();
+        assert!(desc.contains(&id1));
+        assert!(desc.contains(&id2));
+        assert!(desc.contains(&id3));
     }
 }

@@ -664,3 +664,400 @@ impl Database {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cas::StorageMethod;
+
+    fn temp_db() -> (Database, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+        // Insert a project so FK constraints are satisfied
+        let conn = db.conn().unwrap();
+        conn.execute(
+            "INSERT INTO projects (hash, current_path, created_at) VALUES ('proj1', '/tmp/proj', '2026-01-01T00:00:00Z')",
+            [],
+        ).unwrap();
+        drop(conn);
+        (db, dir)
+    }
+
+    fn sample_files() -> Vec<SnapFileEntry> {
+        vec![
+            SnapFileEntry::new(
+                "src/main.rs".into(),
+                "abc123".into(),
+                1024,
+                true,
+                false,
+                Some(1000),
+                StorageMethod::Copy,
+                false,
+            ),
+            SnapFileEntry::new(
+                "README.md".into(),
+                "def456".into(),
+                512,
+                true,
+                false,
+                Some(2000),
+                StorageMethod::Reflink,
+                false,
+            ),
+        ]
+    }
+
+    fn sample_deleted() -> Vec<DeletedFile> {
+        vec![DeletedFile {
+            path: "old_file.txt".into(),
+            hash: "ghi789".into(),
+            size: 256,
+            stored: true,
+            storage_method: StorageMethod::Copy,
+        }]
+    }
+
+    #[test]
+    fn create_and_list_snapshots() {
+        let (db, _dir) = temp_db();
+        let files = sample_files();
+        let deleted = sample_deleted();
+        let req = CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:00:00Z", SnapshotTrigger::Manual,
+            "first snapshot", false, &files, &deleted,
+        );
+        let (rowid, snap_id) = db.create_snapshot(req).unwrap();
+        assert!(rowid > 0);
+        assert_eq!(snap_id, 1);
+
+        let list = db.list_snapshots("proj1").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].snapshot_id, 1);
+        assert_eq!(list[0].message, "first snapshot");
+        assert_eq!(list[0].trigger, SnapshotTrigger::Manual);
+        assert!(!list[0].pinned);
+        assert_eq!(list[0].file_count, 2);
+    }
+
+    #[test]
+    fn auto_increment_snapshot_id_when_zero() {
+        let (db, _dir) = temp_db();
+        let files = sample_files();
+
+        let (_, id1) = db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:00:00Z", SnapshotTrigger::Auto,
+            "s1", false, &files, &[],
+        )).unwrap();
+        let (_, id2) = db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:01:00Z", SnapshotTrigger::Auto,
+            "s2", false, &files, &[],
+        )).unwrap();
+
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+    }
+
+    #[test]
+    fn pin_and_unpin_snapshot() {
+        let (db, _dir) = temp_db();
+        let files = sample_files();
+        let (rowid, _) = db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:00:00Z", SnapshotTrigger::Manual,
+            "pin test", false, &files, &[],
+        )).unwrap();
+
+        // Initially not pinned
+        let snap = db.get_snapshot_by_rowid(rowid).unwrap().unwrap();
+        assert!(!snap.pinned);
+
+        // Pin it
+        db.pin_snapshot(rowid, true).unwrap();
+        let snap = db.get_snapshot_by_rowid(rowid).unwrap().unwrap();
+        assert!(snap.pinned);
+
+        // Unpin it
+        db.pin_snapshot(rowid, false).unwrap();
+        let snap = db.get_snapshot_by_rowid(rowid).unwrap().unwrap();
+        assert!(!snap.pinned);
+    }
+
+    #[test]
+    fn snapshot_count() {
+        let (db, _dir) = temp_db();
+        assert_eq!(db.snapshot_count("proj1").unwrap(), 0);
+
+        let files = sample_files();
+        db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:00:00Z", SnapshotTrigger::Auto,
+            "s1", false, &files, &[],
+        )).unwrap();
+        db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-02T00:00:00Z", SnapshotTrigger::Auto,
+            "s2", false, &files, &[],
+        )).unwrap();
+
+        assert_eq!(db.snapshot_count("proj1").unwrap(), 2);
+        assert_eq!(db.snapshot_count("nonexistent").unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_snapshot_removes_it() {
+        let (db, _dir) = temp_db();
+        let files = sample_files();
+        let (rowid, _) = db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:00:00Z", SnapshotTrigger::Auto,
+            "ephemeral", false, &files, &[],
+        )).unwrap();
+
+        assert_eq!(db.snapshot_count("proj1").unwrap(), 1);
+        db.delete_snapshot(rowid).unwrap();
+        assert_eq!(db.snapshot_count("proj1").unwrap(), 0);
+    }
+
+    #[test]
+    fn snapshot_before_returns_preceding() {
+        let (db, _dir) = temp_db();
+        let files = sample_files();
+        db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:00:00Z", SnapshotTrigger::Auto,
+            "first", false, &files, &[],
+        )).unwrap();
+        db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-02T00:00:00Z", SnapshotTrigger::Auto,
+            "second", false, &files, &[],
+        )).unwrap();
+        db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-03T00:00:00Z", SnapshotTrigger::Auto,
+            "third", false, &files, &[],
+        )).unwrap();
+
+        // Before snapshot 3 should return snapshot 2
+        let before = db.snapshot_before("proj1", 3).unwrap().unwrap();
+        assert_eq!(before.snapshot_id, 2);
+        assert_eq!(before.message, "second");
+
+        // Before snapshot 1 should return None
+        let none = db.snapshot_before("proj1", 1).unwrap();
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn get_snapshot_files_and_deleted() {
+        let (db, _dir) = temp_db();
+        let files = sample_files();
+        let deleted = sample_deleted();
+        let (rowid, _) = db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:00:00Z", SnapshotTrigger::Manual,
+            "with files", false, &files, &deleted,
+        )).unwrap();
+
+        let got_files = db.get_snapshot_files(rowid).unwrap();
+        assert_eq!(got_files.len(), 2);
+        assert!(got_files.iter().any(|f| f.path == "src/main.rs" && f.size == 1024));
+        assert!(got_files.iter().any(|f| f.path == "README.md" && f.hash == "def456"));
+
+        let got_deleted = db.get_snapshot_deleted_files(rowid).unwrap();
+        assert_eq!(got_deleted.len(), 1);
+        assert_eq!(got_deleted[0].path, "old_file.txt");
+        assert_eq!(got_deleted[0].size, 256);
+    }
+
+    #[test]
+    fn list_snapshots_oldest_first_order() {
+        let (db, _dir) = temp_db();
+        let files = sample_files();
+        for i in 1..=3 {
+            db.create_snapshot(CreateSnapshotRow::new(
+                "proj1", 0, &format!("2026-01-0{i}T00:00:00Z"), SnapshotTrigger::Auto,
+                &format!("snap{i}"), false, &files, &[],
+            )).unwrap();
+        }
+
+        let oldest_first = db.list_snapshots_oldest_first("proj1").unwrap();
+        assert_eq!(oldest_first.len(), 3);
+        assert_eq!(oldest_first[0].snapshot_id, 1);
+        assert_eq!(oldest_first[2].snapshot_id, 3);
+    }
+
+    #[test]
+    fn list_snapshots_paginated() {
+        let (db, _dir) = temp_db();
+        let files = sample_files();
+        for i in 1..=5 {
+            db.create_snapshot(CreateSnapshotRow::new(
+                "proj1", 0, &format!("2026-01-0{i}T00:00:00Z"), SnapshotTrigger::Auto,
+                &format!("snap{i}"), false, &files, &[],
+            )).unwrap();
+        }
+
+        // Page 1: first 2 (newest first)
+        let page1 = db.list_snapshots_paginated("proj1", 2, 0).unwrap();
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1[0].snapshot_id, 5);
+        assert_eq!(page1[1].snapshot_id, 4);
+
+        // Page 2: next 2
+        let page2 = db.list_snapshots_paginated("proj1", 2, 2).unwrap();
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2[0].snapshot_id, 3);
+    }
+
+    #[test]
+    fn list_snapshot_summaries_with_time_filters() {
+        let (db, _dir) = temp_db();
+        let files = sample_files();
+        for i in 1..=5 {
+            db.create_snapshot(CreateSnapshotRow::new(
+                "proj1", 0, &format!("2026-01-0{i}T00:00:00Z"), SnapshotTrigger::Auto,
+                &format!("snap{i}"), false, &files, &[],
+            )).unwrap();
+        }
+
+        // No filters: all 5
+        let all = db.list_snapshot_summaries("proj1", None, None).unwrap();
+        assert_eq!(all.len(), 5);
+
+        // from only
+        let from = db.list_snapshot_summaries("proj1", Some("2026-01-03T00:00:00Z"), None).unwrap();
+        assert_eq!(from.len(), 3);
+
+        // to only
+        let to = db.list_snapshot_summaries("proj1", None, Some("2026-01-02T00:00:00Z")).unwrap();
+        assert_eq!(to.len(), 2);
+
+        // from + to
+        let range = db.list_snapshot_summaries(
+            "proj1",
+            Some("2026-01-02T00:00:00Z"),
+            Some("2026-01-04T00:00:00Z"),
+        ).unwrap();
+        assert_eq!(range.len(), 3);
+    }
+
+    #[test]
+    fn latest_snapshot_rowid() {
+        let (db, _dir) = temp_db();
+        assert!(db.latest_snapshot_rowid("proj1").unwrap().is_none());
+
+        let files = sample_files();
+        db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:00:00Z", SnapshotTrigger::Auto,
+            "s1", false, &files, &[],
+        )).unwrap();
+        let (rowid2, _) = db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-02T00:00:00Z", SnapshotTrigger::Auto,
+            "s2", false, &files, &[],
+        )).unwrap();
+
+        assert_eq!(db.latest_snapshot_rowid("proj1").unwrap(), Some(rowid2));
+    }
+
+    #[test]
+    fn file_history_tracks_across_snapshots() {
+        let (db, _dir) = temp_db();
+        let files_v1 = vec![SnapFileEntry::new(
+            "src/main.rs".into(), "hash_v1".into(), 100, true, false,
+            Some(1000), StorageMethod::Copy, false,
+        )];
+        let files_v2 = vec![SnapFileEntry::new(
+            "src/main.rs".into(), "hash_v2".into(), 200, true, false,
+            Some(2000), StorageMethod::Copy, false,
+        )];
+
+        db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:00:00Z", SnapshotTrigger::Auto,
+            "v1", false, &files_v1, &[],
+        )).unwrap();
+        db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-02T00:00:00Z", SnapshotTrigger::Manual,
+            "v2", false, &files_v2, &[],
+        )).unwrap();
+
+        let history = db.file_history("proj1", "src/main.rs").unwrap();
+        assert_eq!(history.len(), 2);
+        // Newest first
+        assert_eq!(history[0].hash, "hash_v2");
+        assert_eq!(history[1].hash, "hash_v1");
+    }
+
+    #[test]
+    fn blob_bytes_tracking() {
+        let (db, _dir) = temp_db();
+        assert_eq!(db.blob_bytes().unwrap(), 0);
+
+        db.add_blob_bytes(1000).unwrap();
+        assert_eq!(db.blob_bytes().unwrap(), 1000);
+
+        db.add_blob_bytes(500).unwrap();
+        assert_eq!(db.blob_bytes().unwrap(), 1500);
+
+        db.add_blob_bytes(-300).unwrap();
+        assert_eq!(db.blob_bytes().unwrap(), 1200);
+    }
+
+    #[test]
+    fn total_blob_size_for_project() {
+        let (db, _dir) = temp_db();
+        assert_eq!(db.total_blob_size_for_project("proj1").unwrap(), 0);
+
+        let files = vec![
+            SnapFileEntry::new(
+                "a.rs".into(), "hash_a".into(), 100, true, false,
+                None, StorageMethod::Copy, false,
+            ),
+            SnapFileEntry::new(
+                "b.rs".into(), "hash_b".into(), 200, false, false,
+                None, StorageMethod::Copy, false,
+            ),
+        ];
+        db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:00:00Z", SnapshotTrigger::Auto,
+            "s1", false, &files, &[],
+        )).unwrap();
+
+        // Only stored files count (a.rs stored=true, b.rs stored=false)
+        let size = db.total_blob_size_for_project("proj1").unwrap();
+        assert_eq!(size, 100);
+    }
+
+    #[test]
+    fn all_referenced_blob_hashes() {
+        let (db, _dir) = temp_db();
+        let files = vec![
+            SnapFileEntry::new(
+                "a.rs".into(), "hash_a".into(), 100, true, false,
+                None, StorageMethod::Copy, false,
+            ),
+        ];
+        let deleted = vec![DeletedFile {
+            path: "old.rs".into(),
+            hash: "hash_old".into(),
+            size: 50,
+            stored: true,
+            storage_method: StorageMethod::Copy,
+        }];
+        db.create_snapshot(CreateSnapshotRow::new(
+            "proj1", 0, "2026-01-01T00:00:00Z", SnapshotTrigger::Auto,
+            "s1", false, &files, &deleted,
+        )).unwrap();
+
+        let hashes = db.all_referenced_blob_hashes().unwrap();
+        assert!(hashes.contains("hash_a"));
+        assert!(hashes.contains("hash_old"));
+    }
+
+    #[test]
+    fn get_snapshot_by_nonexistent_rowid() {
+        let (db, _dir) = temp_db();
+        let result = db.get_snapshot_by_rowid(9999).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn vacuum_does_not_error() {
+        let (db, _dir) = temp_db();
+        db.vacuum().unwrap();
+    }
+}

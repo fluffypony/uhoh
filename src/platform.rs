@@ -378,9 +378,7 @@ pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_uhoh_process_alive, is_uhoh_process_alive_with_start, read_process_start_ticks,
-    };
+    use super::*;
 
     #[test]
     fn process_start_ticks_support_pid_reuse_safe_checks() {
@@ -392,6 +390,94 @@ mod tests {
             pid,
             Some(ticks.saturating_add(1))
         ));
+    }
+
+    #[test]
+    fn uhoh_dir_default_uses_home_dot_uhoh() {
+        // Save and clear UHOH_DIR to test default behavior
+        let saved = std::env::var_os("UHOH_DIR");
+        std::env::remove_var("UHOH_DIR");
+
+        let dir = uhoh_dir();
+        // Should end with .uhoh
+        assert!(
+            dir.ends_with(".uhoh"),
+            "Expected dir to end with .uhoh, got: {}",
+            dir.display()
+        );
+
+        // Restore
+        if let Some(v) = saved {
+            std::env::set_var("UHOH_DIR", v);
+        }
+    }
+
+    #[test]
+    fn uhoh_dir_respects_override_env() {
+        let saved = std::env::var_os("UHOH_DIR");
+        std::env::set_var("UHOH_DIR", "/custom/uhoh/dir");
+
+        let dir = uhoh_dir();
+        assert_eq!(dir, std::path::PathBuf::from("/custom/uhoh/dir"));
+
+        // Restore
+        match saved {
+            Some(v) => std::env::set_var("UHOH_DIR", v),
+            None => std::env::remove_var("UHOH_DIR"),
+        }
+    }
+
+    #[test]
+    fn dead_pid_is_not_alive() {
+        // PID 0 is never a uhoh process
+        assert!(!is_uhoh_process_alive(0));
+    }
+
+    #[test]
+    fn dead_pid_with_start_is_not_alive() {
+        assert!(!is_uhoh_process_alive_with_start(0, Some(12345)));
+        assert!(!is_uhoh_process_alive_with_start(0, None));
+    }
+
+    #[test]
+    fn alive_with_zero_expected_start_skips_time_check() {
+        let pid = std::process::id();
+        // When expected_start is Some(0), should skip the time check and return true
+        // if the process is alive
+        assert!(is_uhoh_process_alive_with_start(pid, Some(0)));
+    }
+
+    #[test]
+    fn alive_with_none_expected_start_skips_time_check() {
+        let pid = std::process::id();
+        // When expected_start is None, should skip the time check and return true
+        // if the process is alive
+        assert!(is_uhoh_process_alive_with_start(pid, None));
+    }
+
+    #[test]
+    fn read_process_start_ticks_current_process() {
+        let pid = std::process::id();
+        let ticks = read_process_start_ticks(pid);
+        // On macOS and Linux we should get Some value for the current process
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert!(ticks.is_some(), "Expected start ticks for current process");
+        // On other platforms it may return None, which is fine
+        let _ = ticks;
+    }
+
+    #[test]
+    fn read_process_start_ticks_dead_pid() {
+        // PID 0 should not have start ticks
+        let ticks = read_process_start_ticks(0);
+        assert!(ticks.is_none());
+    }
+
+    #[test]
+    fn uhoh_dir_returns_path_buf() {
+        let dir = uhoh_dir();
+        // Just verify it returns a non-empty path
+        assert!(!dir.as_os_str().is_empty());
     }
 }
 

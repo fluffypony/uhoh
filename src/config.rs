@@ -836,7 +836,346 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, DangerousChangePolicy};
+    use super::*;
+
+    // === Default value tests ===
+
+    #[test]
+    fn default_config_passes_validation() {
+        let cfg = Config::default();
+        cfg.validate().expect("default config must pass validation");
+    }
+
+    #[test]
+    fn default_watch_values() {
+        let w = WatchConfig::default();
+        assert_eq!(w.debounce_quiet_secs, 2);
+        assert_eq!(w.min_snapshot_interval_secs, 5);
+        assert_eq!(w.max_debounce_secs, 30);
+        assert!((w.emergency_delete_threshold - 0.30).abs() < f64::EPSILON);
+        assert_eq!(w.emergency_delete_min_files, 5);
+        assert_eq!(w.emergency_cooldown_secs, 120);
+    }
+
+    #[test]
+    fn default_compaction_values() {
+        let c = CompactionConfig::default();
+        assert_eq!(c.keep_all_minutes, 60);
+        assert_eq!(c.keep_5min_days, 14);
+        assert_eq!(c.keep_hourly_days, 30);
+        assert_eq!(c.keep_daily_days, 180);
+        assert!(c.keep_weekly_beyond);
+        assert_eq!(c.emergency_expire_hours, 48);
+    }
+
+    #[test]
+    fn default_storage_values() {
+        let s = StorageConfig::default();
+        assert_eq!(s.max_binary_blob_bytes, 1_048_576);
+        assert_eq!(s.max_text_blob_bytes, 52_428_800);
+        assert_eq!(s.max_copy_blob_bytes, 50 * 1024 * 1024);
+        assert!((s.storage_limit_fraction - 0.15).abs() < f64::EPSILON);
+        assert_eq!(s.storage_min_bytes, 524_288_000);
+        assert!(!s.compress);
+        assert_eq!(s.compress_level, 3);
+    }
+
+    #[test]
+    fn default_server_values() {
+        let s = ServerConfig::default();
+        assert!(s.enabled);
+        assert_eq!(s.port, 22822);
+        assert_eq!(s.bind_address, "127.0.0.1");
+        assert!(s.ui_enabled);
+        assert!(s.mcp_enabled);
+        assert!(s.mcp_require_auth);
+        assert!(s.require_auth);
+    }
+
+    #[test]
+    fn default_ai_values() {
+        let a = AiConfig::default();
+        assert!(!a.enabled);
+        assert!(a.skip_on_battery);
+        assert_eq!(a.max_context_tokens, 8192);
+        assert_eq!(a.idle_shutdown_secs, 300);
+        assert_eq!(a.min_available_memory_gb, 4);
+        assert!(a.models.is_empty());
+    }
+
+    #[test]
+    fn default_agent_values() {
+        let a = AgentConfig::default();
+        assert!(!a.enabled);
+        assert!(a.mcp_proxy_enabled);
+        assert_eq!(a.mcp_proxy_port, 22823);
+        assert!(a.intercept_enabled);
+        assert!(!a.audit_enabled);
+        assert_eq!(a.audit_scope, AgentAuditScope::Project);
+        assert_eq!(a.on_dangerous_change, DangerousChangePolicy::None);
+        assert_eq!(a.pause_timeout_seconds, 300);
+        assert!(!a.dangerous_patterns.is_empty());
+    }
+
+    // === Validation tests ===
+
+    #[test]
+    fn validate_rejects_zero_debounce_quiet_secs() {
+        let mut cfg = Config::default();
+        cfg.watch.debounce_quiet_secs = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("debounce_quiet_secs must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_min_snapshot_interval() {
+        let mut cfg = Config::default();
+        cfg.watch.min_snapshot_interval_secs = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("min_snapshot_interval_secs must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_storage_limit_fraction() {
+        let mut cfg = Config::default();
+        cfg.storage.storage_limit_fraction = 0.0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("storage_limit_fraction"));
+    }
+
+    #[test]
+    fn validate_rejects_negative_storage_limit_fraction() {
+        let mut cfg = Config::default();
+        cfg.storage.storage_limit_fraction = -0.1;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("storage_limit_fraction"));
+    }
+
+    #[test]
+    fn validate_rejects_storage_limit_fraction_above_one() {
+        let mut cfg = Config::default();
+        cfg.storage.storage_limit_fraction = 1.1;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("storage_limit_fraction"));
+    }
+
+    #[test]
+    fn validate_accepts_storage_limit_fraction_at_one() {
+        let mut cfg = Config::default();
+        cfg.storage.storage_limit_fraction = 1.0;
+        cfg.validate().expect("1.0 should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_zero_emergency_expire_hours() {
+        let mut cfg = Config::default();
+        cfg.compaction.emergency_expire_hours = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("emergency_expire_hours must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_emergency_delete_threshold_zero() {
+        let mut cfg = Config::default();
+        cfg.watch.emergency_delete_threshold = 0.0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("emergency_delete_threshold"));
+    }
+
+    #[test]
+    fn validate_rejects_emergency_delete_threshold_above_one() {
+        let mut cfg = Config::default();
+        cfg.watch.emergency_delete_threshold = 1.5;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("emergency_delete_threshold"));
+    }
+
+    #[test]
+    fn validate_accepts_emergency_delete_threshold_at_one() {
+        let mut cfg = Config::default();
+        cfg.watch.emergency_delete_threshold = 1.0;
+        cfg.validate().expect("1.0 should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_zero_emergency_delete_min_files() {
+        let mut cfg = Config::default();
+        cfg.watch.emergency_delete_min_files = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("emergency_delete_min_files must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_emergency_cooldown_secs() {
+        let mut cfg = Config::default();
+        cfg.watch.emergency_cooldown_secs = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("emergency_cooldown_secs must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_context_tokens() {
+        let mut cfg = Config::default();
+        cfg.ai.max_context_tokens = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("max_context_tokens must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_compress_level_out_of_range() {
+        let mut cfg = Config::default();
+        cfg.storage.compress_level = 0;
+        assert!(cfg.validate().is_err());
+
+        cfg.storage.compress_level = 23;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_compress_level_boundaries() {
+        let mut cfg = Config::default();
+        cfg.storage.compress_level = 1;
+        cfg.validate().expect("1 should be valid");
+
+        cfg.storage.compress_level = 22;
+        cfg.validate().expect("22 should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_zero_server_port() {
+        let mut cfg = Config::default();
+        cfg.server.port = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("server.port must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_sidecar_check_interval() {
+        let mut cfg = Config::default();
+        cfg.sidecar_update.check_interval_hours = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("sidecar_update.check_interval_hours must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_notifications_cooldown() {
+        let mut cfg = Config::default();
+        cfg.notifications.cooldown_seconds = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("notifications.cooldown_seconds must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_db_guard_row_threshold() {
+        let mut cfg = Config::default();
+        cfg.db_guard.mass_delete_row_threshold = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("mass_delete_row_threshold must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_db_guard_pct_threshold_zero() {
+        let mut cfg = Config::default();
+        cfg.db_guard.mass_delete_pct_threshold = 0.0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_agent_proxy_port() {
+        let mut cfg = Config::default();
+        cfg.agent.mcp_proxy_port = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("agent.mcp_proxy_port must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_pause_timeout() {
+        let mut cfg = Config::default();
+        cfg.agent.pause_timeout_seconds = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("agent.pause_timeout_seconds must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_audit_max_events() {
+        let mut cfg = Config::default();
+        cfg.agent.audit_max_events_per_second = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("audit_max_events_per_second must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_mlx_check_interval() {
+        let mut cfg = Config::default();
+        cfg.ai.mlx.check_interval_hours = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("ai.mlx.check_interval_hours must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_binary_blob_bytes() {
+        let mut cfg = Config::default();
+        cfg.storage.max_binary_blob_bytes = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_text_blob_bytes() {
+        let mut cfg = Config::default();
+        cfg.storage.max_text_blob_bytes = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_copy_blob_bytes() {
+        let mut cfg = Config::default();
+        cfg.storage.max_copy_blob_bytes = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_max_debounce_less_than_quiet() {
+        let mut cfg = Config::default();
+        cfg.watch.debounce_quiet_secs = 10;
+        cfg.watch.max_debounce_secs = 5;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("max_debounce_secs must be >= watch.debounce_quiet_secs"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_storage_min_bytes() {
+        let mut cfg = Config::default();
+        cfg.storage.storage_min_bytes = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    // === Serialization / deserialization tests ===
+
+    #[test]
+    fn config_roundtrip_toml() {
+        let cfg = Config::default();
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        let deserialized: Config = toml::from_str(&serialized).expect("deserialize");
+        deserialized.validate().expect("roundtripped config must be valid");
+        assert_eq!(deserialized.watch.debounce_quiet_secs, cfg.watch.debounce_quiet_secs);
+        assert_eq!(deserialized.server.port, cfg.server.port);
+    }
+
+    #[test]
+    fn config_from_empty_toml() {
+        let cfg: Config = toml::from_str("").expect("empty toml should parse");
+        cfg.validate().expect("empty toml should use valid defaults");
+    }
+
+    #[test]
+    fn config_partial_toml_uses_defaults() {
+        let toml_str = "[watch]\ndebounce_quiet_secs = 5\n";
+        let cfg: Config = toml::from_str(toml_str).expect("partial toml should parse");
+        assert_eq!(cfg.watch.debounce_quiet_secs, 5);
+        // Other fields should have defaults
+        assert_eq!(cfg.watch.min_snapshot_interval_secs, 5);
+        assert_eq!(cfg.server.port, 22822);
+    }
 
     #[test]
     fn invalid_agent_on_dangerous_change_is_rejected() {
@@ -866,5 +1205,109 @@ mod tests {
 
         assert_eq!(cfg.ai.enabled, Config::default().ai.enabled);
         assert!(!path.exists());
+    }
+
+    // === Enum display / as_str tests ===
+
+    #[test]
+    fn webhook_event_kind_as_str() {
+        assert_eq!(WebhookEventKind::MassDelete.as_str(), "mass_delete");
+        assert_eq!(WebhookEventKind::DropTable.as_str(), "drop_table");
+        assert_eq!(WebhookEventKind::DropColumn.as_str(), "drop_column");
+        assert_eq!(WebhookEventKind::Truncate.as_str(), "truncate");
+        assert_eq!(WebhookEventKind::DangerousAgentAction.as_str(), "dangerous_agent_action");
+        assert_eq!(WebhookEventKind::MlxUpdateFailed.as_str(), "mlx_update_failed");
+        assert_eq!(WebhookEventKind::EmergencyDeleteDetected.as_str(), "emergency_delete_detected");
+        assert_eq!(WebhookEventKind::MassDeletePct.as_str(), "mass_delete_pct");
+    }
+
+    #[test]
+    fn dangerous_change_policy_as_str() {
+        assert_eq!(DangerousChangePolicy::None.as_str(), "none");
+        assert_eq!(DangerousChangePolicy::Pause.as_str(), "pause");
+    }
+
+    #[test]
+    fn dangerous_change_policy_display() {
+        assert_eq!(format!("{}", DangerousChangePolicy::None), "none");
+        assert_eq!(format!("{}", DangerousChangePolicy::Pause), "pause");
+    }
+
+    #[test]
+    fn agent_audit_scope_display() {
+        assert_eq!(format!("{}", AgentAuditScope::Project), "project");
+        assert_eq!(format!("{}", AgentAuditScope::Home), "home");
+    }
+
+    #[test]
+    fn agent_audit_scope_is_home() {
+        assert!(!AgentAuditScope::Project.is_home());
+        assert!(AgentAuditScope::Home.is_home());
+    }
+
+    #[test]
+    fn webhook_event_kind_serde_roundtrip() {
+        let kind = WebhookEventKind::MassDelete;
+        let json = serde_json::to_string(&kind).expect("serialize");
+        assert_eq!(json, "\"mass_delete\"");
+        let back: WebhookEventKind = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, kind);
+    }
+
+    #[test]
+    fn agent_audit_scope_serde_roundtrip() {
+        for scope in [AgentAuditScope::Project, AgentAuditScope::Home] {
+            let json = serde_json::to_string(&scope).expect("serialize");
+            let back: AgentAuditScope = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, scope);
+        }
+    }
+
+    // === File-based config tests ===
+
+    #[test]
+    fn load_or_initialize_creates_file() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("config.toml");
+        assert!(!path.exists());
+
+        let cfg = Config::load_or_initialize(&path).expect("load_or_initialize");
+        assert!(path.exists());
+        assert_eq!(cfg.watch.debounce_quiet_secs, 2);
+    }
+
+    #[test]
+    fn load_or_initialize_reads_existing() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("config.toml");
+        std::fs::write(&path, "[watch]\ndebounce_quiet_secs = 7\n").expect("write");
+
+        let cfg = Config::load_or_initialize(&path).expect("load_or_initialize");
+        assert_eq!(cfg.watch.debounce_quiet_secs, 7);
+    }
+
+    #[test]
+    fn compaction_config_new() {
+        let c = CompactionConfig::new(10, 20, 30, 40, false, 50);
+        assert_eq!(c.keep_all_minutes, 10);
+        assert_eq!(c.keep_5min_days, 20);
+        assert_eq!(c.keep_hourly_days, 30);
+        assert_eq!(c.keep_daily_days, 40);
+        assert!(!c.keep_weekly_beyond);
+        assert_eq!(c.emergency_expire_hours, 50);
+    }
+
+    #[test]
+    fn default_dangerous_patterns_not_empty() {
+        let patterns = default_agent_dangerous_patterns();
+        assert!(!patterns.is_empty());
+        assert!(patterns.iter().any(|p| p.contains("bash")));
+        assert!(patterns.iter().any(|p| p.contains(".env")));
+    }
+
+    #[test]
+    fn default_webhook_events_covers_all_variants() {
+        let events = default_webhook_events();
+        assert_eq!(events.len(), 8);
     }
 }
