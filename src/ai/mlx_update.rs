@@ -332,3 +332,128 @@ async fn rollback_to_version(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── MlxAutoUpdateState ──
+
+    #[test]
+    fn should_run_first_time() {
+        let mut state = MlxAutoUpdateState::default();
+        assert!(state.should_run(std::path::Path::new("/venv/mlx"), 1));
+    }
+
+    #[test]
+    fn should_run_not_elapsed() {
+        let mut state = MlxAutoUpdateState::default();
+        let venv = std::path::Path::new("/venv/mlx");
+        assert!(state.should_run(venv, 1)); // first time
+        assert!(!state.should_run(venv, 1)); // too soon
+    }
+
+    #[test]
+    fn should_run_different_venvs_independent() {
+        let mut state = MlxAutoUpdateState::default();
+        let venv_a = std::path::Path::new("/venv/a");
+        let venv_b = std::path::Path::new("/venv/b");
+        assert!(state.should_run(venv_a, 1));
+        assert!(state.should_run(venv_b, 1)); // different venv, independent
+    }
+
+    #[test]
+    fn should_run_zero_interval_always_runs() {
+        let mut state = MlxAutoUpdateState::default();
+        let venv = std::path::Path::new("/venv/mlx");
+        assert!(state.should_run(venv, 0));
+        assert!(state.should_run(venv, 0)); // 0 interval = always run
+    }
+
+    // ── resolve_venv_path ──
+
+    #[test]
+    fn resolve_venv_path_default_uses_tilde_expansion() {
+        let cfg = MlxConfig::default();
+        // Default venv_path is "~/.uhoh/venv/mlx" which should expand via tilde
+        let uhoh_dir = std::path::Path::new("/unused");
+        let result = resolve_venv_path(&cfg, uhoh_dir);
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(result, home.join(".uhoh/venv/mlx"));
+        }
+    }
+
+    #[test]
+    fn resolve_venv_path_absolute() {
+        let mut cfg = MlxConfig::default();
+        cfg.venv_path = "/absolute/path/to/venv".to_string();
+        let uhoh_dir = std::path::Path::new("/home/user/.uhoh");
+        let result = resolve_venv_path(&cfg, uhoh_dir);
+        assert_eq!(result, PathBuf::from("/absolute/path/to/venv"));
+    }
+
+    #[test]
+    fn resolve_venv_path_relative() {
+        let mut cfg = MlxConfig::default();
+        cfg.venv_path = "custom/venv".to_string();
+        let uhoh_dir = std::path::Path::new("/home/user/.uhoh");
+        let result = resolve_venv_path(&cfg, uhoh_dir);
+        assert_eq!(result, PathBuf::from("/home/user/.uhoh/custom/venv"));
+    }
+
+    #[test]
+    fn resolve_venv_path_empty_uses_default_fallback() {
+        let mut cfg = MlxConfig::default();
+        cfg.venv_path = "  ".to_string();
+        let uhoh_dir = std::path::Path::new("/home/user/.uhoh");
+        let result = resolve_venv_path(&cfg, uhoh_dir);
+        assert_eq!(result, PathBuf::from("/home/user/.uhoh/venv/mlx"));
+    }
+
+    #[test]
+    fn resolve_venv_path_tilde_expansion() {
+        let mut cfg = MlxConfig::default();
+        cfg.venv_path = "~/my-venv".to_string();
+        let uhoh_dir = std::path::Path::new("/home/user/.uhoh");
+        let result = resolve_venv_path(&cfg, uhoh_dir);
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(result, home.join("my-venv"));
+        }
+    }
+
+    // ── configured_venv_path ──
+
+    #[test]
+    fn configured_venv_path_whitespace_only() {
+        let mut cfg = MlxConfig::default();
+        cfg.venv_path = "   ".to_string();
+        assert!(configured_venv_path(&cfg).is_none());
+    }
+
+    #[test]
+    fn configured_venv_path_absolute() {
+        let mut cfg = MlxConfig::default();
+        cfg.venv_path = "/opt/mlx/venv".to_string();
+        let result = configured_venv_path(&cfg).unwrap();
+        assert_eq!(result, PathBuf::from("/opt/mlx/venv"));
+    }
+
+    #[test]
+    fn configured_venv_path_tilde() {
+        let mut cfg = MlxConfig::default();
+        cfg.venv_path = "~/venvs/mlx".to_string();
+        let result = configured_venv_path(&cfg);
+        if dirs::home_dir().is_some() {
+            let path = result.unwrap();
+            assert!(path.ends_with("venvs/mlx"));
+        }
+    }
+
+    #[test]
+    fn configured_venv_path_default_is_tilde_prefixed() {
+        let cfg = MlxConfig::default();
+        // Default is "~/.uhoh/venv/mlx" which starts with "~/"
+        let result = configured_venv_path(&cfg);
+        assert!(result.is_some(), "Default venv_path should resolve");
+    }
+}

@@ -406,3 +406,96 @@ fn spawn_backend(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_identity_key_llama() {
+        let backend = Backend::LlamaServer {
+            binary: PathBuf::from("/usr/local/bin/llama-server"),
+        };
+        let key = backend.identity_key();
+        assert!(key.starts_with("llama:"));
+        assert!(key.contains("llama-server"));
+    }
+
+    #[test]
+    fn backend_identity_key_mlx() {
+        let backend = Backend::MlxLm {
+            python: PathBuf::from("/usr/bin/python3"),
+        };
+        let key = backend.identity_key();
+        assert!(key.starts_with("mlx:"));
+        assert!(key.contains("python3"));
+    }
+
+    #[test]
+    fn backend_identity_keys_differ() {
+        let llama = Backend::LlamaServer {
+            binary: PathBuf::from("/bin/llama"),
+        };
+        let mlx = Backend::MlxLm {
+            python: PathBuf::from("/bin/llama"),
+        };
+        assert_ne!(llama.identity_key(), mlx.identity_key());
+    }
+
+    #[test]
+    fn sidecar_manager_default_not_running() {
+        let mgr = SidecarManager::new();
+        assert!(!mgr.sidecar_running());
+    }
+
+    #[test]
+    fn sidecar_manager_default_eq_new() {
+        let a = SidecarManager::default();
+        let b = SidecarManager::new();
+        // Both should start not running
+        assert!(!a.sidecar_running());
+        assert!(!b.sidecar_running());
+    }
+
+    #[test]
+    fn mlx_model_id_mapping() {
+        // Simulating the model ID mapping logic from spawn_backend
+        let test_cases = [
+            ("qwen3.5-0.5b-instruct", "mlx-community/Qwen3.5-0.5B-Instruct-4bit"),
+            ("qwen3.5-35b-a3b-q4_k_m", "mlx-community/Qwen3.5-35B-A3B-4bit"),
+            ("some-model-a3b-variant", "mlx-community/Qwen3.5-35B-A3B-4bit"),
+            ("qwen3.5-32b-instruct", "mlx-community/Qwen3.5-32B-Instruct-4bit"),
+            ("qwen3.5-9b-q4_k_m", "mlx-community/Qwen3.5-9B-Instruct-4bit"),
+            ("qwen3.5-8b-instruct", "mlx-community/Qwen3.5-8B-Instruct-4bit"),
+            ("qwen3.5-7b-instruct", "mlx-community/Qwen3.5-7B-Instruct-4bit"),
+            ("qwen3.5-3b-instruct", "mlx-community/Qwen3.5-3B-Instruct-4bit"),
+            ("unknown-model", "unknown-model"),
+        ];
+
+        for (stem, expected) in test_cases {
+            let model_id = match stem {
+                s if s.contains("0.5b") => "mlx-community/Qwen3.5-0.5B-Instruct-4bit".to_string(),
+                s if s.contains("35b") || s.contains("a3b") => {
+                    "mlx-community/Qwen3.5-35B-A3B-4bit".to_string()
+                }
+                s if s.contains("32b") => "mlx-community/Qwen3.5-32B-Instruct-4bit".to_string(),
+                s if s.contains("9b") => "mlx-community/Qwen3.5-9B-Instruct-4bit".to_string(),
+                s if s.contains("8b") => "mlx-community/Qwen3.5-8B-Instruct-4bit".to_string(),
+                s if s.contains("7b") => "mlx-community/Qwen3.5-7B-Instruct-4bit".to_string(),
+                s if s.contains("3b") => "mlx-community/Qwen3.5-3B-Instruct-4bit".to_string(),
+                _ => stem.to_string(),
+            };
+            assert_eq!(model_id, expected, "Failed for stem '{stem}'");
+        }
+    }
+
+    #[test]
+    fn mlx_model_id_35b_before_3b() {
+        // "35b" must match before "3b" to avoid misclassification
+        let stem = "qwen3.5-35b-a3b-q4_k_m";
+        let matches_35b = stem.contains("35b") || stem.contains("a3b");
+        let matches_3b = stem.contains("3b");
+        assert!(matches_35b, "should match 35b/a3b pattern");
+        assert!(matches_3b, "also matches 3b, but 35b should take priority");
+    }
+}

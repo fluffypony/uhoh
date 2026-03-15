@@ -823,7 +823,9 @@ fn requeue_snapshot_changes(state: &mut ProjectDaemonState, drained: Vec<PathBuf
 
 #[cfg(test)]
 mod tests {
-    use super::MovedFolderRetryState;
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
 
     #[test]
     fn moved_folder_retry_state_backs_off_after_initial_burst() {
@@ -854,5 +856,103 @@ mod tests {
 
         assert_eq!(retry_state.attempts.len(), 1);
         assert!(retry_state.attempts.contains_key("keep"));
+    }
+
+    // ── SnapshotTaskKind ──
+
+    #[test]
+    fn snapshot_task_kind_trigger() {
+        assert_eq!(
+            SnapshotTaskKind::Auto.trigger(),
+            crate::db::SnapshotTrigger::Auto
+        );
+        assert_eq!(
+            SnapshotTaskKind::Emergency.trigger(),
+            crate::db::SnapshotTrigger::Emergency
+        );
+    }
+
+    #[test]
+    fn snapshot_task_kind_label() {
+        assert_eq!(SnapshotTaskKind::Auto.label(), "Snapshot");
+        assert_eq!(SnapshotTaskKind::Emergency.label(), "Emergency snapshot");
+    }
+
+    #[test]
+    fn snapshot_task_kind_is_emergency() {
+        assert!(!SnapshotTaskKind::Auto.is_emergency());
+        assert!(SnapshotTaskKind::Emergency.is_emergency());
+    }
+
+    // ── MovedFolderRetryState additional tests ──
+
+    #[test]
+    fn moved_folder_retry_state_clear() {
+        let mut state = MovedFolderRetryState::default();
+        state.note_missing("proj1");
+        assert!(state.attempts.contains_key("proj1"));
+        state.clear("proj1");
+        assert!(!state.attempts.contains_key("proj1"));
+    }
+
+    #[test]
+    fn moved_folder_retry_state_clear_nonexistent_is_noop() {
+        let mut state = MovedFolderRetryState::default();
+        state.clear("nonexistent"); // should not panic
+        assert!(state.attempts.is_empty());
+    }
+
+    #[test]
+    fn moved_folder_retry_state_note_missing_increments() {
+        let mut state = MovedFolderRetryState::default();
+        assert_eq!(state.note_missing("proj"), 1);
+        assert_eq!(state.note_missing("proj"), 2);
+        assert_eq!(state.note_missing("proj"), 3);
+    }
+
+    #[test]
+    fn moved_folder_retry_state_should_scan_boundaries() {
+        // First 20 attempts: always scan
+        for i in 1..=20 {
+            assert!(MovedFolderRetryState::should_scan(i), "should scan at attempt {i}");
+        }
+        // 21: not a multiple of 20
+        assert!(!MovedFolderRetryState::should_scan(21));
+        // 40: multiple of 20
+        assert!(MovedFolderRetryState::should_scan(40));
+        // 41: not
+        assert!(!MovedFolderRetryState::should_scan(41));
+    }
+
+    #[test]
+    fn moved_folder_retry_state_retain_empty_projects() {
+        let mut state = MovedFolderRetryState::default();
+        state.note_missing("a");
+        state.note_missing("b");
+        state.retain_projects(&[]);
+        assert!(state.attempts.is_empty());
+    }
+
+    // ── should_skip_event_during_restore ──
+
+    #[test]
+    fn skip_event_no_restoring_hash() {
+        let states = HashMap::new();
+        let event = super::WatchEvent::FileChanged(PathBuf::from("/tmp/file.rs"));
+        assert!(should_skip_event_during_restore(&states, &event, None));
+    }
+
+    #[test]
+    fn skip_event_overflow_always_skips() {
+        let states = HashMap::new();
+        let event = super::WatchEvent::Overflow;
+        assert!(should_skip_event_during_restore(&states, &event, Some("hash1")));
+    }
+
+    #[test]
+    fn skip_event_watcher_died_always_skips() {
+        let states = HashMap::new();
+        let event = super::WatchEvent::WatcherDied;
+        assert!(should_skip_event_during_restore(&states, &event, Some("hash1")));
     }
 }

@@ -313,3 +313,73 @@ pub fn run_update_check(
         None => Ok(false),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_platform_asset_substring_returns_ok() {
+        // This should succeed on any supported dev platform
+        let result = detect_platform_asset_substring();
+        assert!(result.is_ok(), "Should detect current platform");
+        let substr = result.unwrap();
+        assert!(!substr.is_empty());
+    }
+
+    #[test]
+    fn detect_platform_asset_substring_contains_os_hint() {
+        let substr = detect_platform_asset_substring().unwrap();
+        let os = std::env::consts::OS;
+        // The substring should contain a recognizable OS indicator
+        match os {
+            "macos" => assert!(substr.contains("macos"), "macOS asset should contain 'macos'"),
+            "linux" => assert!(
+                substr.contains("linux") || substr.contains("ubuntu"),
+                "Linux asset should contain 'linux' or 'ubuntu'"
+            ),
+            "windows" => assert!(substr.contains("win"), "Windows asset should contain 'win'"),
+            _ => {} // unsupported platforms are tested by the function itself
+        }
+    }
+
+    #[test]
+    fn sidecar_manifest_serde_roundtrip() {
+        let manifest = SidecarManifest {
+            version: "b5000".to_string(),
+            platform: "macos-arm64".to_string(),
+            sha256: "abcdef1234567890".to_string(),
+            source_url: "https://github.com/example/release".to_string(),
+            installed_at: "2026-01-01T00:00:00Z".to_string(),
+            binary_size: 42_000_000,
+        };
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        let parsed: SidecarManifest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.version, "b5000");
+        assert_eq!(parsed.platform, "macos-arm64");
+        assert_eq!(parsed.sha256, "abcdef1234567890");
+        assert_eq!(parsed.binary_size, 42_000_000);
+    }
+
+    #[test]
+    fn sidecar_manifest_json_fields() {
+        let manifest = SidecarManifest {
+            version: "v1".to_string(),
+            platform: "linux".to_string(),
+            sha256: "hash".to_string(),
+            source_url: "url".to_string(),
+            installed_at: "now".to_string(),
+            binary_size: 100,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&manifest).unwrap();
+        assert!(json.get("version").is_some());
+        assert!(json.get("platform").is_some());
+        assert!(json.get("sha256").is_some());
+        assert!(json.get("source_url").is_some());
+        assert!(json.get("installed_at").is_some());
+        assert!(json.get("binary_size").is_some());
+    }
+}
