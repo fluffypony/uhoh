@@ -24,7 +24,7 @@ fn map_ledger_event(event: &NewEventLedgerEntry) -> Option<ServerEvent> {
             LedgerSeverity::Critical | LedgerSeverity::Warn | LedgerSeverity::Error,
         ) => Some(ServerEvent::DbGuardAlert {
             guard_name: event.guard_name.clone().unwrap_or_default(),
-            event_type: event.event_type.clone(),
+            event_type: event.event_type.as_str().to_string(),
             severity: event.severity,
             detail: event.detail.clone().unwrap_or_default(),
         }),
@@ -33,7 +33,7 @@ fn map_ledger_event(event: &NewEventLedgerEntry) -> Option<ServerEvent> {
             LedgerSeverity::Critical | LedgerSeverity::Warn | LedgerSeverity::Error,
         ) => Some(ServerEvent::AgentAlert {
             agent_name: event.agent_name.clone().unwrap_or_default(),
-            event_type: event.event_type.clone(),
+            event_type: event.event_type.as_str().to_string(),
             severity: event.severity,
             detail: event.detail.clone().unwrap_or_default(),
         }),

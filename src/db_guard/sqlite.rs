@@ -31,7 +31,7 @@ pub fn tick_sqlite_guard(
     versions.insert(guard.name.clone(), data_version);
 
     if prev_version.is_some() && prev_version != Some(data_version) {
-        event.event_type = "sqlite_data_changed".to_string();
+        event.event_type = crate::db::LedgerEventType::SqliteDataChanged;
         event.severity = LedgerSeverity::Warn;
         let artifact = recovery::write_sqlite_schema_recovery(
             &ctx.uhoh_dir,

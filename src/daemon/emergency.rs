@@ -257,22 +257,40 @@ pub(super) fn handle_dynamic_emergency_upgrade(
     event_tx: &broadcast::Sender<ServerEvent>,
     event_ledger: &EventLedger,
 ) {
-    let predecessor = database
-        .snapshot_before(&state.hash, snapshot_id)
-        .ok()
-        .flatten();
+    let predecessor = match database.snapshot_before(&state.hash, snapshot_id) {
+        Ok(row) => row,
+        Err(err) => {
+            tracing::warn!(
+                project = %state.hash,
+                "Failed to look up predecessor snapshot for dynamic upgrade: {err}"
+            );
+            None
+        }
+    };
     if let Some(predecessor) = predecessor.as_ref() {
-        let _ = database.pin_snapshot(predecessor.rowid, true);
-        tracing::info!(
-            "Pinned predecessor snapshot (rowid={}) via dynamic upgrade",
-            predecessor.rowid
-        );
+        if let Err(err) = database.pin_snapshot(predecessor.rowid, true) {
+            tracing::warn!(
+                project = %state.hash,
+                rowid = predecessor.rowid,
+                "Failed to pin predecessor snapshot via dynamic upgrade: {err}"
+            );
+        } else {
+            tracing::info!(
+                "Pinned predecessor snapshot (rowid={}) via dynamic upgrade",
+                predecessor.rowid
+            );
+        }
     }
 
     let deleted_count = database
         .get_snapshot_deleted_files(row.rowid)
         .map(|files| files.len())
-        .unwrap_or_else(|_| {
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                project = %state.hash,
+                rowid = row.rowid,
+                "Failed to load deleted files for dynamic upgrade, falling back to message parse: {err}"
+            );
             let (deleted, _, _) = parse_emergency_message(&row.message);
             deleted
         });

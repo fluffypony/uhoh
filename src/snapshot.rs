@@ -167,17 +167,14 @@ pub fn create_snapshot(
         settings,
     );
     let (rowid, snapshot_id) = persist_snapshot(database, project_hash, &decision, &scan)?;
-    run_snapshot_post_commit(
+    let post_ctx = PostCommitCtx {
         uhoh_dir,
         database,
         runtime,
         project_hash,
-        &prev_files,
-        rowid,
-        snapshot_id,
-        &decision,
-        &scan,
-    )?;
+        prev_files: &prev_files,
+    };
+    run_snapshot_post_commit(&post_ctx, rowid, snapshot_id, &decision, &scan)?;
 
     Ok(Some(snapshot_id))
 }
@@ -257,6 +254,12 @@ fn collect_incremental_scan(
     let rel_changed = filter_incremental_paths(project_path, paths);
     let mut scan = SnapshotScanResult::new();
     let mut inserted = HashSet::new();
+    let ctx = RecordEntryCtx {
+        database,
+        settings,
+        blob_root,
+        prev_files,
+    };
 
     for rel_path in &rel_changed {
         let abs_path = project_path.join(encoding::decode_relpath_to_os(rel_path));
@@ -270,10 +273,7 @@ fn collect_incremental_scan(
                 if !file_type.is_file() && !file_type.is_symlink() {
                     continue;
                 }
-                record_current_entry(
-                    database, settings, blob_root, prev_files, rel_path, &abs_path, &meta,
-                    &mut scan,
-                );
+                record_current_entry(&ctx, rel_path, &abs_path, &meta, &mut scan);
                 inserted.insert(rel_path.clone());
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -382,11 +382,15 @@ fn collect_full_scan(
 ) -> SnapshotScanResult {
     let current_files = collect_current_files(project_path);
     let mut scan = SnapshotScanResult::new();
+    let ctx = RecordEntryCtx {
+        database,
+        settings,
+        blob_root,
+        prev_files,
+    };
 
     for (rel_path, (abs_path, meta)) in &current_files {
-        record_current_entry(
-            database, settings, blob_root, prev_files, rel_path, abs_path, meta, &mut scan,
-        );
+        record_current_entry(&ctx, rel_path, abs_path, meta, &mut scan);
     }
 
     let current_paths: HashSet<&String> = current_files.keys().collect();
@@ -458,12 +462,16 @@ fn collect_current_files(project_path: &Path) -> HashMap<String, (PathBuf, std::
     current_files
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Shared context for recording file entries during a snapshot scan.
+struct RecordEntryCtx<'a> {
+    database: &'a Database,
+    settings: &'a SnapshotSettings,
+    blob_root: &'a Path,
+    prev_files: &'a HashMap<String, CachedFileState>,
+}
+
 fn record_current_entry(
-    database: &Database,
-    settings: &SnapshotSettings,
-    blob_root: &Path,
-    prev_files: &HashMap<String, CachedFileState>,
+    ctx: &RecordEntryCtx<'_>,
     rel_path: &str,
     abs_path: &Path,
     meta: &std::fs::Metadata,
@@ -472,7 +480,7 @@ fn record_current_entry(
     let size = meta.len();
     let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     let executable = encoding::is_executable(abs_path);
-    if let Some(cached) = prev_files.get(rel_path) {
+    if let Some(cached) = ctx.prev_files.get(rel_path) {
         if cached_matches_metadata(cached, size, mtime, executable) {
             scan.files_for_manifest
                 .push(cached_manifest_entry(rel_path, cached));
@@ -481,14 +489,9 @@ fn record_current_entry(
     }
 
     if meta.file_type().is_symlink() {
-        record_symlink_entry(
-            database, blob_root, prev_files, rel_path, abs_path, size, mtime, scan,
-        );
+        record_symlink_entry(ctx, rel_path, abs_path, size, mtime, scan);
     } else {
-        record_file_entry(
-            database, settings, blob_root, prev_files, rel_path, abs_path, size, mtime, executable,
-            scan,
-        );
+        record_file_entry(ctx, rel_path, abs_path, size, mtime, executable, scan);
     }
 }
 
@@ -545,22 +548,19 @@ fn apply_manifest_entry(
         .insert(rel_path.to_string(), (hash, stored));
 }
 
-#[allow(clippy::too_many_arguments)]
 fn record_symlink_entry(
-    database: &Database,
-    blob_root: &Path,
-    prev_files: &HashMap<String, CachedFileState>,
+    ctx: &RecordEntryCtx<'_>,
     rel_path: &str,
     abs_path: &Path,
     size: u64,
     mtime: SystemTime,
     scan: &mut SnapshotScanResult,
 ) {
-    match cas::store_symlink_target(blob_root, abs_path) {
+    match cas::store_symlink_target(ctx.blob_root, abs_path) {
         Ok((hash, symlink_size, bytes_written)) => {
             let hash_clone = hash.clone();
             apply_manifest_entry(
-                prev_files,
+                ctx.prev_files,
                 rel_path,
                 crate::db::SnapFileEntry {
                     path: rel_path.to_string(),
@@ -577,13 +577,13 @@ fn record_symlink_entry(
                 scan,
             );
             if bytes_written > 0 {
-                let _ = database.add_blob_bytes(bytes_written as i64);
+                let _ = ctx.database.add_blob_bytes(bytes_written as i64);
             }
         }
         Err(err) => {
             tracing::warn!("Failed to store symlink for {}: {}", rel_path, err);
             apply_manifest_entry(
-                prev_files,
+                ctx.prev_files,
                 rel_path,
                 crate::db::SnapFileEntry {
                     path: rel_path.to_string(),
@@ -603,12 +603,8 @@ fn record_symlink_entry(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn record_file_entry(
-    database: &Database,
-    settings: &SnapshotSettings,
-    blob_root: &Path,
-    prev_files: &HashMap<String, CachedFileState>,
+    ctx: &RecordEntryCtx<'_>,
     rel_path: &str,
     abs_path: &Path,
     size: u64,
@@ -617,19 +613,19 @@ fn record_file_entry(
     scan: &mut SnapshotScanResult,
 ) {
     match cas::store_blob_from_file(
-        blob_root,
+        ctx.blob_root,
         abs_path,
-        settings.storage.max_copy_blob_bytes,
-        settings.storage.max_binary_blob_bytes,
-        settings.storage.max_text_blob_bytes,
-        cfg!(feature = "compression") && settings.storage.compress,
-        settings.storage.compress_level,
+        ctx.settings.storage.max_copy_blob_bytes,
+        ctx.settings.storage.max_binary_blob_bytes,
+        ctx.settings.storage.max_text_blob_bytes,
+        cfg!(feature = "compression") && ctx.settings.storage.compress,
+        ctx.settings.storage.compress_level,
     ) {
         Ok((hash, stored_size, method, bytes_written)) => {
             let stored = method.is_recoverable();
             let hash_clone = hash.clone();
             apply_manifest_entry(
-                prev_files,
+                ctx.prev_files,
                 rel_path,
                 crate::db::SnapFileEntry {
                     path: rel_path.to_string(),
@@ -646,13 +642,13 @@ fn record_file_entry(
                 scan,
             );
             if bytes_written > 0 {
-                let _ = database.add_blob_bytes(bytes_written as i64);
+                let _ = ctx.database.add_blob_bytes(bytes_written as i64);
             }
         }
         Err(err) => {
             tracing::warn!("Failed to store blob for {}: {}", rel_path, err);
             apply_manifest_entry(
-                prev_files,
+                ctx.prev_files,
                 rel_path,
                 crate::db::SnapFileEntry {
                     path: rel_path.to_string(),
@@ -733,42 +729,37 @@ fn persist_snapshot(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Shared context for post-commit operations (indexing, AI summary, storage limits).
+struct PostCommitCtx<'a> {
+    uhoh_dir: &'a Path,
+    database: &'a Database,
+    runtime: &'a SnapshotRuntime,
+    project_hash: &'a str,
+    prev_files: &'a HashMap<String, CachedFileState>,
+}
+
 fn run_snapshot_post_commit(
-    uhoh_dir: &Path,
-    database: &Database,
-    runtime: &SnapshotRuntime,
-    project_hash: &str,
-    prev_files: &HashMap<String, CachedFileState>,
+    ctx: &PostCommitCtx<'_>,
     rowid: i64,
     snapshot_id: u64,
     decision: &SnapshotDecision,
     scan: &SnapshotScanResult,
 ) -> Result<()> {
     index_snapshot_for_search(
-        database,
+        ctx.database,
         rowid,
-        project_hash,
+        ctx.project_hash,
         decision,
         &scan.files_for_manifest,
     );
-    update_active_operation_snapshot(database, project_hash, decision.trigger, snapshot_id);
-    schedule_ai_summary(
-        uhoh_dir,
-        database,
-        runtime,
-        project_hash,
-        prev_files,
-        rowid,
-        &scan.files_for_manifest,
-        &scan.deleted_for_manifest,
-    );
+    update_active_operation_snapshot(ctx.database, ctx.project_hash, decision.trigger, snapshot_id);
+    schedule_ai_summary(ctx, rowid, &scan.files_for_manifest, &scan.deleted_for_manifest);
 
     let id_str = encoding::id_to_base58(snapshot_id);
     tracing::info!(
         "Snapshot {} created for {} ({} files, {} deleted, trigger={})",
         id_str,
-        &project_hash[..project_hash.len().min(12)],
+        &ctx.project_hash[..ctx.project_hash.len().min(12)],
         scan.files_for_manifest.len(),
         scan.deleted_for_manifest.len(),
         decision.trigger,
@@ -776,10 +767,10 @@ fn run_snapshot_post_commit(
 
     let total_project_size: u64 = scan.files_for_manifest.iter().map(|file| file.size).sum();
     enforce_storage_limit(
-        database,
+        ctx.database,
         total_project_size,
-        project_hash,
-        runtime.settings(),
+        ctx.project_hash,
+        ctx.runtime.settings(),
     )
 }
 
@@ -819,32 +810,27 @@ fn update_active_operation_snapshot(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn schedule_ai_summary(
-    uhoh_dir: &Path,
-    database: &Database,
-    runtime: &SnapshotRuntime,
-    project_hash: &str,
-    prev_files: &HashMap<String, CachedFileState>,
+    ctx: &PostCommitCtx<'_>,
     rowid: i64,
     current_files: &[crate::db::SnapFileEntry],
     deleted_for_manifest: &[crate::db::DeletedFile],
 ) {
-    if !ai::should_run_ai(&runtime.settings().ai) {
-        let _ = database.enqueue_ai_summary(rowid, project_hash);
+    if !ai::should_run_ai(&ctx.runtime.settings().ai) {
+        let _ = ctx.database.enqueue_ai_summary(rowid, ctx.project_hash);
         return;
     }
 
-    let uhoh_dir_cl = uhoh_dir.to_path_buf();
-    let db_handle = database.clone_handle();
-    let runtime = runtime.clone();
-    let project_hash = project_hash.to_string();
-    let blob_root = uhoh_dir.join("blobs");
+    let uhoh_dir_cl = ctx.uhoh_dir.to_path_buf();
+    let db_handle = ctx.database.clone_handle();
+    let runtime = ctx.runtime.clone();
+    let project_hash = ctx.project_hash.to_string();
+    let blob_root = ctx.uhoh_dir.join("blobs");
     let mut changes = Vec::with_capacity(current_files.len() + deleted_for_manifest.len());
 
     for file in current_files {
         let previous =
-            prev_files
+            ctx.prev_files
                 .get(&file.path)
                 .map(|previous| crate::ai::SummaryBlobRef {
                     hash: &previous.hash,

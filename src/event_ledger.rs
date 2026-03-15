@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::broadcast;
 
-use crate::db::{Database, LedgerSeverity, LedgerSource, NewEventLedgerEntry};
+use crate::db::{Database, LedgerEventType, LedgerSeverity, LedgerSource, NewEventLedgerEntry};
 use crate::events::{publish_ledger_event, ServerEvent};
 
 #[derive(Clone)]
@@ -41,12 +41,12 @@ impl EventLedger {
 
 pub fn new_event(
     source: LedgerSource,
-    event_type: &str,
+    event_type: impl Into<LedgerEventType>,
     severity: LedgerSeverity,
 ) -> NewEventLedgerEntry {
     NewEventLedgerEntry {
         source,
-        event_type: event_type.to_string(),
+        event_type: event_type.into(),
         severity,
         project_hash: None,
         agent_name: None,

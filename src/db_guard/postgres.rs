@@ -454,7 +454,7 @@ fn install_delete_counter_triggers_for_tables(
     })
 }
 
-pub(super) async fn install_delete_counter_trigger_sql(
+pub(crate) async fn install_delete_counter_trigger_sql(
     client: &tokio_postgres::Client,
     table: &str,
 ) -> Result<()> {
@@ -878,7 +878,7 @@ async fn sleep_or_cancel(duration: std::time::Duration, shutdown: &CancellationT
     }
 }
 
-pub(super) fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
+pub(crate) fn parse_watched_tables(tables_csv: &str) -> Vec<String> {
     if tables_csv.trim() == "*" {
         return Vec::new();
     }

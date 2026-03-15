@@ -257,7 +257,7 @@ pub struct EventLedgerEntry {
     pub id: i64,
     pub ts: String,
     pub source: LedgerSource,
-    pub event_type: String,
+    pub event_type: LedgerEventType,
     pub severity: LedgerSeverity,
     pub project_hash: Option<String>,
     pub agent_name: Option<String>,
@@ -382,6 +382,156 @@ impl PartialEq<&str> for LedgerSource {
     }
 }
 
+/// Typed event categories for the event ledger.
+///
+/// Known event types are represented as enum variants; unknown or future event
+/// types round-trip through [`LedgerEventType::Other`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerEventType {
+    // -- Daemon / FS events --
+    EmergencyDeleteDetected,
+    ConfigReloadFailed,
+    // -- DB Guard events --
+    GuardStarted,
+    GuardModeNormalized,
+    GuardTickFailed,
+    PostgresTick,
+    PostgresBaseline,
+    PostgresOptionalStepDegraded,
+    PostgresWildcardTriggerReconciled,
+    SqliteTick,
+    SqliteDataChanged,
+    SqliteBaseline,
+    MysqlTick,
+    MysqlPollFailed,
+    DropTable,
+    SchemaChange,
+    MassDelete,
+    // -- Agent events --
+    AgentRegistered,
+    ToolCall,
+    SessionToolCall,
+    PreNotify,
+    DangerousAgentAction,
+    DangerousActionTimeout,
+    DangerousActionDenied,
+    DangerousActionApproved,
+    McpProxyStarted,
+    McpProxyClientConnected,
+    McpProxyConnectionFailed,
+    McpProxyAcceptFailed,
+    AuditTick,
+    FanotifyOverflow,
+    FanotifyMonitorStarted,
+    FanotifyPreimage,
+    FanotifyMonitorDegraded,
+    /// Catch-all for event types not yet represented as variants.
+    Other(String),
+}
+
+impl LedgerEventType {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::EmergencyDeleteDetected => "emergency_delete_detected",
+            Self::ConfigReloadFailed => "config_reload_failed",
+            Self::GuardStarted => "guard_started",
+            Self::GuardModeNormalized => "guard_mode_normalized",
+            Self::GuardTickFailed => "guard_tick_failed",
+            Self::PostgresTick => "postgres_tick",
+            Self::PostgresBaseline => "postgres_baseline",
+            Self::PostgresOptionalStepDegraded => "postgres_optional_step_degraded",
+            Self::PostgresWildcardTriggerReconciled => "postgres_wildcard_trigger_reconciled",
+            Self::SqliteTick => "sqlite_tick",
+            Self::SqliteDataChanged => "sqlite_data_changed",
+            Self::SqliteBaseline => "sqlite_baseline",
+            Self::MysqlTick => "mysql_tick",
+            Self::MysqlPollFailed => "mysql_poll_failed",
+            Self::DropTable => "drop_table",
+            Self::SchemaChange => "schema_change",
+            Self::MassDelete => "mass_delete",
+            Self::AgentRegistered => "agent_registered",
+            Self::ToolCall => "tool_call",
+            Self::SessionToolCall => "session_tool_call",
+            Self::PreNotify => "pre_notify",
+            Self::DangerousAgentAction => "dangerous_agent_action",
+            Self::DangerousActionTimeout => "dangerous_action_timeout",
+            Self::DangerousActionDenied => "dangerous_action_denied",
+            Self::DangerousActionApproved => "dangerous_action_approved",
+            Self::McpProxyStarted => "mcp_proxy_started",
+            Self::McpProxyClientConnected => "mcp_proxy_client_connected",
+            Self::McpProxyConnectionFailed => "mcp_proxy_connection_failed",
+            Self::McpProxyAcceptFailed => "mcp_proxy_accept_failed",
+            Self::AuditTick => "audit_tick",
+            Self::FanotifyOverflow => "fanotify_overflow",
+            Self::FanotifyMonitorStarted => "fanotify_monitor_started",
+            Self::FanotifyPreimage => "fanotify_preimage",
+            Self::FanotifyMonitorDegraded => "fanotify_monitor_degraded",
+            Self::Other(s) => s.as_str(),
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "emergency_delete_detected" => Self::EmergencyDeleteDetected,
+            "config_reload_failed" => Self::ConfigReloadFailed,
+            "guard_started" => Self::GuardStarted,
+            "guard_mode_normalized" => Self::GuardModeNormalized,
+            "guard_tick_failed" => Self::GuardTickFailed,
+            "postgres_tick" => Self::PostgresTick,
+            "postgres_baseline" => Self::PostgresBaseline,
+            "postgres_optional_step_degraded" => Self::PostgresOptionalStepDegraded,
+            "postgres_wildcard_trigger_reconciled" => Self::PostgresWildcardTriggerReconciled,
+            "sqlite_tick" => Self::SqliteTick,
+            "sqlite_data_changed" => Self::SqliteDataChanged,
+            "sqlite_baseline" => Self::SqliteBaseline,
+            "mysql_tick" => Self::MysqlTick,
+            "mysql_poll_failed" => Self::MysqlPollFailed,
+            "drop_table" => Self::DropTable,
+            "schema_change" => Self::SchemaChange,
+            "mass_delete" => Self::MassDelete,
+            "agent_registered" => Self::AgentRegistered,
+            "tool_call" => Self::ToolCall,
+            "session_tool_call" => Self::SessionToolCall,
+            "pre_notify" => Self::PreNotify,
+            "dangerous_agent_action" => Self::DangerousAgentAction,
+            "dangerous_action_timeout" => Self::DangerousActionTimeout,
+            "dangerous_action_denied" => Self::DangerousActionDenied,
+            "dangerous_action_approved" => Self::DangerousActionApproved,
+            "mcp_proxy_started" => Self::McpProxyStarted,
+            "mcp_proxy_client_connected" => Self::McpProxyClientConnected,
+            "mcp_proxy_connection_failed" => Self::McpProxyConnectionFailed,
+            "mcp_proxy_accept_failed" => Self::McpProxyAcceptFailed,
+            "audit_tick" => Self::AuditTick,
+            "fanotify_overflow" => Self::FanotifyOverflow,
+            "fanotify_monitor_started" => Self::FanotifyMonitorStarted,
+            "fanotify_preimage" => Self::FanotifyPreimage,
+            "fanotify_monitor_degraded" => Self::FanotifyMonitorDegraded,
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
+impl FromStr for LedgerEventType {
+    type Err = std::convert::Infallible;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(Self::parse(value))
+    }
+}
+
+impl From<&str> for LedgerEventType {
+    fn from(value: &str) -> Self {
+        Self::parse(value)
+    }
+}
+
+impl std::fmt::Display for LedgerEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DbGuardEngine {
@@ -490,7 +640,7 @@ pub struct EventLedgerTraceResult {
 #[non_exhaustive]
 pub struct NewEventLedgerEntry {
     pub source: LedgerSource,
-    pub event_type: String,
+    pub event_type: LedgerEventType,
     pub severity: LedgerSeverity,
     pub project_hash: Option<String>,
     pub agent_name: Option<String>,

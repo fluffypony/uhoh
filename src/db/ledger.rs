@@ -62,12 +62,13 @@ impl<'r> TryFrom<&Row<'r>> for EventLedgerEntry {
 
     fn try_from(row: &Row<'r>) -> Result<Self, Self::Error> {
         let source_raw: String = row.get(2)?;
+        let event_type_raw: String = row.get(3)?;
         let severity_raw: String = row.get(4)?;
         Ok(EventLedgerEntry {
             id: row.get(0)?,
             ts: row.get(1)?,
             source: LedgerSource::parse_persisted(&source_raw, 2)?,
-            event_type: row.get(3)?,
+            event_type: super::LedgerEventType::parse(&event_type_raw),
             severity: LedgerSeverity::parse_persisted(&severity_raw, 4)?,
             project_hash: row.get(5)?,
             agent_name: row.get(6)?,
@@ -96,7 +97,7 @@ pub fn compute_event_chain_hash_with_id(
         prev_hash,
         id,
         event.source.as_str(),
-        &event.event_type,
+        event.event_type.as_str(),
         event.severity.as_str(),
         event,
         ts,
@@ -188,7 +189,7 @@ impl Database {
             params![
                 ts,
                 event.source.as_str(),
-                event.event_type,
+                event.event_type.as_str(),
                 event.severity.as_str(),
                 event.project_hash,
                 event.agent_name,
@@ -228,7 +229,7 @@ impl Database {
                 params![
                     ts,
                     event.source.as_str(),
-                    event.event_type,
+                    event.event_type.as_str(),
                     event.severity.as_str(),
                     event.project_hash,
                     event.agent_name,
@@ -272,7 +273,7 @@ impl Database {
             let severity_raw: String = row.get(4)?;
             let event = NewEventLedgerEntry {
                 source: LedgerSource::parse_persisted(&source_raw, 2)?,
-                event_type: event_type_raw.clone(),
+                event_type: super::LedgerEventType::parse(&event_type_raw),
                 severity: LedgerSeverity::parse_persisted(&severity_raw, 4)?,
                 project_hash: row.get(5)?,
                 agent_name: row.get(6)?,
@@ -512,7 +513,7 @@ mod tests {
     fn test_event(causal_parent: Option<i64>) -> NewEventLedgerEntry {
         NewEventLedgerEntry {
             source: LedgerSource::Agent,
-            event_type: "tool_call".to_string(),
+            event_type: crate::db::LedgerEventType::ToolCall,
             severity: LedgerSeverity::Info,
             project_hash: Some("project".to_string()),
             agent_name: Some("agent".to_string()),
