@@ -113,6 +113,7 @@ fn revert_event(uhoh_dir: &Path, database: &Database, event: &EventLedgerEntry) 
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

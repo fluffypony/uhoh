@@ -27,6 +27,7 @@ pub(crate) fn derive_argon2id_key(master: &str, salt: &[u8; 16]) -> Result<[u8; 
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

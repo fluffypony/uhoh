@@ -356,6 +356,7 @@ fn database_backup_to(database: &Database, path: &std::path::Path) -> anyhow::Re
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::DaemonMaintenanceSubsystem;
     use crate::config::Config;

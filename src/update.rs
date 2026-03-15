@@ -196,6 +196,7 @@ async fn dns_verify_hash_inner(version: &str, asset: &str) -> Result<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

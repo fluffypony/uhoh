@@ -441,6 +441,7 @@ fn run_git_output_impl(cwd: &Path, index_file: Option<&Path>, args: &[&str]) -> 
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

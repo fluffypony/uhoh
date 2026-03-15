@@ -684,6 +684,7 @@ pub fn scrub_error_message(msg: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::scrub_error_message;
 

@@ -318,6 +318,7 @@ fn parse_emergency_message(msg: &str) -> (usize, u64, f64) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

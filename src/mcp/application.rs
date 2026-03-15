@@ -36,6 +36,7 @@ pub async fn handle_json_rpc_request(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

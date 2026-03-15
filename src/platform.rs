@@ -381,6 +381,7 @@ pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

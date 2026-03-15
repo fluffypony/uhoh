@@ -50,6 +50,7 @@ pub fn build_walker(project_path: &Path) -> ignore::Walk {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::fs;

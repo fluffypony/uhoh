@@ -90,6 +90,7 @@ pub fn validate_profile_path(path: &std::path::Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

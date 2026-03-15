@@ -137,6 +137,7 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::fs;

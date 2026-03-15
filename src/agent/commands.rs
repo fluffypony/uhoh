@@ -235,6 +235,7 @@ fn extract_detail_field(detail: &str, key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -141,6 +141,7 @@ fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::db::LedgerSource;
 
