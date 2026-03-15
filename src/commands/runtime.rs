@@ -11,7 +11,7 @@ use crate::config;
 use crate::daemon;
 use crate::db;
 use crate::gc;
-use crate::git;
+use super::git;
 use crate::platform;
 use crate::update;
 

@@ -101,18 +101,18 @@ pub(super) fn evaluate_emergency_for_project(
                 }
             }
 
-            emit_emergency_delete_detected(
+            emit_emergency_delete_detected(EmergencyDeleteEvent {
                 event_tx,
                 event_ledger,
-                &state.hash,
+                project_hash: &state.hash,
                 watch,
-                verified_deleted_count,
+                deleted_count: verified_deleted_count,
                 baseline_count,
                 ratio,
-                false,
-                None,
-                Some(serde_json::json!({ "deleted_paths_sample": deleted_paths_sample })),
-            );
+                cooldown_suppressed: false,
+                cooldown_remaining_secs: None,
+                extra_detail: Some(serde_json::json!({ "deleted_paths_sample": deleted_paths_sample })),
+            });
 
             let changed_for_requeue = state.pending_changes.drain().collect();
             state.deleted_paths.clear();
@@ -146,18 +146,18 @@ pub(super) fn evaluate_emergency_for_project(
                 cooldown_remaining = cooldown_remaining_secs,
                 "Emergency threshold exceeded but cooldown active"
             );
-            emit_emergency_delete_detected(
+            emit_emergency_delete_detected(EmergencyDeleteEvent {
                 event_tx,
                 event_ledger,
-                &state.hash,
+                project_hash: &state.hash,
                 watch,
-                verified_deleted_count,
+                deleted_count: verified_deleted_count,
                 baseline_count,
                 ratio,
-                true,
-                Some(cooldown_remaining_secs),
-                None,
-            );
+                cooldown_suppressed: true,
+                cooldown_remaining_secs: Some(cooldown_remaining_secs),
+                extra_detail: None,
+            });
             None
         }
         crate::emergency::EmergencyEvaluation::Skipped { reason } => {
@@ -174,19 +174,34 @@ pub(super) fn evaluate_emergency_for_project(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn emit_emergency_delete_detected(
-    event_tx: &broadcast::Sender<ServerEvent>,
-    event_ledger: &EventLedger,
-    project_hash: &str,
-    watch: &WatchConfig,
-    deleted_count: usize,
-    baseline_count: u64,
-    ratio: f64,
-    cooldown_suppressed: bool,
-    cooldown_remaining_secs: Option<u64>,
-    extra_detail: Option<serde_json::Value>,
-) {
+/// Bundles the positional parameters for [`emit_emergency_delete_detected`].
+pub(super) struct EmergencyDeleteEvent<'a> {
+    pub event_tx: &'a broadcast::Sender<ServerEvent>,
+    pub event_ledger: &'a EventLedger,
+    pub project_hash: &'a str,
+    pub watch: &'a WatchConfig,
+    pub deleted_count: usize,
+    pub baseline_count: u64,
+    pub ratio: f64,
+    pub cooldown_suppressed: bool,
+    pub cooldown_remaining_secs: Option<u64>,
+    pub extra_detail: Option<serde_json::Value>,
+}
+
+pub(super) fn emit_emergency_delete_detected(event: EmergencyDeleteEvent<'_>) {
+    let EmergencyDeleteEvent {
+        event_tx,
+        event_ledger,
+        project_hash,
+        watch,
+        deleted_count,
+        baseline_count,
+        ratio,
+        cooldown_suppressed,
+        cooldown_remaining_secs,
+        extra_detail,
+    } = event;
+
     let mut detail = serde_json::json!({
         "deleted_count": deleted_count,
         "baseline_count": baseline_count,
@@ -266,18 +281,18 @@ pub(super) fn handle_dynamic_emergency_upgrade(
     let baseline_count = baseline_from_predecessor.unwrap_or(baseline_from_row);
     let ratio = crate::emergency::deletion_ratio(deleted_count, baseline_count);
 
-    emit_emergency_delete_detected(
+    emit_emergency_delete_detected(EmergencyDeleteEvent {
         event_tx,
         event_ledger,
-        &state.hash,
+        project_hash: &state.hash,
         watch,
         deleted_count,
         baseline_count,
         ratio,
-        false,
-        None,
-        Some(serde_json::json!({ "source": "dynamic_upgrade" })),
-    );
+        cooldown_suppressed: false,
+        cooldown_remaining_secs: None,
+        extra_detail: Some(serde_json::json!({ "source": "dynamic_upgrade" })),
+    });
 }
 
 fn parse_emergency_message(msg: &str) -> (usize, u64, f64) {

@@ -16,7 +16,6 @@ pub(crate) mod emergency;
 pub mod event_ledger;
 pub(crate) mod events;
 pub(crate) mod gc;
-pub(crate) mod git;
 pub(crate) mod ignore_rules;
 pub(crate) mod marker;
 pub(crate) mod mcp;

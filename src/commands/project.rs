@@ -7,7 +7,7 @@ use crate::config;
 use crate::encoding;
 use crate::db;
 use crate::diff_view;
-use crate::git;
+use super::git;
 use crate::marker;
 use crate::commands::operations;
 use crate::restore;

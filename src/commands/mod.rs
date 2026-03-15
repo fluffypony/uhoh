@@ -1,3 +1,4 @@
+pub(crate) mod git;
 pub mod ledger;
 pub(crate) mod operations;
 pub mod project;
