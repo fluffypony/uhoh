@@ -16,141 +16,7 @@ pub fn handle_db_guard_action(uhoh_dir: &Path, database: &Database, action: &DbA
             name,
             mode,
         } => {
-            let guard_name = name
-                .clone()
-                .unwrap_or_else(|| super::derive_guard_name_from_dsn(dsn));
-            let engine = super::detect_engine(dsn).context("Unsupported DSN format")?;
-            if engine == db::DbGuardEngine::Postgres {
-                if which::which("pg_dump").is_err() {
-                    anyhow::bail!(
-                        "pg_dump not found in PATH. Postgres guard requires pg_dump for baseline snapshots. Install postgresql-client or equivalent package."
-                    );
-                }
-            } else if engine == db::DbGuardEngine::Mysql && which::which("mysql").is_err() {
-                anyhow::bail!(
-                    "mysql CLI not found in PATH. MySQL guard requires the mysql client. Install mysql-client or equivalent package."
-                );
-            }
-            let tables_csv = tables.clone().unwrap_or_else(|| "*".to_string());
-
-            let mode_kind = if engine == db::DbGuardEngine::Mysql {
-                if *mode != db::DbGuardMode::SchemaPolling {
-                    tracing::warn!(
-                        "MySQL guard only supports schema_polling mode; normalizing requested mode '{}'",
-                        mode
-                    );
-                }
-                db::DbGuardMode::SchemaPolling
-            } else {
-                *mode
-            };
-
-            let connection_ref = super::credentials::scrub_dsn(dsn);
-            let embedded_creds = extract_dsn_credentials(dsn);
-            let mut previous_stored_cred: Option<Option<super::credentials::CredentialMaterial>> =
-                None;
-
-            if let Some(creds) = embedded_creds.as_ref() {
-                previous_stored_cred = Some(
-                    super::credentials::load_encrypted_credentials(&connection_ref).unwrap_or(None),
-                );
-                super::credentials::store_encrypted_credential(&connection_ref, creds).with_context(|| {
-                    format!(
-                        "Failed to persist credentials for guard '{}'. Ensure UHOH_MASTER_KEY is set and valid before adding a DSN with embedded credentials",
-                        guard_name
-                    )
-                })?;
-                if engine == db::DbGuardEngine::Postgres {
-                    let outcome = super::credentials::store_postgres_credentials_with_keyring(
-                        &connection_ref,
-                        creds,
-                    )?;
-                    if outcome.keyring_status.is_degraded() {
-                        eprintln!(
-                            "Warning: stored credentials for '{}' in the encrypted file backend, but the keyring mirror is unavailable ({})",
-                            guard_name,
-                            outcome.keyring_status.describe()
-                        );
-                    }
-                }
-            }
-
-            let mut postgres_infra_installed = false;
-            let mut watched_tables_cache: Option<String> = None;
-            if engine == db::DbGuardEngine::Postgres {
-                let postgres_connection =
-                    super::postgres_connection::ResolvedPostgresConnection::resolve(dsn)?;
-                match super::postgres_monitoring::install_monitoring_infrastructure(
-                    &postgres_connection,
-                    tables_csv.as_str(),
-                ) {
-                    Ok(cache) => {
-                        postgres_infra_installed = true;
-                        watched_tables_cache = cache;
-                    }
-                    Err(err) => {
-                        if let Some(previous) = previous_stored_cred.clone() {
-                            let restore =
-                                previous.unwrap_or(super::credentials::CredentialMaterial {
-                                    username: None,
-                                    password: None,
-                                });
-                            if let Err(clean_err) = super::credentials::store_encrypted_credential(
-                                &connection_ref,
-                                &restore,
-                            ) {
-                                tracing::warn!(
-                                    "Failed to restore stored credentials after postgres infra install failure for '{}': {}",
-                                    guard_name,
-                                    clean_err
-                                );
-                            }
-                        }
-                        return Err(err);
-                    }
-                }
-            }
-
-            if let Err(err) = database.add_db_guard(
-                &guard_name,
-                engine,
-                &connection_ref,
-                &tables_csv,
-                watched_tables_cache.as_deref(),
-                mode_kind,
-            ) {
-                if let Some(previous) = previous_stored_cred {
-                    let restore = previous.unwrap_or(super::credentials::CredentialMaterial {
-                        username: None,
-                        password: None,
-                    });
-                    if let Err(clean_err) =
-                        super::credentials::store_encrypted_credential(&connection_ref, &restore)
-                    {
-                        tracing::warn!(
-                            "Failed to restore stored credentials after local DB add failure for '{}': {}",
-                            guard_name,
-                            clean_err
-                        );
-                    }
-                }
-                if postgres_infra_installed {
-                    let postgres_connection =
-                        super::postgres_connection::ResolvedPostgresConnection::resolve(dsn)?;
-                    if let Err(clean_err) = super::postgres_monitoring::drop_monitoring_infrastructure(
-                        &postgres_connection,
-                        tables_csv.as_str(),
-                    ) {
-                        tracing::warn!(
-                            "Failed to roll back postgres monitoring infrastructure after local DB add failure for '{}': {}",
-                            guard_name,
-                            clean_err
-                        );
-                    }
-                }
-                return Err(err);
-            }
-            println!("Added db guard '{guard_name}' ({engine})");
+            add_db_guard(database, dsn, tables.as_deref(), name.as_deref(), *mode)?;
         }
         DbAction::Remove { name } => {
             if let Some(guard) = database
@@ -305,6 +171,189 @@ pub fn handle_db_guard_action(uhoh_dir: &Path, database: &Database, action: &DbA
         }
     }
     Ok(())
+}
+
+/// Provision a new db guard: validate prerequisites, store credentials,
+/// install monitoring infrastructure (Postgres), and register in the local DB.
+/// On failure at any step, rolls back all previously provisioned state.
+fn add_db_guard(
+    database: &Database,
+    dsn: &str,
+    tables: Option<&str>,
+    name: Option<&str>,
+    mode: db::DbGuardMode,
+) -> Result<()> {
+    let guard_name = name
+        .map(str::to_string)
+        .unwrap_or_else(|| super::derive_guard_name_from_dsn(dsn));
+    let engine = super::detect_engine(dsn).context("Unsupported DSN format")?;
+    validate_engine_prerequisites(engine)?;
+
+    let tables_csv = tables.unwrap_or("*").to_string();
+    let mode_kind = normalize_mode(engine, mode);
+    let connection_ref = super::credentials::scrub_dsn(dsn);
+
+    // Track provisioned state for rollback on failure
+    let embedded_creds = extract_dsn_credentials(dsn);
+    let previous_cred = store_credentials_if_needed(
+        &connection_ref,
+        &guard_name,
+        engine,
+        embedded_creds.as_ref(),
+    )?;
+
+    let install_result = install_and_register(
+        database,
+        dsn,
+        engine,
+        &guard_name,
+        &connection_ref,
+        &tables_csv,
+        mode_kind,
+    );
+
+    if let Err(err) = install_result {
+        // Consolidated rollback: restore credentials and drop monitoring infra
+        rollback_credentials(&connection_ref, &guard_name, previous_cred.as_ref());
+        // Monitoring infra may have been partially installed; best-effort cleanup
+        if engine == db::DbGuardEngine::Postgres {
+            rollback_postgres_infra(dsn, &guard_name, &tables_csv);
+        }
+        return Err(err);
+    }
+
+    println!("Added db guard '{guard_name}' ({engine})");
+    Ok(())
+}
+
+fn validate_engine_prerequisites(engine: db::DbGuardEngine) -> Result<()> {
+    match engine {
+        db::DbGuardEngine::Postgres if which::which("pg_dump").is_err() => {
+            anyhow::bail!(
+                "pg_dump not found in PATH. Postgres guard requires pg_dump for baseline snapshots. \
+                 Install postgresql-client or equivalent package."
+            );
+        }
+        db::DbGuardEngine::Mysql if which::which("mysql").is_err() => {
+            anyhow::bail!(
+                "mysql CLI not found in PATH. MySQL guard requires the mysql client. \
+                 Install mysql-client or equivalent package."
+            );
+        }
+        _ => Ok(()),
+    }
+}
+
+fn normalize_mode(engine: db::DbGuardEngine, mode: db::DbGuardMode) -> db::DbGuardMode {
+    if engine == db::DbGuardEngine::Mysql && mode != db::DbGuardMode::SchemaPolling {
+        tracing::warn!(
+            "MySQL guard only supports schema_polling mode; normalizing requested mode '{}'",
+            mode
+        );
+        db::DbGuardMode::SchemaPolling
+    } else {
+        mode
+    }
+}
+
+/// Store embedded DSN credentials, returning the previous credential (if any) for rollback.
+fn store_credentials_if_needed(
+    connection_ref: &str,
+    guard_name: &str,
+    engine: db::DbGuardEngine,
+    creds: Option<&super::credentials::CredentialMaterial>,
+) -> Result<Option<Option<super::credentials::CredentialMaterial>>> {
+    let Some(creds) = creds else {
+        return Ok(None);
+    };
+
+    let previous = super::credentials::load_encrypted_credentials(connection_ref).unwrap_or(None);
+    super::credentials::store_encrypted_credential(connection_ref, creds).with_context(|| {
+        format!(
+            "Failed to persist credentials for guard '{}'. \
+             Ensure UHOH_MASTER_KEY is set and valid before adding a DSN with embedded credentials",
+            guard_name
+        )
+    })?;
+
+    if engine == db::DbGuardEngine::Postgres {
+        let outcome =
+            super::credentials::store_postgres_credentials_with_keyring(connection_ref, creds)?;
+        if outcome.keyring_status.is_degraded() {
+            eprintln!(
+                "Warning: stored credentials for '{}' in the encrypted file backend, \
+                 but the keyring mirror is unavailable ({})",
+                guard_name,
+                outcome.keyring_status.describe()
+            );
+        }
+    }
+
+    Ok(Some(previous))
+}
+
+/// Install postgres monitoring infrastructure and register the guard in the local DB.
+fn install_and_register(
+    database: &Database,
+    dsn: &str,
+    engine: db::DbGuardEngine,
+    guard_name: &str,
+    connection_ref: &str,
+    tables_csv: &str,
+    mode_kind: db::DbGuardMode,
+) -> Result<()> {
+    let watched_tables_cache = if engine == db::DbGuardEngine::Postgres {
+        let pg_conn = super::postgres_connection::ResolvedPostgresConnection::resolve(dsn)?;
+        super::postgres_monitoring::install_monitoring_infrastructure(&pg_conn, tables_csv)?
+    } else {
+        None
+    };
+
+    database.add_db_guard(
+        guard_name,
+        engine,
+        connection_ref,
+        tables_csv,
+        watched_tables_cache.as_deref(),
+        mode_kind,
+    )?;
+    Ok(())
+}
+
+fn rollback_credentials(
+    connection_ref: &str,
+    guard_name: &str,
+    previous: Option<&Option<super::credentials::CredentialMaterial>>,
+) {
+    let Some(previous) = previous else { return };
+    let restore = previous
+        .clone()
+        .unwrap_or(super::credentials::CredentialMaterial {
+            username: None,
+            password: None,
+        });
+    if let Err(err) = super::credentials::store_encrypted_credential(connection_ref, &restore) {
+        tracing::warn!(
+            "Failed to restore stored credentials after add failure for '{}': {}",
+            guard_name,
+            err
+        );
+    }
+}
+
+fn rollback_postgres_infra(dsn: &str, guard_name: &str, tables_csv: &str) {
+    let Ok(pg_conn) = super::postgres_connection::ResolvedPostgresConnection::resolve(dsn) else {
+        return;
+    };
+    if let Err(err) =
+        super::postgres_monitoring::drop_monitoring_infrastructure(&pg_conn, tables_csv)
+    {
+        tracing::warn!(
+            "Failed to roll back postgres monitoring infrastructure for '{}': {}",
+            guard_name,
+            err
+        );
+    }
 }
 
 fn extract_dsn_credentials(dsn: &str) -> Option<super::credentials::CredentialMaterial> {
