@@ -668,4 +668,354 @@ mod tests {
         assert!(w1 > 0);
         assert_eq!(w2, 0);
     }
+
+    // ── StorageMethod ──
+
+    #[test]
+    fn storage_method_is_recoverable() {
+        assert!(!StorageMethod::None.is_recoverable());
+        assert!(StorageMethod::Copy.is_recoverable());
+        assert!(StorageMethod::Reflink.is_recoverable());
+    }
+
+    #[test]
+    fn storage_method_to_from_db_roundtrip() {
+        for method in [StorageMethod::None, StorageMethod::Copy, StorageMethod::Reflink] {
+            assert_eq!(StorageMethod::from_db(method.to_db()), method);
+        }
+    }
+
+    #[test]
+    fn storage_method_from_db_unknown_defaults_to_none() {
+        assert_eq!(StorageMethod::from_db(3), StorageMethod::None);
+        assert_eq!(StorageMethod::from_db(-1), StorageMethod::None);
+        assert_eq!(StorageMethod::from_db(100), StorageMethod::None);
+    }
+
+    #[test]
+    fn storage_method_display_name() {
+        assert_eq!(StorageMethod::None.display_name(), "none");
+        assert_eq!(StorageMethod::Copy.display_name(), "copy");
+        assert_eq!(StorageMethod::Reflink.display_name(), "reflink");
+    }
+
+    // ── blob_exists ──
+
+    #[test]
+    fn blob_exists_returns_true_for_stored_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        let content = b"existence check";
+        let (hash, _) = store_blob(&blob_root, content).unwrap();
+        assert!(blob_exists(&blob_root, &hash));
+    }
+
+    #[test]
+    fn blob_exists_returns_false_for_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        assert!(!blob_exists(&blob_root, "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab"));
+    }
+
+    #[test]
+    fn blob_exists_short_hash_returns_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        assert!(!blob_exists(&blob_root, "a"));
+        assert!(!blob_exists(&blob_root, ""));
+    }
+
+    // ── read_blob edge cases ──
+
+    #[test]
+    fn read_blob_short_hash_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        assert!(read_blob(&blob_root, "a").unwrap().is_none());
+        assert!(read_blob(&blob_root, "").unwrap().is_none());
+    }
+
+    #[test]
+    fn read_blob_missing_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+        assert!(read_blob(&blob_root, "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab").unwrap().is_none());
+    }
+
+    #[test]
+    fn read_blob_corruption_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        // Store valid blob, then tamper with the content
+        let content = b"integrity test";
+        let (hash, _) = store_blob(&blob_root, content).unwrap();
+        let blob_path = blob_root.join(&hash[..2]).join(&hash);
+
+        // Make writable, tamper, make readonly again
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&blob_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::write(&blob_path, b"TAMPERED").unwrap();
+
+        let result = read_blob(&blob_root, &hash);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("corruption"), "Expected corruption error, got: {err_msg}");
+    }
+
+    // ── store_blob_from_file ──
+
+    #[test]
+    fn store_blob_from_file_small_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        let test_file = tmp.path().join("small.txt");
+        std::fs::write(&test_file, "small text file").unwrap();
+
+        let params = BlobStorageParams::new(u64::MAX, u64::MAX, u64::MAX, false, 3);
+        let (hash, size, method, _) = store_blob_from_file(&blob_root, &test_file, &params).unwrap();
+
+        assert!(!hash.is_empty());
+        assert_eq!(size, 15); // "small text file".len()
+        assert!(method.is_recoverable());
+
+        let read_back = read_blob(&blob_root, &hash).unwrap().unwrap();
+        assert_eq!(read_back, b"small text file");
+    }
+
+    #[test]
+    fn store_blob_from_file_exceeds_size_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        let test_file = tmp.path().join("big.txt");
+        std::fs::write(&test_file, "a".repeat(1000)).unwrap();
+
+        // Set very low limit
+        let params = BlobStorageParams::new(100, 100, 100, false, 3);
+        let (hash, size, method, bytes_on_disk) =
+            store_blob_from_file(&blob_root, &test_file, &params).unwrap();
+
+        assert!(!hash.is_empty());
+        assert_eq!(size, 1000);
+        assert_eq!(method, StorageMethod::None); // skipped, too big
+        assert_eq!(bytes_on_disk, 0);
+    }
+
+    #[test]
+    fn store_blob_from_file_dedup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        let test_file = tmp.path().join("dup.txt");
+        std::fs::write(&test_file, "dedup content").unwrap();
+
+        let params = BlobStorageParams::new(u64::MAX, u64::MAX, u64::MAX, false, 3);
+        let (h1, _, m1, _d1) = store_blob_from_file(&blob_root, &test_file, &params).unwrap();
+        let (h2, _, m2, d2) = store_blob_from_file(&blob_root, &test_file, &params).unwrap();
+
+        assert_eq!(h1, h2);
+        assert!(m1.is_recoverable());
+        assert!(m2.is_recoverable());
+        // d1 may be 0 if reflink succeeded (macOS APFS), that's fine
+        assert_eq!(d2, 0); // dedup hit — second store writes nothing
+    }
+
+    #[test]
+    fn store_blob_from_file_binary_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        // Create a file with binary content (null bytes)
+        let test_file = tmp.path().join("binary.bin");
+        let mut content = vec![0u8; 100];
+        content[0] = 0xFF;
+        content[10] = 0x00;
+        std::fs::write(&test_file, &content).unwrap();
+
+        // Allow text but disallow binary
+        let params = BlobStorageParams::new(u64::MAX, 50, u64::MAX, false, 3);
+        let (_, _, method, _) = store_blob_from_file(&blob_root, &test_file, &params).unwrap();
+
+        assert_eq!(method, StorageMethod::None); // binary exceeds binary limit
+    }
+
+    #[test]
+    fn store_blob_from_file_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        let test_file = tmp.path().join("empty.txt");
+        std::fs::write(&test_file, "").unwrap();
+
+        let params = BlobStorageParams::new(u64::MAX, u64::MAX, u64::MAX, false, 3);
+        let (hash, size, method, _) = store_blob_from_file(&blob_root, &test_file, &params).unwrap();
+
+        assert!(!hash.is_empty());
+        assert_eq!(size, 0);
+        assert!(method.is_recoverable());
+    }
+
+    // ── store_blob edge cases ──
+
+    #[test]
+    fn store_blob_empty_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        let (hash, _bytes_written) = store_blob(&blob_root, b"").unwrap();
+        assert!(!hash.is_empty());
+        // bytes_written may be 0 if compression doesn't help for empty content
+
+        let read_back = read_blob(&blob_root, &hash).unwrap().unwrap();
+        assert!(read_back.is_empty());
+    }
+
+    #[test]
+    fn store_blob_large_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        let content = vec![42u8; 256 * 1024]; // 256KB
+        let (hash, _) = store_blob(&blob_root, &content).unwrap();
+        let read_back = read_blob(&blob_root, &hash).unwrap().unwrap();
+        assert_eq!(read_back, content);
+    }
+
+    // ── store_symlink_target ──
+
+    #[cfg(unix)]
+    #[test]
+    fn store_symlink_target_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        let target_file = tmp.path().join("real_file.txt");
+        std::fs::write(&target_file, "content").unwrap();
+
+        let symlink_path = tmp.path().join("link");
+        std::os::unix::fs::symlink(&target_file, &symlink_path).unwrap();
+
+        let (hash, size, _bytes_written) = store_symlink_target(&blob_root, &symlink_path).unwrap();
+        assert!(!hash.is_empty());
+        assert!(size > 0);
+
+        let read_back = read_blob(&blob_root, &hash).unwrap().unwrap();
+        let target_str = String::from_utf8(read_back).unwrap();
+        assert!(target_str.contains("real_file.txt"));
+    }
+
+    // ── cleanup_stale_temp_files ──
+
+    #[test]
+    fn cleanup_stale_temp_files_removes_old() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        let tmp_dir = blob_root.join("tmp");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        // Create temp files
+        let stale = tmp_dir.join(".tmp.12345.99999");
+        std::fs::write(&stale, "stale").unwrap();
+        let blob_stale = tmp_dir.join(".blob.12345.99999");
+        std::fs::write(&blob_stale, "stale blob").unwrap();
+        let cblob_stale = tmp_dir.join(".cblob.12345.99999");
+        std::fs::write(&cblob_stale, "stale cblob").unwrap();
+        let normal = tmp_dir.join("not_a_temp_file");
+        std::fs::write(&normal, "keep me").unwrap();
+
+        // Zero max_age means everything is stale
+        cleanup_stale_temp_files(&blob_root, std::time::Duration::from_secs(0));
+
+        assert!(!stale.exists());
+        assert!(!blob_stale.exists());
+        assert!(!cblob_stale.exists());
+        assert!(normal.exists()); // Not a temp file, should be kept
+    }
+
+    #[test]
+    fn cleanup_stale_temp_files_keeps_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        let tmp_dir = blob_root.join("tmp");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let fresh = tmp_dir.join(".tmp.99999.99999");
+        std::fs::write(&fresh, "fresh").unwrap();
+
+        // Very long max_age — nothing is stale
+        cleanup_stale_temp_files(&blob_root, std::time::Duration::from_secs(999999));
+
+        assert!(fresh.exists());
+    }
+
+    #[test]
+    fn cleanup_stale_temp_files_in_hash_prefix_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        let hash_dir = blob_root.join("ab");
+        std::fs::create_dir_all(&hash_dir).unwrap();
+
+        let stale = hash_dir.join(".tmp.12345.99999");
+        std::fs::write(&stale, "stale").unwrap();
+        let real_blob = hash_dir.join("abcdef1234");
+        std::fs::write(&real_blob, "real blob").unwrap();
+
+        cleanup_stale_temp_files(&blob_root, std::time::Duration::from_secs(0));
+
+        assert!(!stale.exists());
+        assert!(real_blob.exists());
+    }
+
+    // ── blob_disk_usage ──
+
+    #[test]
+    fn blob_disk_usage_returns_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blob_root = tmp.path().join("blobs");
+        std::fs::create_dir_all(&blob_root).unwrap();
+
+        let content = b"disk usage test";
+        let (hash, _) = store_blob(&blob_root, content).unwrap();
+        let blob_path = blob_root.join(&hash[..2]).join(&hash);
+
+        let usage = blob_disk_usage(&blob_path);
+        assert!(usage > 0);
+    }
+
+    #[test]
+    fn blob_disk_usage_nonexistent_returns_zero() {
+        let usage = blob_disk_usage(std::path::Path::new("/nonexistent/blob"));
+        assert_eq!(usage, 0);
+    }
+
+    // ── BlobStorageParams ──
+
+    #[test]
+    fn blob_storage_params_new() {
+        let params = BlobStorageParams::new(100, 200, 300, true, 5);
+        assert_eq!(params.max_copy_blob_bytes, 100);
+        assert_eq!(params.max_binary_blob_bytes, 200);
+        assert_eq!(params.max_text_blob_bytes, 300);
+        assert!(params.compress_enabled);
+        assert_eq!(params.compress_level, 5);
+    }
 }

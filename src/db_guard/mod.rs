@@ -333,3 +333,191 @@ pub fn detect_engine(dsn: &str) -> Option<DbGuardEngine> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── detect_engine ──
+
+    #[test]
+    fn detect_engine_postgres() {
+        assert_eq!(
+            detect_engine("postgres://user:pass@host/db"),
+            Some(DbGuardEngine::Postgres)
+        );
+    }
+
+    #[test]
+    fn detect_engine_postgresql() {
+        assert_eq!(
+            detect_engine("postgresql://user:pass@host/db"),
+            Some(DbGuardEngine::Postgres)
+        );
+    }
+
+    #[test]
+    fn detect_engine_mysql() {
+        assert_eq!(
+            detect_engine("mysql://user:pass@host/db"),
+            Some(DbGuardEngine::Mysql)
+        );
+    }
+
+    #[test]
+    fn detect_engine_sqlite() {
+        assert_eq!(
+            detect_engine("sqlite:///path/to/db"),
+            Some(DbGuardEngine::Sqlite)
+        );
+    }
+
+    #[test]
+    fn detect_engine_unknown() {
+        assert_eq!(detect_engine("oracle://host/db"), None);
+        assert_eq!(detect_engine(""), None);
+        assert_eq!(detect_engine("not a dsn"), None);
+    }
+
+    // ── derive_guard_name_from_dsn ──
+
+    #[test]
+    fn derive_guard_name_strips_scheme() {
+        let name = derive_guard_name_from_dsn("postgres://user:pass@host/db");
+        assert!(!name.contains("postgres://"));
+    }
+
+    #[test]
+    fn derive_guard_name_replaces_special_chars() {
+        let name = derive_guard_name_from_dsn("postgres://user:pass@host:5432/mydb");
+        assert!(!name.contains('/'));
+        assert!(!name.contains(':'));
+        assert!(name.contains('-'));
+    }
+
+    #[test]
+    fn derive_guard_name_truncates_long_dsn() {
+        let long_dsn = format!("postgres://{}", "a".repeat(200));
+        let name = derive_guard_name_from_dsn(&long_dsn);
+        assert!(name.len() <= 64);
+    }
+
+    // ── normalize_guard_mode ──
+
+    #[test]
+    fn normalize_guard_mode_postgres_preserves_mode() {
+        assert_eq!(
+            normalize_guard_mode(DbGuardEngine::Postgres, DbGuardMode::Triggers),
+            DbGuardMode::Triggers
+        );
+        assert_eq!(
+            normalize_guard_mode(DbGuardEngine::Postgres, DbGuardMode::SchemaPolling),
+            DbGuardMode::SchemaPolling
+        );
+    }
+
+    #[test]
+    fn normalize_guard_mode_sqlite_preserves_mode() {
+        assert_eq!(
+            normalize_guard_mode(DbGuardEngine::Sqlite, DbGuardMode::Triggers),
+            DbGuardMode::Triggers
+        );
+    }
+
+    #[test]
+    fn normalize_guard_mode_mysql_forces_schema_polling() {
+        assert_eq!(
+            normalize_guard_mode(DbGuardEngine::Mysql, DbGuardMode::Triggers),
+            DbGuardMode::SchemaPolling
+        );
+        assert_eq!(
+            normalize_guard_mode(DbGuardEngine::Mysql, DbGuardMode::SchemaPolling),
+            DbGuardMode::SchemaPolling
+        );
+    }
+
+    // ── quote_pg_ident ──
+
+    #[test]
+    fn quote_pg_ident_simple() {
+        assert_eq!(quote_pg_ident("users").unwrap(), "\"users\"");
+    }
+
+    #[test]
+    fn quote_pg_ident_dotted() {
+        assert_eq!(
+            quote_pg_ident("public.users").unwrap(),
+            "\"public\".\"users\""
+        );
+    }
+
+    #[test]
+    fn quote_pg_ident_escapes_quotes() {
+        assert_eq!(
+            quote_pg_ident("my\"table").unwrap(),
+            "\"my\"\"table\""
+        );
+    }
+
+    #[test]
+    fn quote_pg_ident_empty_is_error() {
+        assert!(quote_pg_ident("").is_err());
+        assert!(quote_pg_ident("  ").is_err());
+    }
+
+    #[test]
+    fn quote_pg_ident_nul_byte_is_error() {
+        assert!(quote_pg_ident("table\0name").is_err());
+    }
+
+    #[test]
+    fn quote_pg_ident_empty_segment_is_error() {
+        assert!(quote_pg_ident("schema..table").is_err());
+        assert!(quote_pg_ident(".table").is_err());
+        assert!(quote_pg_ident("schema.").is_err());
+    }
+
+    // ── DbGuardSubsystem ──
+
+    #[test]
+    fn db_guard_subsystem_default() {
+        let sub = DbGuardSubsystem::default();
+        assert!(sub.healthy);
+        assert!(sub.last_failure.is_none());
+        assert!(sub.sqlite_versions.is_empty());
+        assert!(sub.mysql_states.is_empty());
+        assert!(sub.shutdown.is_none());
+    }
+
+    #[test]
+    fn db_guard_subsystem_health_check_healthy() {
+        let sub = DbGuardSubsystem::new();
+        match sub.health_check() {
+            SubsystemHealth::Healthy => {}
+            other => panic!("Expected Healthy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn db_guard_subsystem_health_check_degraded() {
+        let mut sub = DbGuardSubsystem::new();
+        sub.healthy = false;
+        sub.last_failure = Some("test failure".to_string());
+        match sub.health_check() {
+            SubsystemHealth::Degraded(msg) => assert_eq!(msg, "test failure"),
+            other => panic!("Expected Degraded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn db_guard_subsystem_health_degraded_default_message() {
+        let mut sub = DbGuardSubsystem::new();
+        sub.healthy = false;
+        match sub.health_check() {
+            SubsystemHealth::Degraded(msg) => {
+                assert!(msg.contains("db guard reported failures"));
+            }
+            other => panic!("Expected Degraded, got {other:?}"),
+        }
+    }
+}
