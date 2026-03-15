@@ -277,11 +277,13 @@ fn test_compression_blob_roundtrip() {
     let (hash2, _size, _method, _disk_bytes) = uhoh::cas::store_blob_from_file(
         &blob_root,
         &test_file,
-        u64::MAX,
-        u64::MAX,
-        u64::MAX,
-        true,
-        3,
+        &uhoh::cas::BlobStorageParams {
+            max_copy_blob_bytes: u64::MAX,
+            max_binary_blob_bytes: u64::MAX,
+            max_text_blob_bytes: u64::MAX,
+            compress_enabled: true,
+            compress_level: 3,
+        },
     )
     .unwrap();
 
