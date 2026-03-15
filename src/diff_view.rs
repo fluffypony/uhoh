@@ -268,7 +268,11 @@ pub fn cmd_diff(
         }
 
         let old_bytes = match old_hash.map(|h| cas::read_blob(&blob_root, h)) {
-            Some(Ok(content)) => content,
+            Some(Ok(Some(content))) => Some(content),
+            Some(Ok(None)) => {
+                tracing::warn!("Old blob missing from store for {path}");
+                None
+            }
             Some(Err(e)) => {
                 tracing::warn!("Failed to read old blob for {path}: {e:#}");
                 None
@@ -291,7 +295,11 @@ pub fn cmd_diff(
             }
         } else {
             match new_hash.map(|h| cas::read_blob(&blob_root, h)) {
-                Some(Ok(content)) => content,
+                Some(Ok(Some(content))) => Some(content),
+                Some(Ok(None)) => {
+                    tracing::warn!("New blob missing from store for {path}");
+                    None
+                }
                 Some(Err(e)) => {
                     tracing::warn!("Failed to read new blob for {path}: {e:#}");
                     None

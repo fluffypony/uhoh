@@ -9,7 +9,9 @@ const MARKER_VERSION: u8 = 1;
 /// Returns the hex-encoded project hash (64 chars).
 pub fn create_marker(project_path: &Path) -> Result<String> {
     let mut id_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut id_bytes);
+    rand::thread_rng()
+        .try_fill_bytes(&mut id_bytes)
+        .map_err(|e| anyhow::anyhow!("RNG failure: {e}"))?;
     let id_hex = hex::encode(id_bytes);
 
     let marker_path = marker_path_for(project_path);
