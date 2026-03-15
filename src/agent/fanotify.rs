@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
-use crate::db::{AgentEntry, LedgerSeverity, LedgerSource};
+use crate::db::{AgentEntry, LedgerEventType, LedgerSeverity, LedgerSource};
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
 use crate::event_ledger::new_event;
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
@@ -113,7 +113,7 @@ impl PendingAuditBatch {
         }
         let mut overflow = new_event(
             LedgerSource::Agent,
-            "fanotify_overflow",
+            LedgerEventType::FanotifyOverflow,
             LedgerSeverity::Warn,
         );
         overflow.detail = Some(format!("dropped={}", self.dropped));
@@ -267,7 +267,7 @@ fn mark_monitor_roots(fan_fd: RawFd, monitor_roots: &[PathBuf]) -> Result<()> {
 fn emit_monitor_started(ctx: &AgentContext, monitor_roots: &[PathBuf]) {
     let mut event = new_event(
         LedgerSource::Agent,
-        "fanotify_monitor_started",
+        LedgerEventType::FanotifyMonitorStarted,
         LedgerSeverity::Info,
     );
     event.detail = Some(format!(
@@ -512,7 +512,7 @@ fn flush_batch(ledger: &EventLedger, batch: &mut VecDeque<PendingAudit>) -> Resu
     while let Some(item) = batch.pop_front() {
         let mut event = new_event(
             LedgerSource::Agent,
-            "fanotify_preimage",
+            LedgerEventType::FanotifyPreimage,
             LedgerSeverity::Info,
         );
         event.path = Some(item.path.display().to_string());

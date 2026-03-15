@@ -24,7 +24,7 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
 
     let mut event = new_event(
         LedgerSource::Agent,
-        "mcp_proxy_started",
+        LedgerEventType::McpProxyStarted,
         LedgerSeverity::Info,
     );
     event.detail = Some(format!("addr={addr}"));
@@ -44,7 +44,7 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
                     .unwrap_or_else(|| "unknown".to_string());
                 let mut event = new_event(
                     LedgerSource::Agent,
-                    "mcp_proxy_client_connected",
+                    LedgerEventType::McpProxyClientConnected,
                     LedgerSeverity::Info,
                 );
                 event.detail = Some(format!("peer={peer}"));
@@ -67,7 +67,7 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
                     {
                         let mut event = new_event(
                             LedgerSource::Agent,
-                            "mcp_proxy_connection_failed",
+                            LedgerEventType::McpProxyConnectionFailed,
                             LedgerSeverity::Warn,
                         );
                         event.detail = Some(format!("peer={addr}, error={e}"));
@@ -82,7 +82,7 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
             Err(e) => {
                 let mut event = new_event(
                     LedgerSource::Agent,
-                    "mcp_proxy_accept_failed",
+                    LedgerEventType::McpProxyAcceptFailed,
                     LedgerSeverity::Warn,
                 );
                 event.detail = Some(e.to_string());
@@ -268,7 +268,7 @@ async fn intercept_tool_call(
             build_approval_response(&ensure_proxy_token(uhoh_dir)?, &approval_id, &challenge);
         let mut danger = new_event(
             LedgerSource::Agent,
-            "dangerous_agent_action",
+            LedgerEventType::DangerousAgentAction,
             LedgerSeverity::Critical,
         );
         danger.path = path.clone();
@@ -319,7 +319,7 @@ async fn intercept_tool_call(
                     // and log a timeout event for audit purposes.
                     let mut timeout_event = new_event(
                         LedgerSource::Agent,
-                        "dangerous_action_timeout",
+                        LedgerEventType::DangerousActionTimeout,
                         LedgerSeverity::Warn,
                     );
                     timeout_event.path = path.clone();
@@ -345,7 +345,7 @@ async fn intercept_tool_call(
                 ApprovalDecision::Denied => {
                     let mut block_event = new_event(
                         LedgerSource::Agent,
-                        "dangerous_action_denied",
+                        LedgerEventType::DangerousActionDenied,
                         LedgerSeverity::Warn,
                     );
                     block_event.path = path.clone();
@@ -565,7 +565,7 @@ async fn wait_for_approval(
             }
             let mut event = new_event(
                 LedgerSource::Agent,
-                "dangerous_action_approved",
+                LedgerEventType::DangerousActionApproved,
                 LedgerSeverity::Info,
             );
             event.detail = Some(

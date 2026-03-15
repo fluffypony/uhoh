@@ -85,7 +85,7 @@ pub fn tick_sqlite_guard(
         }
         let mut baseline_event = new_event(
             LedgerSource::DbGuard,
-            "sqlite_baseline",
+            LedgerEventType::SqliteBaseline,
             LedgerSeverity::Info,
         );
         baseline_event.guard_name = Some(guard.name.clone());

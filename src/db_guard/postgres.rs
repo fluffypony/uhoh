@@ -64,11 +64,11 @@ fn build_postgres_task_runtime() -> Result<tokio::runtime::Runtime> {
 fn emit_recovery_event(
     ctx: &DbGuardContext,
     guard_name: &str,
-    event_type: &str,
+    event_type: LedgerEventType,
     detail: serde_json::Value,
     artifact: &recovery::ArtifactInfo,
 ) {
-    let mut event = new_event(LedgerSource::DbGuard, event_type, LedgerSeverity::Critical);
+    let mut event = new_event(LedgerSource::DbGuard, event_type.clone(), LedgerSeverity::Critical);
     event.guard_name = Some(guard_name.to_string());
     event.detail = Some(detail.to_string());
     event.pre_state_ref = Some(artifact.blake3.clone());
@@ -80,7 +80,7 @@ fn emit_recovery_event(
 fn emit_degraded_event(ctx: &DbGuardContext, guard_name: &str, step: &str, err: &anyhow::Error) {
     let mut event = new_event(
         LedgerSource::DbGuard,
-        "postgres_optional_step_degraded",
+        LedgerEventType::PostgresOptionalStepDegraded,
         LedgerSeverity::Warn,
     );
     event.guard_name = Some(guard_name.to_string());
@@ -180,7 +180,7 @@ fn ensure_postgres_baseline(
     }
     let mut event = new_event(
         LedgerSource::DbGuard,
-        "postgres_baseline",
+        LedgerEventType::PostgresBaseline,
         LedgerSeverity::Info,
     );
     event.guard_name = Some(guard.name.clone());
@@ -316,10 +316,15 @@ fn write_recovery_artifact(
             serde_json::json!(artifact.blake3.clone()),
         );
     }
+    let recovery_event_type = if label == "ddl" {
+        LedgerEventType::DropTable
+    } else {
+        LedgerEventType::from(label)
+    };
     emit_recovery_event(
         ctx,
         &guard.name,
-        if label == "ddl" { "drop_table" } else { label },
+        recovery_event_type,
         event_detail,
         &artifact,
     );
@@ -384,7 +389,7 @@ fn reconcile_wildcard_delete_triggers(
         install_delete_counter_triggers_for_tables(runtime, connection, &added)?;
         let mut event = new_event(
             LedgerSource::DbGuard,
-            "postgres_wildcard_trigger_reconciled",
+            LedgerEventType::PostgresWildcardTriggerReconciled,
             LedgerSeverity::Info,
         );
         event.guard_name = Some(guard.name.clone());

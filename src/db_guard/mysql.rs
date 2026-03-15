@@ -33,7 +33,7 @@ pub fn tick_mysql_guard(
         Err(e) => {
             let mut event = new_event(
                 LedgerSource::DbGuard,
-                "mysql_poll_failed",
+                LedgerEventType::MysqlPollFailed,
                 LedgerSeverity::Warn,
             );
             event.guard_name = Some(guard.name.clone());
@@ -55,10 +55,11 @@ pub fn tick_mysql_guard(
                 .map(|previous| snapshot.table_count < previous)
                 .unwrap_or(false)
             {
-                ("drop_table", LedgerSeverity::Critical)
+                (LedgerEventType::DropTable, LedgerSeverity::Critical)
             } else {
-                ("schema_change", LedgerSeverity::Warn)
+                (LedgerEventType::SchemaChange, LedgerSeverity::Warn)
             };
+            let change_hint = event_type.as_str().to_string();
             let mut event = new_event(LedgerSource::DbGuard, event_type, severity);
             event.guard_name = Some(guard.name.clone());
             event.detail = Some(
@@ -68,7 +69,7 @@ pub fn tick_mysql_guard(
                     "current_schema_hash": schema_hash,
                     "table_count_previous": state.last_table_count,
                     "table_count_current": snapshot.table_count,
-                    "change_hint": event_type,
+                    "change_hint": change_hint,
                     "detected_at": chrono::Utc::now().to_rfc3339(),
                 })
                 .to_string(),
@@ -91,7 +92,7 @@ pub fn tick_mysql_guard(
         {
             let mut event = new_event(
                 LedgerSource::DbGuard,
-                "mass_delete",
+                LedgerEventType::MassDelete,
                 LedgerSeverity::Critical,
             );
             event.guard_name = Some(guard.name.clone());

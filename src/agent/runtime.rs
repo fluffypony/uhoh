@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::{AgentEntry, LedgerSeverity, LedgerSource};
+use crate::db::{AgentEntry, LedgerEventType, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::{AgentContext, AuditSource, Subsystem, SubsystemContext, SubsystemHealth};
 
@@ -100,7 +100,7 @@ impl AgentSubsystem {
             }
             let mut event = new_event(
                 LedgerSource::Agent,
-                "agent_registered",
+                LedgerEventType::AgentRegistered,
                 LedgerSeverity::Info,
             );
             event.agent_name = Some(agent.name.clone());
@@ -380,7 +380,7 @@ impl AgentSubsystem {
     fn handle_fanotify_failure(&mut self, ctx: &AgentContext, message: String) {
         let mut event = new_event(
             LedgerSource::Agent,
-            "fanotify_monitor_degraded",
+            LedgerEventType::FanotifyMonitorDegraded,
             LedgerSeverity::Warn,
         );
         event.detail = Some(message.clone());

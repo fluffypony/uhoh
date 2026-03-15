@@ -14,7 +14,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::{DbGuardEngine, DbGuardEntry, DbGuardMode, LedgerSeverity, LedgerSource};
+use crate::db::{DbGuardEngine, DbGuardEntry, DbGuardMode, LedgerEventType, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::{DbGuardContext, Subsystem, SubsystemContext, SubsystemHealth};
 
@@ -108,7 +108,7 @@ impl Subsystem for DbGuardSubsystem {
                         if !last_guard_names.contains(&guard.name) {
                             let mut event = new_event(
                                 LedgerSource::DbGuard,
-                                "guard_started",
+                                LedgerEventType::GuardStarted,
                                 LedgerSeverity::Info,
                             );
                             event.guard_name = Some(guard.name.clone());
@@ -239,7 +239,7 @@ impl DbGuardSubsystem {
             if guard.mode != effective_mode {
                 let mut event = new_event(
                     LedgerSource::DbGuard,
-                    "guard_mode_normalized",
+                    LedgerEventType::GuardModeNormalized,
                     LedgerSeverity::Info,
                 );
                 event.guard_name = Some(guard.name.clone());
@@ -294,7 +294,7 @@ impl DbGuardSubsystem {
 
         let mut event = new_event(
             LedgerSource::DbGuard,
-            "guard_tick_failed",
+            LedgerEventType::GuardTickFailed,
             LedgerSeverity::Warn,
         );
         event.guard_name = Some(guard.name.clone());
