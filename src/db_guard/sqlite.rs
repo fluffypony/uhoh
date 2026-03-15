@@ -115,3 +115,34 @@ fn normalize_sqlite_path(connection_ref: &str) -> String {
         connection_ref.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_sqlite_path_strips_scheme() {
+        assert_eq!(
+            normalize_sqlite_path("sqlite:///var/db/app.db"),
+            "/var/db/app.db"
+        );
+    }
+
+    #[test]
+    fn normalize_sqlite_path_no_scheme() {
+        assert_eq!(
+            normalize_sqlite_path("/var/db/app.db"),
+            "/var/db/app.db"
+        );
+    }
+
+    #[test]
+    fn normalize_sqlite_path_relative() {
+        assert_eq!(normalize_sqlite_path("data/test.db"), "data/test.db");
+    }
+
+    #[test]
+    fn normalize_sqlite_path_just_scheme() {
+        assert_eq!(normalize_sqlite_path("sqlite://"), "");
+    }
+}

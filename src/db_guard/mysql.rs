@@ -318,3 +318,58 @@ fn resolve_mysql_env_credentials() -> Option<CredentialMaterial> {
         password: password.filter(|v| !v.trim().is_empty()),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_mysql_ref_full_url() {
+        let parsed = parse_mysql_ref("mysql://admin:secret@db.example.com:3307/mydb").unwrap();
+        assert_eq!(parsed.host, "db.example.com");
+        assert_eq!(parsed.port, 3307);
+        assert_eq!(parsed.user.as_deref(), Some("admin"));
+        assert_eq!(parsed.password.as_deref(), Some("secret"));
+        assert_eq!(parsed.database.as_deref(), Some("mydb"));
+    }
+
+    #[test]
+    fn parse_mysql_ref_default_port() {
+        let parsed = parse_mysql_ref("mysql://user@localhost/test").unwrap();
+        assert_eq!(parsed.port, 3306);
+        assert_eq!(parsed.host, "localhost");
+    }
+
+    #[test]
+    fn parse_mysql_ref_no_user_password() {
+        let parsed = parse_mysql_ref("mysql://localhost/db").unwrap();
+        assert!(parsed.user.is_none());
+        assert!(parsed.password.is_none());
+    }
+
+    #[test]
+    fn parse_mysql_ref_no_database() {
+        let parsed = parse_mysql_ref("mysql://localhost").unwrap();
+        assert!(parsed.database.is_none());
+    }
+
+    #[test]
+    fn parse_mysql_ref_wrong_scheme() {
+        let result = parse_mysql_ref("postgres://localhost/db");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_mysql_ref_invalid_url() {
+        let result = parse_mysql_ref("not a url at all");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mysql_guard_state_default() {
+        let state = MysqlGuardState::default();
+        assert!(state.last_schema_hash.is_none());
+        assert!(state.last_row_total.is_none());
+        assert!(state.last_table_count.is_none());
+    }
+}

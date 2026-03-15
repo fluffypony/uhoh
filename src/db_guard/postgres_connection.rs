@@ -244,6 +244,89 @@ fn extract_sslmode(connection_ref: &str) -> Option<&'static str> {
     None
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── extract_sslmode ──
+
+    #[test]
+    fn extract_sslmode_from_url_require() {
+        let mode = extract_sslmode("postgres://host/db?sslmode=require");
+        assert_eq!(mode, Some("require"));
+    }
+
+    #[test]
+    fn extract_sslmode_from_url_verify_ca() {
+        let mode = extract_sslmode("postgres://host/db?sslmode=verify-ca");
+        assert_eq!(mode, Some("verify-ca"));
+    }
+
+    #[test]
+    fn extract_sslmode_from_url_verify_full() {
+        let mode = extract_sslmode("postgres://host/db?sslmode=verify-full");
+        assert_eq!(mode, Some("verify-full"));
+    }
+
+    #[test]
+    fn extract_sslmode_case_insensitive() {
+        let mode = extract_sslmode("postgres://host/db?SSLMODE=Verify-Full");
+        assert_eq!(mode, Some("verify-full"));
+    }
+
+    #[test]
+    fn extract_sslmode_from_url_disable() {
+        // Unknown modes default to "require"
+        let mode = extract_sslmode("postgres://host/db?sslmode=disable");
+        assert_eq!(mode, Some("require"));
+    }
+
+    #[test]
+    fn extract_sslmode_no_param() {
+        let mode = extract_sslmode("postgres://host/db");
+        assert_eq!(mode, None);
+    }
+
+    #[test]
+    fn extract_sslmode_from_dsn_string() {
+        let mode = extract_sslmode("host=localhost dbname=test sslmode=verify-ca");
+        assert_eq!(mode, Some("verify-ca"));
+    }
+
+    #[test]
+    fn extract_sslmode_dsn_quoted() {
+        let mode = extract_sslmode("host=localhost sslmode='verify-full'");
+        assert_eq!(mode, Some("verify-full"));
+    }
+
+    // ── connection_requires_tls ──
+
+    #[test]
+    fn connection_requires_tls_with_require() {
+        assert!(connection_requires_tls("postgres://host/db?sslmode=require"));
+    }
+
+    #[test]
+    fn connection_requires_tls_with_verify_full() {
+        assert!(connection_requires_tls("postgres://host/db?sslmode=verify-full"));
+    }
+
+    #[test]
+    fn connection_requires_tls_without_sslmode() {
+        assert!(!connection_requires_tls("postgres://host/db"));
+    }
+
+    #[test]
+    fn connection_requires_tls_with_disable() {
+        assert!(!connection_requires_tls("postgres://host/db?sslmode=disable"));
+    }
+
+    #[test]
+    fn connection_requires_tls_dsn_format() {
+        assert!(connection_requires_tls("host=localhost sslmode=require"));
+    }
+}
+
 fn connection_requires_tls(connection_ref: &str) -> bool {
     if let Ok(url) = url::Url::parse(connection_ref) {
         if matches!(url.scheme(), "postgres" | "postgresql") {
