@@ -532,22 +532,24 @@ pub fn cleanup_stale_temp_files(blob_root: &Path, max_age: std::time::Duration) 
     };
 
     let cleanup_dir = |dir: &Path| {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if is_temp_file(name) {
-                        if let Ok(meta) = std::fs::metadata(&path) {
-                            if let Ok(mtime) = meta.modified() {
-                                if let Ok(age) = now.duration_since(mtime) {
-                                    if age > max_age {
-                                        let _ = std::fs::remove_file(&path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !is_temp_file(name) {
+                continue;
+            }
+            let is_stale = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .is_some_and(|age| age > max_age);
+            if is_stale {
+                let _ = std::fs::remove_file(&path);
             }
         }
     };

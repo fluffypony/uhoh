@@ -20,10 +20,7 @@ pub fn compact_project(
     let emergency_retention = Duration::hours(config.emergency_expire_hours as i64);
 
     // Track occupied buckets for O(1) dominance checking
-    let mut buckets_5min: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut buckets_hourly: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut buckets_daily: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut buckets_weekly: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut buckets = CompactionBuckets::default();
 
     // Predecessor protection: protect the snapshot immediately preceding any
     // retained emergency snapshot. This ensures the pre-deletion state survives
@@ -53,25 +50,13 @@ pub fn compact_project(
     for snapshot in &snapshots {
         // Pinned snapshots: always keep
         if snapshot.pinned {
-            register_in_buckets(
-                snapshot,
-                &mut buckets_5min,
-                &mut buckets_hourly,
-                &mut buckets_daily,
-                &mut buckets_weekly,
-            );
+            buckets.register(snapshot);
             continue;
         }
 
         // Protected predecessors of retained emergency snapshots: always keep
         if protected_predecessors.contains(&snapshot.rowid) {
-            register_in_buckets(
-                snapshot,
-                &mut buckets_5min,
-                &mut buckets_hourly,
-                &mut buckets_daily,
-                &mut buckets_weekly,
-            );
+            buckets.register(snapshot);
             continue;
         }
 
@@ -82,54 +67,36 @@ pub fn compact_project(
         // Emergency snapshots are immune to bucket-deduplication pruning within
         // the configured retention window.
         if snapshot.trigger == SnapshotTrigger::Emergency && age < emergency_retention {
-            register_in_buckets(
-                snapshot,
-                &mut buckets_5min,
-                &mut buckets_hourly,
-                &mut buckets_daily,
-                &mut buckets_weekly,
-            );
+            buckets.register(snapshot);
             continue;
             // After retention window expires, fall through to normal bucket logic
         }
 
         // Keep everything within keep_all_minutes
         if age < Duration::minutes(config.keep_all_minutes as i64) {
-            register_in_buckets(
-                snapshot,
-                &mut buckets_5min,
-                &mut buckets_hourly,
-                &mut buckets_daily,
-                &mut buckets_weekly,
-            );
+            buckets.register(snapshot);
             continue;
         }
 
         // Manual commits with messages are always retained (like pinned snapshots).
         // They represent explicit user saves and should never be pruned by bucket dedup.
         if snapshot.trigger == SnapshotTrigger::Manual && !snapshot.message.is_empty() {
-            register_in_buckets(
-                snapshot,
-                &mut buckets_5min,
-                &mut buckets_hourly,
-                &mut buckets_daily,
-                &mut buckets_weekly,
-            );
+            buckets.register(snapshot);
             continue;
         }
 
         let dominated = if age < Duration::days(config.keep_5min_days as i64) {
             let bucket = ts.timestamp().div_euclid(300);
-            !buckets_5min.insert(bucket)
+            !buckets.five_min.insert(bucket)
         } else if age < Duration::days(config.keep_hourly_days as i64) {
             let bucket = ts.timestamp().div_euclid(3600);
-            !buckets_hourly.insert(bucket)
+            !buckets.hourly.insert(bucket)
         } else if age < Duration::days(config.keep_daily_days as i64) {
             let bucket = ts.timestamp().div_euclid(86400);
-            !buckets_daily.insert(bucket)
+            !buckets.daily.insert(bucket)
         } else if config.keep_weekly_beyond {
             let bucket = ts.timestamp().div_euclid(604800);
-            !buckets_weekly.insert(bucket)
+            !buckets.weekly.insert(bucket)
         } else {
             true // No weekly retention: drop everything older
         };
@@ -145,19 +112,23 @@ pub fn compact_project(
 
     Ok(freed_bytes)
 }
-fn register_in_buckets(
-    snapshot: &SnapshotRow,
-    b5: &mut std::collections::HashSet<i64>,
-    bh: &mut std::collections::HashSet<i64>,
-    bd: &mut std::collections::HashSet<i64>,
-    bw: &mut std::collections::HashSet<i64>,
-) {
-    let ts = parse_timestamp(&snapshot.timestamp)
-        .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
-    b5.insert(ts.timestamp().div_euclid(300));
-    bh.insert(ts.timestamp().div_euclid(3600));
-    bd.insert(ts.timestamp().div_euclid(86400));
-    bw.insert(ts.timestamp().div_euclid(604800));
+#[derive(Default)]
+struct CompactionBuckets {
+    five_min: std::collections::HashSet<i64>,
+    hourly: std::collections::HashSet<i64>,
+    daily: std::collections::HashSet<i64>,
+    weekly: std::collections::HashSet<i64>,
+}
+
+impl CompactionBuckets {
+    fn register(&mut self, snapshot: &SnapshotRow) {
+        let ts = parse_timestamp(&snapshot.timestamp)
+            .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
+        self.five_min.insert(ts.timestamp().div_euclid(300));
+        self.hourly.insert(ts.timestamp().div_euclid(3600));
+        self.daily.insert(ts.timestamp().div_euclid(86400));
+        self.weekly.insert(ts.timestamp().div_euclid(604800));
+    }
 }
 
 fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {

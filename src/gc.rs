@@ -41,34 +41,39 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
                 continue;
             }
 
-            if !referenced.contains(name_str.as_ref()) {
-                // Check grace period
-                if let Ok(meta) = blob_entry.metadata() {
-                    if let Ok(modified) = meta.modified() {
-                        if let Ok(age) = modified.elapsed() {
-                            if age < grace_period {
-                                continue; // Too young, might be in-progress
-                            }
-                        }
-                    }
-                    // Hardlink-aware approximate usage: divide by link count if >1 (Unix only)
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        let usage = if meta.nlink() > 1 {
-                            meta.len() / meta.nlink()
-                        } else {
-                            meta.len()
-                        };
-                        total_size += usage;
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        total_size += meta.len();
-                    }
-                }
-                orphaned.push(blob_entry.path());
+            if referenced.contains(name_str.as_ref()) {
+                continue;
             }
+
+            // Check grace period — skip blobs that may still be in-progress
+            let within_grace = blob_entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < grace_period);
+            if within_grace {
+                continue;
+            }
+
+            if let Ok(meta) = blob_entry.metadata() {
+                // Hardlink-aware approximate usage: divide by link count if >1 (Unix only)
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let usage = if meta.nlink() > 1 {
+                        meta.len() / meta.nlink()
+                    } else {
+                        meta.len()
+                    };
+                    total_size += usage;
+                }
+                #[cfg(not(unix))]
+                {
+                    total_size += meta.len();
+                }
+            }
+            orphaned.push(blob_entry.path());
         }
     }
 
