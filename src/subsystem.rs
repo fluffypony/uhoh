@@ -105,6 +105,15 @@ impl SubsystemManager {
         self.shutdown.clone()
     }
 
+    /// Collect cloned references to each subsystem so callers can release the
+    /// manager lock before iterating individual subsystems.
+    pub fn subsystem_refs(&self) -> Vec<(String, Arc<Mutex<Box<dyn Subsystem>>>)> {
+        self.runners
+            .iter()
+            .map(|r| (r.name.clone(), Arc::clone(&r.subsystem)))
+            .collect()
+    }
+
     pub async fn health_snapshot(&self) -> Vec<(String, SubsystemHealth)> {
         let mut out = Vec::with_capacity(self.runners.len());
         for runner in &self.runners {

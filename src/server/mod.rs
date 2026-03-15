@@ -254,12 +254,18 @@ fn build_app(
 }
 
 async fn health_check(State(state): State<HealthState>) -> axum::Json<serde_json::Value> {
-    // Acquire the manager lock, take the snapshot, and drop the lock before
-    // doing any further processing to avoid holding it across awaits.
-    let snapshot = {
+    // Grab cloned Arc refs to each subsystem, then drop the manager lock
+    // immediately so it is never held across the per-subsystem awaits below.
+    let refs = {
         let manager = state.subsystem_manager.lock().await;
-        manager.health_snapshot().await
+        manager.subsystem_refs()
     };
+
+    let mut snapshot = Vec::with_capacity(refs.len());
+    for (name, subsystem) in &refs {
+        let guard = subsystem.lock().await;
+        snapshot.push((name.clone(), guard.health_check()));
+    }
 
     let subsystems = snapshot
         .into_iter()
