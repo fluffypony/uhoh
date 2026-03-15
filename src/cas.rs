@@ -126,16 +126,21 @@ pub fn store_symlink_target(blob_root: &Path, abs_path: &Path) -> Result<(String
     Ok((hash, size, bytes_written))
 }
 
+/// Configuration for blob storage size limits and compression.
+pub struct BlobStorageParams {
+    pub max_copy_blob_bytes: u64,
+    pub max_binary_blob_bytes: u64,
+    pub max_text_blob_bytes: u64,
+    pub compress_enabled: bool,
+    pub compress_level: i32,
+}
+
 /// Store a blob from a file path using single-pass streaming hash+write.
 /// Returns (hash, size, storage_method, bytes_on_disk).
 pub fn store_blob_from_file(
     blob_root: &Path,
     file_path: &Path,
-    max_copy_blob_bytes: u64,
-    max_binary_blob_bytes: u64,
-    max_text_blob_bytes: u64,
-    #[allow(unused_variables)] compress_enabled: bool,
-    #[allow(unused_variables)] compress_level: i32,
+    params: &BlobStorageParams,
 ) -> Result<(String, u64, StorageMethod, u64)> {
     let metadata = std::fs::symlink_metadata(file_path)
         .with_context(|| format!("Cannot stat: {}", file_path.display()))?;
@@ -155,11 +160,11 @@ pub fn store_blob_from_file(
     }
     let is_binary = !first_chunk.is_empty() && content_inspector::inspect(&first_chunk).is_binary();
     let cfg_limit = if is_binary {
-        max_binary_blob_bytes
+        params.max_binary_blob_bytes
     } else {
-        max_text_blob_bytes
+        params.max_text_blob_bytes
     };
-    let effective_limit = std::cmp::min(cfg_limit, max_copy_blob_bytes);
+    let effective_limit = std::cmp::min(cfg_limit, params.max_copy_blob_bytes);
 
     if file_size > effective_limit {
         loop {
@@ -180,7 +185,7 @@ pub fn store_blob_from_file(
     }
 
     #[cfg(feature = "compression")]
-    let do_compress = compress_enabled;
+    let do_compress = params.compress_enabled;
     #[cfg(not(feature = "compression"))]
     let do_compress = false;
 
@@ -262,8 +267,8 @@ pub fn store_blob_from_file(
     let bytes_on_disk: u64 = if do_compress {
         #[cfg(feature = "compression")]
         {
-            let level = if (1..=22).contains(&compress_level) {
-                compress_level
+            let level = if (1..=22).contains(&params.compress_level) {
+                params.compress_level
             } else {
                 3
             };
