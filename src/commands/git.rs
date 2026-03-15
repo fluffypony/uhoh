@@ -75,7 +75,11 @@ pub fn cmd_gitstash(
             .spawn()
             .and_then(|mut child| {
                 use std::io::Write;
-                child.stdin.take().unwrap().write_all(&content)?;
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin was set to piped")
+                    .write_all(&content)?;
                 child.wait_with_output()
             })
             .context("Failed to create git blob")?;

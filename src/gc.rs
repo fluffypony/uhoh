@@ -92,7 +92,7 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
     bar.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{bar:40}] {pos}/{len} blobs removed")
-            .unwrap(),
+            .expect("valid progress bar template"),
     );
 
     for path in &orphaned {
