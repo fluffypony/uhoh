@@ -747,3 +747,96 @@ pub(crate) async fn get_timeline(
         Err(e) => internal_error_response(e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cas::StorageMethod;
+
+    fn make_file_entry(path: &str, hash: &str, size: u64) -> crate::db::FileEntryRow {
+        crate::db::FileEntryRow {
+            path: path.to_string(),
+            hash: hash.to_string(),
+            size,
+            stored: true,
+            executable: false,
+            mtime: None,
+            storage_method: StorageMethod::Copy,
+            is_symlink: false,
+        }
+    }
+
+    #[test]
+    fn build_file_tree_single_file() {
+        let files = vec![make_file_entry("main.rs", "abc123", 100)];
+        let tree = build_file_tree(&files);
+        let arr = tree.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "file");
+        assert_eq!(arr[0]["name"], "main.rs");
+        assert_eq!(arr[0]["size"], 100);
+    }
+
+    #[test]
+    fn build_file_tree_nested_file() {
+        let files = vec![make_file_entry("src/lib.rs", "def456", 200)];
+        let tree = build_file_tree(&files);
+        let arr = tree.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "directory");
+        assert_eq!(arr[0]["name"], "src");
+        let children = arr[0]["children"].as_array().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0]["name"], "lib.rs");
+    }
+
+    #[test]
+    fn build_file_tree_multiple_files_same_dir() {
+        let files = vec![
+            make_file_entry("src/a.rs", "h1", 10),
+            make_file_entry("src/b.rs", "h2", 20),
+        ];
+        let tree = build_file_tree(&files);
+        let arr = tree.as_array().unwrap();
+        assert_eq!(arr.len(), 1); // single "src" directory
+        let children = arr[0]["children"].as_array().unwrap();
+        assert_eq!(children.len(), 2);
+    }
+
+    #[test]
+    fn build_file_tree_deeply_nested() {
+        let files = vec![make_file_entry("a/b/c/deep.rs", "h", 5)];
+        let tree = build_file_tree(&files);
+        let arr = tree.as_array().unwrap();
+        assert_eq!(arr[0]["type"], "directory");
+        assert_eq!(arr[0]["name"], "a");
+    }
+
+    #[test]
+    fn build_file_tree_empty() {
+        let files: Vec<crate::db::FileEntryRow> = vec![];
+        let tree = build_file_tree(&files);
+        assert_eq!(tree.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn build_file_tree_symlink_flag() {
+        let mut entry = make_file_entry("link.txt", "h", 0);
+        entry.is_symlink = true;
+        let tree = build_file_tree(&[entry]);
+        let arr = tree.as_array().unwrap();
+        assert_eq!(arr[0]["is_symlink"], true);
+    }
+
+    #[test]
+    fn build_file_tree_sorted_alphabetically() {
+        let files = vec![
+            make_file_entry("z.rs", "h1", 10),
+            make_file_entry("a.rs", "h2", 20),
+        ];
+        let tree = build_file_tree(&files);
+        let arr = tree.as_array().unwrap();
+        assert_eq!(arr[0]["name"], "a.rs");
+        assert_eq!(arr[1]["name"], "z.rs");
+    }
+}

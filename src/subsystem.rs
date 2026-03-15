@@ -194,6 +194,54 @@ impl SubsystemManager {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subsystem_manager_new_has_empty_runners() {
+        let mgr = SubsystemManager::new(5, Duration::from_secs(60));
+        assert!(mgr.subsystem_refs().is_empty());
+        assert_eq!(mgr.max_restarts, 5);
+        assert_eq!(mgr.restart_window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn subsystem_manager_shutdown_token_cloneable() {
+        let mgr = SubsystemManager::new(3, Duration::from_secs(30));
+        let t1 = mgr.shutdown_token();
+        let t2 = mgr.shutdown_token();
+        assert!(!t1.is_cancelled());
+        assert!(!t2.is_cancelled());
+    }
+
+    #[test]
+    fn audit_source_debug() {
+        let none = AuditSource::None;
+        let fan = AuditSource::Fanotify;
+        assert_eq!(format!("{none:?}"), "None");
+        assert_eq!(format!("{fan:?}"), "Fanotify");
+    }
+
+    #[test]
+    fn subsystem_health_variants() {
+        let healthy = SubsystemHealth::Healthy;
+        let degraded = SubsystemHealth::Degraded("msg".to_string());
+        let failed = SubsystemHealth::Failed("fatal".to_string());
+        let healthy_audit = SubsystemHealth::HealthyWithAudit(AuditSource::Fanotify);
+        let degraded_audit = SubsystemHealth::DegradedWithAudit {
+            message: "issues".to_string(),
+            source: AuditSource::None,
+        };
+        // Just verify all variants construct without panic
+        assert!(format!("{healthy:?}").contains("Healthy"));
+        assert!(format!("{degraded:?}").contains("msg"));
+        assert!(format!("{failed:?}").contains("fatal"));
+        assert!(format!("{healthy_audit:?}").contains("Fanotify"));
+        assert!(format!("{degraded_audit:?}").contains("issues"));
+    }
+}
+
 fn start_runner_task(
     runner: &mut SubsystemRunner,
     shutdown: CancellationToken,

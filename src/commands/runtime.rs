@@ -578,3 +578,57 @@ async fn verify_install() -> Result<()> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_toml_value_true() {
+        let v = parse_toml_value("true");
+        assert_eq!(v.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn parse_toml_value_false_case_insensitive() {
+        let v = parse_toml_value("FALSE");
+        assert_eq!(v.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn parse_toml_value_integer() {
+        let v = parse_toml_value("42");
+        assert_eq!(v.as_integer(), Some(42));
+    }
+
+    #[test]
+    fn parse_toml_value_negative_integer() {
+        let v = parse_toml_value("-10");
+        assert_eq!(v.as_integer(), Some(-10));
+    }
+
+    #[test]
+    fn parse_toml_value_float() {
+        let v = parse_toml_value("3.14");
+        let f = v.as_float().unwrap();
+        assert!((f - 3.14).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_toml_value_string() {
+        let v = parse_toml_value("hello world");
+        assert_eq!(v.as_str(), Some("hello world"));
+    }
+
+    #[test]
+    fn parse_toml_value_empty_string() {
+        let v = parse_toml_value("");
+        assert_eq!(v.as_str(), Some(""));
+    }
+
+    #[test]
+    fn parse_toml_value_zero() {
+        let v = parse_toml_value("0");
+        assert_eq!(v.as_integer(), Some(0));
+    }
+}

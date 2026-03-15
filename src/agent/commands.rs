@@ -233,3 +233,117 @@ fn extract_detail_field(detail: &str, key: &str) -> Option<String> {
         .and_then(|value| value.as_str())
         .map(str::to_string)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_session_id_valid_json() {
+        let detail = r#"{"session_id": "sess-123", "tool": "write"}"#;
+        assert_eq!(extract_session_id(detail), Some("sess-123".to_string()));
+    }
+
+    #[test]
+    fn extract_session_id_missing_key() {
+        let detail = r#"{"tool": "read"}"#;
+        assert_eq!(extract_session_id(detail), None);
+    }
+
+    #[test]
+    fn extract_session_id_not_json() {
+        assert_eq!(extract_session_id("plain text"), None);
+    }
+
+    #[test]
+    fn extract_session_id_empty() {
+        assert_eq!(extract_session_id(""), None);
+    }
+
+    #[test]
+    fn extract_detail_field_valid() {
+        let detail = r#"{"tool": "write", "path": "/tmp/file.rs"}"#;
+        assert_eq!(
+            extract_detail_field(detail, "tool"),
+            Some("write".to_string())
+        );
+        assert_eq!(
+            extract_detail_field(detail, "path"),
+            Some("/tmp/file.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_detail_field_missing() {
+        let detail = r#"{"tool": "read"}"#;
+        assert_eq!(extract_detail_field(detail, "nonexistent"), None);
+    }
+
+    #[test]
+    fn extract_detail_field_not_json() {
+        assert_eq!(extract_detail_field("not json", "key"), None);
+    }
+
+    #[test]
+    fn session_matches_event_matching() {
+        let entry = crate::db::EventLedgerEntry {
+            id: 1,
+            ts: String::new(),
+            source: crate::db::LedgerSource::Agent,
+            event_type: crate::db::LedgerEventType::SessionToolCall,
+            severity: crate::db::LedgerSeverity::Info,
+            project_hash: None,
+            agent_name: None,
+            guard_name: None,
+            path: None,
+            detail: Some(r#"{"session_id": "abc"}"#.to_string()),
+            pre_state_ref: None,
+            post_state_ref: None,
+            causal_parent: None,
+            resolved: false,
+        };
+        assert!(session_matches_event(&entry, "abc"));
+    }
+
+    #[test]
+    fn session_matches_event_not_matching() {
+        let entry = crate::db::EventLedgerEntry {
+            id: 1,
+            ts: String::new(),
+            source: crate::db::LedgerSource::Agent,
+            event_type: crate::db::LedgerEventType::SessionToolCall,
+            severity: crate::db::LedgerSeverity::Info,
+            project_hash: None,
+            agent_name: None,
+            guard_name: None,
+            path: None,
+            detail: Some(r#"{"session_id": "abc"}"#.to_string()),
+            pre_state_ref: None,
+            post_state_ref: None,
+            causal_parent: None,
+            resolved: false,
+        };
+        assert!(!session_matches_event(&entry, "xyz"));
+    }
+
+    #[test]
+    fn session_matches_event_no_detail() {
+        let entry = crate::db::EventLedgerEntry {
+            id: 1,
+            ts: String::new(),
+            source: crate::db::LedgerSource::Agent,
+            event_type: crate::db::LedgerEventType::SessionToolCall,
+            severity: crate::db::LedgerSeverity::Info,
+            project_hash: None,
+            agent_name: None,
+            guard_name: None,
+            path: None,
+            detail: None,
+            pre_state_ref: None,
+            post_state_ref: None,
+            causal_parent: None,
+            resolved: false,
+        };
+        assert!(!session_matches_event(&entry, "abc"));
+    }
+}
