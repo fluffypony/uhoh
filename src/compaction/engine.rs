@@ -271,6 +271,9 @@ mod tests {
         (tmp, db)
     }
 
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_SNAPSHOT_ID: AtomicU64 = AtomicU64::new(1);
+
     fn insert_snapshot(
         db: &Database,
         timestamp: &str,
@@ -278,9 +281,10 @@ mod tests {
         pinned: bool,
         message: &str,
     ) {
+        let id = NEXT_SNAPSHOT_ID.fetch_add(1, Ordering::Relaxed);
         db.create_snapshot(crate::db::CreateSnapshotRow::new(
             "proj1",
-            0,
+            id,
             timestamp,
             trigger,
             message,
@@ -327,18 +331,21 @@ mod tests {
         let now = Utc::now();
         // Insert two snapshots 1 minute apart (same 5-min bucket)
         // Both within keep_5min_days range (14 days)
-        let ts1 = (now - Duration::hours(2)).to_rfc3339();
-        let ts2 = (now - Duration::hours(2) - Duration::minutes(1)).to_rfc3339();
-        insert_snapshot(&db, &ts1, SnapshotTrigger::Auto, false, "");
-        insert_snapshot(&db, &ts2, SnapshotTrigger::Auto, false, "");
+        // Insert older one first (lower snapshot_id) then newer one (higher snapshot_id)
+        // so that when sorted by snapshot_id DESC, the newer one claims the bucket.
+        let ts_older = (now - Duration::hours(2) - Duration::minutes(1)).to_rfc3339();
+        let ts_newer = (now - Duration::hours(2)).to_rfc3339();
+        insert_snapshot(&db, &ts_older, SnapshotTrigger::Auto, false, "");
+        insert_snapshot(&db, &ts_newer, SnapshotTrigger::Auto, false, "");
 
         let before = db.list_snapshots("proj1").unwrap().len();
+        assert_eq!(before, 2, "Should have 2 snapshots before compaction");
         compact_project(&db, "proj1", &config).unwrap();
         let after = db.list_snapshots("proj1").unwrap().len();
 
         assert!(
             after < before,
-            "Dominated snapshot in same 5-min bucket should be pruned"
+            "Dominated snapshot in same 5-min bucket should be pruned (before={before}, after={after})"
         );
     }
 
