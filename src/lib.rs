@@ -26,7 +26,7 @@ pub mod restore;
 pub(crate) mod runtime_bundle;
 pub(crate) mod server;
 pub mod snapshot;
-pub mod storage;
+pub mod compaction;
 pub mod subsystem;
 pub(crate) mod update;
 
