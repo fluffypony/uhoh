@@ -826,42 +826,37 @@ fn schedule_ai_summary(
     let runtime = ctx.runtime.clone();
     let project_hash = ctx.project_hash.to_string();
     let blob_root = ctx.uhoh_dir.join("blobs");
-    let mut changes = Vec::with_capacity(current_files.len() + deleted_for_manifest.len());
-
-    for file in current_files {
-        let previous =
+    let changes = crate::ai::build_diff_entries(
+        current_files.iter().map(|f| {
+            (
+                f.path.as_str(),
+                crate::ai::SummaryBlobRef {
+                    hash: &f.hash,
+                    stored: f.stored,
+                    size: f.size,
+                },
+            )
+        }),
+        deleted_for_manifest.iter().map(|d| {
+            (
+                d.path.as_str(),
+                crate::ai::SummaryBlobRef {
+                    hash: &d.hash,
+                    stored: d.stored,
+                    size: d.size,
+                },
+            )
+        }),
+        |path| {
             ctx.prev_files
-                .get(&file.path)
-                .map(|previous| crate::ai::SummaryBlobRef {
-                    hash: &previous.hash,
-                    stored: previous.stored,
-                    size: previous.size,
-                });
-        let current = Some(crate::ai::SummaryBlobRef {
-            hash: &file.hash,
-            stored: file.stored,
-            size: file.size,
-        });
-        if previous.is_none() || previous.is_some_and(|previous| previous.hash != file.hash) {
-            changes.push(crate::ai::SummaryDiffEntry {
-                path: &file.path,
-                previous,
-                current,
-            });
-        }
-    }
-
-    for entry in deleted_for_manifest {
-        changes.push(crate::ai::SummaryDiffEntry {
-            path: &entry.path,
-            previous: Some(crate::ai::SummaryBlobRef {
-                hash: &entry.hash,
-                stored: entry.stored,
-                size: entry.size,
-            }),
-            current: None,
-        });
-    }
+                .get(path)
+                .map(|prev| crate::ai::SummaryBlobRef {
+                    hash: &prev.hash,
+                    stored: prev.stored,
+                    size: prev.size,
+                })
+        },
+    );
 
     let prepared =
         crate::ai::prepare_summary_inputs(&blob_root, &runtime.settings().ai, &changes);

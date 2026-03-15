@@ -72,6 +72,45 @@ pub fn append_diff_chunk(
     *truncated = true;
 }
 
+/// Build a list of [`SummaryDiffEntry`] values from current and deleted file
+/// iterators with a previous-version lookup function.
+///
+/// This is the shared implementation used by both inline snapshot creation
+/// (`snapshot.rs`) and the deferred AI summary queue (`ai/queue.rs`).
+pub fn build_diff_entries<'a, C, D, F>(
+    current_files: C,
+    deleted_files: D,
+    prev_lookup: F,
+) -> Vec<SummaryDiffEntry<'a>>
+where
+    C: IntoIterator<Item = (&'a str, SummaryBlobRef<'a>)>,
+    D: IntoIterator<Item = (&'a str, SummaryBlobRef<'a>)>,
+    F: Fn(&str) -> Option<SummaryBlobRef<'a>>,
+{
+    let mut changes = Vec::new();
+
+    for (path, current_ref) in current_files {
+        let previous = prev_lookup(path);
+        if previous.is_none() || previous.is_some_and(|prev| prev.hash != current_ref.hash) {
+            changes.push(SummaryDiffEntry {
+                path,
+                previous,
+                current: Some(current_ref),
+            });
+        }
+    }
+
+    for (path, prev_ref) in deleted_files {
+        changes.push(SummaryDiffEntry {
+            path,
+            previous: Some(prev_ref),
+            current: None,
+        });
+    }
+
+    changes
+}
+
 pub fn prepare_summary_inputs(
     blob_root: &Path,
     ai_config: &AiConfig,

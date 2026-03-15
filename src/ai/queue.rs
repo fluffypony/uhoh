@@ -128,47 +128,42 @@ fn build_summary_inputs(
     this_files: &[crate::db::FileEntryRow],
     prev_map: &HashMap<String, (String, bool, u64)>,
 ) -> crate::ai::summary::PreparedSummaryInput {
-    let mut changes = Vec::with_capacity(this_files.len() + prev_map.len());
-    let mut current_paths = HashSet::with_capacity(this_files.len());
+    let current_paths: HashSet<&str> = this_files.iter().map(|f| f.path.as_str()).collect();
 
-    for file in this_files {
-        current_paths.insert(file.path.as_str());
-
-        let previous = prev_map.get(&file.path).map(|(hash, stored, size)| {
-            crate::ai::summary::SummaryBlobRef {
-                hash,
-                stored: *stored,
-                size: *size,
-            }
-        });
-        let current = Some(crate::ai::summary::SummaryBlobRef {
-            hash: &file.hash,
-            stored: file.stored,
-            size: file.size,
-        });
-
-        if previous.is_none() || previous.is_some_and(|previous| previous.hash != file.hash) {
-            changes.push(crate::ai::summary::SummaryDiffEntry {
-                path: &file.path,
-                previous,
-                current,
-            });
-        }
-    }
-
-    for (path, (hash, stored, size)) in prev_map {
-        if !current_paths.contains(path.as_str()) {
-            changes.push(crate::ai::summary::SummaryDiffEntry {
-                path,
-                previous: Some(crate::ai::summary::SummaryBlobRef {
+    let changes = crate::ai::summary::build_diff_entries(
+        this_files.iter().map(|f| {
+            (
+                f.path.as_str(),
+                crate::ai::summary::SummaryBlobRef {
+                    hash: &f.hash,
+                    stored: f.stored,
+                    size: f.size,
+                },
+            )
+        }),
+        prev_map
+            .iter()
+            .filter(|(path, _)| !current_paths.contains(path.as_str()))
+            .map(|(path, (hash, stored, size))| {
+                (
+                    path.as_str(),
+                    crate::ai::summary::SummaryBlobRef {
+                        hash,
+                        stored: *stored,
+                        size: *size,
+                    },
+                )
+            }),
+        |path| {
+            prev_map
+                .get(path)
+                .map(|(hash, stored, size)| crate::ai::summary::SummaryBlobRef {
                     hash,
                     stored: *stored,
                     size: *size,
-                }),
-                current: None,
-            });
-        }
-    }
+                })
+        },
+    );
 
     crate::ai::summary::prepare_summary_inputs(blob_root, ai_config, &changes)
 }
