@@ -35,6 +35,19 @@ pub async fn handle_json_rpc_request(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_transport_response_variants() {
+        // Just verify the enum variants exist and are constructible
+        let _notif = McpTransportResponse::Notification;
+        let resp = super::super::protocol::JsonRpcResponse::success(None, serde_json::json!({}));
+        let _response = McpTransportResponse::Response(resp);
+    }
+}
+
 async fn dispatch_mcp_tool_request(
     application: McpApplication,
     id: Option<serde_json::Value>,

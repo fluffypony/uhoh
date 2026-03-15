@@ -195,6 +195,51 @@ async fn dns_verify_hash_inner(version: &str, asset: &str) -> Result<String> {
     Ok(txt.to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_signature_rejects_short_signature() {
+        let data = b"test binary content";
+        let short_sig = vec![0u8; 32]; // 32 bytes, need 64
+        let result = verify_ed25519_signature(data, &short_sig).unwrap();
+        assert!(!result, "Short signature should be rejected");
+    }
+
+    #[test]
+    fn verify_signature_rejects_empty_signature() {
+        let data = b"test";
+        let result = verify_ed25519_signature(data, &[]).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn verify_signature_rejects_random_64_bytes() {
+        let data = b"test binary";
+        let fake_sig = [0xABu8; 64];
+        // This should either return Ok(false) or Err — either way it doesn't verify
+        match verify_ed25519_signature(data, &fake_sig) {
+            Ok(valid) => assert!(!valid),
+            Err(_) => {} // Invalid signature format is also acceptable
+        }
+    }
+
+    #[test]
+    fn update_public_key_is_set() {
+        // The key should not be all zeros (placeholder)
+        assert!(
+            !UPDATE_PUBLIC_KEY.iter().all(|&b| b == 0),
+            "UPDATE_PUBLIC_KEY should not be a zeroed placeholder"
+        );
+    }
+
+    #[test]
+    fn update_public_key_is_32_bytes() {
+        assert_eq!(UPDATE_PUBLIC_KEY.len(), 32);
+    }
+}
+
 fn apply_update(uhoh_dir: &Path, binary: &[u8]) -> Result<()> {
     let exe_path = std::env::current_exe()?;
 
