@@ -42,6 +42,7 @@ pub struct SubsystemContext {
 }
 
 impl SubsystemContext {
+    #[must_use] 
     pub fn new(
         database: Arc<Database>,
         event_ledger: EventLedger,
@@ -85,6 +86,7 @@ pub struct SubsystemManager {
 }
 
 impl SubsystemManager {
+    #[must_use] 
     pub fn new(max_restarts: u32, restart_window: Duration) -> Self {
         Self {
             runners: Vec::new(),
@@ -103,12 +105,14 @@ impl SubsystemManager {
         });
     }
 
+    #[must_use] 
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown.clone()
     }
 
     /// Collect cloned references to each subsystem so callers can release the
     /// manager lock before iterating individual subsystems.
+    #[must_use] 
     pub fn subsystem_refs(&self) -> SubsystemRefList {
         self.runners
             .iter()

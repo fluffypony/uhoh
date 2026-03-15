@@ -40,6 +40,7 @@ pub struct PreRestoreSnapshot<'a> {
 }
 
 impl<'a> PreRestoreSnapshot<'a> {
+    #[must_use] 
     pub fn new(
         trigger: crate::db::SnapshotTrigger,
         message: Option<String>,
@@ -64,6 +65,7 @@ pub struct RestoreRequest<'a> {
 }
 
 impl<'a> RestoreRequest<'a> {
+    #[must_use] 
     pub fn new(
         snapshot_id: &'a str,
         target_path: Option<&'a str>,

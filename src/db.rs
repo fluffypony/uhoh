@@ -17,6 +17,7 @@ impl Database {
     /// Create a new Database handle sharing the same connection pool.
     /// This is cheap (just clones the Arc-wrapped pool) and avoids
     /// opening a separate pool for background threads.
+    #[must_use] 
     pub fn clone_handle(&self) -> Self {
         Self {
             pool: self.pool.clone(),

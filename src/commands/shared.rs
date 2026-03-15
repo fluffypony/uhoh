@@ -6,6 +6,7 @@ use crate::daemon;
 use crate::db;
 use crate::platform;
 
+#[must_use] 
 pub fn is_daemon_running(uhoh: &Path) -> bool {
     let pid_path = uhoh.join("daemon.pid");
     match std::fs::read_to_string(&pid_path) {

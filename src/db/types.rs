@@ -28,6 +28,7 @@ pub enum SnapshotTrigger {
 }
 
 impl SnapshotTrigger {
+    #[must_use] 
     pub fn as_str(self) -> &'static str {
         match self {
             SnapshotTrigger::Auto => "auto",
@@ -40,6 +41,7 @@ impl SnapshotTrigger {
         }
     }
 
+    #[must_use] 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "auto" => Some(SnapshotTrigger::Auto),
@@ -59,6 +61,7 @@ impl SnapshotTrigger {
     }
 
     /// Returns `true` for triggers that represent explicit user action.
+    #[must_use] 
     pub fn is_manual_kind(self) -> bool {
         matches!(self, SnapshotTrigger::Manual | SnapshotTrigger::Mcp | SnapshotTrigger::Api)
     }
@@ -143,6 +146,7 @@ pub struct CreateSnapshotRow<'a> {
 
 impl<'a> CreateSnapshotRow<'a> {
     #[allow(clippy::too_many_arguments)]
+    #[must_use] 
     pub fn new(
         project_hash: &'a str,
         snapshot_id: u64,
@@ -195,6 +199,7 @@ pub enum LedgerSeverity {
 }
 
 impl LedgerSeverity {
+    #[must_use] 
     pub fn as_str(self) -> &'static str {
         match self {
             LedgerSeverity::Info => "info",
@@ -204,6 +209,7 @@ impl LedgerSeverity {
         }
     }
 
+    #[must_use] 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "info" => Some(LedgerSeverity::Info),
@@ -251,6 +257,7 @@ pub enum LedgerSource {
 }
 
 impl LedgerSource {
+    #[must_use] 
     pub fn as_str(self) -> &'static str {
         match self {
             LedgerSource::Agent => "agent",
@@ -261,6 +268,7 @@ impl LedgerSource {
         }
     }
 
+    #[must_use] 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "agent" => Some(LedgerSource::Agent),
@@ -351,6 +359,7 @@ pub enum LedgerEventType {
 }
 
 impl LedgerEventType {
+    #[must_use] 
     pub fn as_str(&self) -> &str {
         match self {
             Self::EmergencyDeleteDetected => "emergency_delete_detected",
@@ -391,6 +400,7 @@ impl LedgerEventType {
         }
     }
 
+    #[must_use] 
     pub fn parse(value: &str) -> Self {
         match value {
             "emergency_delete_detected" => Self::EmergencyDeleteDetected,
@@ -461,6 +471,7 @@ pub enum DbGuardEngine {
 }
 
 impl DbGuardEngine {
+    #[must_use] 
     pub fn as_str(self) -> &'static str {
         match self {
             DbGuardEngine::Sqlite => "sqlite",
@@ -469,6 +480,7 @@ impl DbGuardEngine {
         }
     }
 
+    #[must_use] 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "sqlite" => Some(DbGuardEngine::Sqlite),
@@ -508,6 +520,7 @@ pub enum DbGuardMode {
 }
 
 impl DbGuardMode {
+    #[must_use] 
     pub fn as_str(self) -> &'static str {
         match self {
             DbGuardMode::Triggers => "triggers",
@@ -515,6 +528,7 @@ impl DbGuardMode {
         }
     }
 
+    #[must_use] 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "triggers" => Some(DbGuardMode::Triggers),
@@ -523,6 +537,7 @@ impl DbGuardMode {
         }
     }
 
+    #[must_use] 
     pub fn eq_ignore_ascii_case(self, value: &str) -> bool {
         self.as_str().eq_ignore_ascii_case(value)
     }
@@ -683,6 +698,7 @@ pub struct SnapFileEntry {
 
 impl SnapFileEntry {
     #[allow(clippy::too_many_arguments)]
+    #[must_use] 
     pub fn new(
         path: String,
         hash: String,

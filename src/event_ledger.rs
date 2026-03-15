@@ -13,6 +13,7 @@ pub struct EventLedger {
 }
 
 impl EventLedger {
+    #[must_use] 
     pub fn new(db: Arc<Database>) -> Self {
         Self {
             db,
@@ -22,6 +23,7 @@ impl EventLedger {
 
     /// Attach a broadcast sender so that persisted events are automatically
     /// surfaced as `ServerEvent`s (for WebSocket, notifications, webhooks).
+    #[must_use] 
     pub fn with_event_publisher(mut self, tx: broadcast::Sender<ServerEvent>) -> Self {
         self.event_publisher = Some(tx);
         self

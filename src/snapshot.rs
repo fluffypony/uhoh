@@ -34,6 +34,7 @@ pub struct CreateSnapshotRequest<'a> {
 }
 
 impl<'a> CreateSnapshotRequest<'a> {
+    #[must_use] 
     pub fn new(
         project_hash: &'a str,
         project_path: &'a Path,
@@ -61,6 +62,7 @@ pub struct SnapshotSettings {
 }
 
 impl SnapshotSettings {
+    #[must_use] 
     pub fn from_config(config: &Config) -> Self {
         Self {
             ai: config.ai.clone(),
@@ -78,6 +80,7 @@ pub struct SnapshotRuntime {
 }
 
 impl SnapshotRuntime {
+    #[must_use] 
     pub fn from_config(config: &Config) -> Self {
         Self::new(
             SnapshotSettings::from_config(config),
@@ -85,6 +88,7 @@ impl SnapshotRuntime {
         )
     }
 
+    #[must_use] 
     pub fn new(
         settings: SnapshotSettings,
         sidecar_manager: crate::ai::SidecarManager,
@@ -95,10 +99,12 @@ impl SnapshotRuntime {
         }
     }
 
+    #[must_use] 
     pub fn settings(&self) -> &SnapshotSettings {
         &self.settings
     }
 
+    #[must_use] 
     pub fn sidecar_manager(&self) -> &crate::ai::SidecarManager {
         &self.sidecar_manager
     }
@@ -897,6 +903,7 @@ fn schedule_ai_summary(
     });
 }
 
+#[must_use] 
 pub fn mtime_to_millis(t: SystemTime) -> i64 {
     match t.duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
@@ -909,6 +916,7 @@ pub fn mtime_to_millis(t: SystemTime) -> i64 {
     }
 }
 
+#[must_use] 
 pub fn millis_to_mtime(millis: i64) -> SystemTime {
     if millis >= 0 {
         std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis as u64)

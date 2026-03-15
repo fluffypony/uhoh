@@ -104,6 +104,7 @@ pub struct CompactionConfig {
 }
 
 impl CompactionConfig {
+    #[must_use] 
     pub fn new(
         keep_all_minutes: u64,
         keep_5min_days: u64,
@@ -310,6 +311,7 @@ pub enum WebhookEventKind {
 }
 
 impl WebhookEventKind {
+    #[must_use] 
     pub fn as_str(&self) -> &'static str {
         match self {
             WebhookEventKind::MassDelete => "mass_delete",
@@ -332,6 +334,7 @@ pub enum AgentAuditScope {
 }
 
 impl AgentAuditScope {
+    #[must_use] 
     pub fn is_home(self) -> bool {
         matches!(self, AgentAuditScope::Home)
     }
@@ -355,6 +358,7 @@ pub enum DangerousChangePolicy {
 }
 
 impl DangerousChangePolicy {
+    #[must_use] 
     pub fn as_str(self) -> &'static str {
         match self {
             DangerousChangePolicy::None => "none",
@@ -456,9 +460,11 @@ fn default_keep_weekly_beyond() -> bool {
 fn default_emergency_expire_hours() -> u64 {
     48
 }
+#[must_use] 
 pub fn default_max_binary_blob_bytes() -> u64 {
     1_048_576
 }
+#[must_use] 
 pub fn default_max_text_blob_bytes() -> u64 {
     52_428_800
 }

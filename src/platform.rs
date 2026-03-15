@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use chrono::TimeZone;
 use std::path::PathBuf;
 
+#[must_use] 
 pub fn uhoh_dir() -> PathBuf {
     if let Some(override_dir) = std::env::var_os("UHOH_DIR") {
         return PathBuf::from(override_dir);
@@ -225,6 +226,7 @@ fn remove_systemd_user_unit() -> Result<()> {
 /// macOS: use `ps -p <pid> -o comm=` and check name contains "uhoh".
 /// Linux: read `/proc/<pid>/cmdline` and check name contains "uhoh".
 /// Windows: OpenProcess + GetModuleFileNameExW, check path contains "uhoh".
+#[must_use] 
 pub fn is_uhoh_process_alive(pid: u32) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -283,6 +285,7 @@ pub fn is_uhoh_process_alive(pid: u32) -> bool {
 
 /// Stronger daemon-process check that validates both process identity and start-time
 /// to defend against PID reuse after crashes/restarts.
+#[must_use] 
 pub fn is_uhoh_process_alive_with_start(pid: u32, expected_start: Option<u64>) -> bool {
     if !is_uhoh_process_alive(pid) {
         return false;
@@ -297,6 +300,7 @@ pub fn is_uhoh_process_alive_with_start(pid: u32, expected_start: Option<u64>) -
 }
 
 /// Capture OS process start time in kernel ticks for PID-reuse-safe identity checks.
+#[must_use] 
 pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {

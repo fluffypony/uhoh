@@ -30,6 +30,7 @@ pub mod compaction;
 pub mod subsystem;
 pub(crate) mod update;
 
+#[must_use] 
 pub fn uhoh_dir() -> std::path::PathBuf {
     crate::platform::uhoh_dir()
 }

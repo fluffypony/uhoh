@@ -17,12 +17,15 @@ pub enum StorageMethod {
 }
 
 impl StorageMethod {
+    #[must_use] 
     pub fn is_recoverable(self) -> bool {
         !matches!(self, StorageMethod::None)
     }
+    #[must_use] 
     pub fn to_db(self) -> i64 {
         self as i64
     }
+    #[must_use] 
     pub fn from_db(v: i64) -> Self {
         match v {
             1 => StorageMethod::Copy,
@@ -30,6 +33,7 @@ impl StorageMethod {
             _ => StorageMethod::None,
         }
     }
+    #[must_use] 
     pub fn display_name(self) -> &'static str {
         match self {
             StorageMethod::None => "none",
@@ -137,6 +141,7 @@ pub struct BlobStorageParams {
 }
 
 impl BlobStorageParams {
+    #[must_use] 
     pub fn new(
         max_copy_blob_bytes: u64,
         max_binary_blob_bytes: u64,
@@ -459,6 +464,7 @@ pub fn read_blob(blob_root: &Path, hash: &str) -> Result<Option<Vec<u8>>> {
     Ok(Some(content))
 }
 
+#[must_use] 
 pub fn blob_exists(blob_root: &Path, hash: &str) -> bool {
     if hash.len() < 2 {
         return false;
@@ -486,6 +492,7 @@ fn set_blob_readonly(path: &Path) {
 }
 
 /// Compress if feature enabled
+#[must_use] 
 pub fn maybe_compress(data: &[u8]) -> Vec<u8> {
     #[cfg(feature = "compression")]
     {
@@ -498,6 +505,7 @@ pub fn maybe_compress(data: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(feature = "compression")]
+#[must_use] 
 pub fn maybe_compress_with_level(data: &[u8], level: i32) -> Vec<u8> {
     let lvl = if (1..=22).contains(&level) { level } else { 3 };
     let compressed =
@@ -561,6 +569,7 @@ fn create_restricted_file(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 /// Estimate disk usage of a blob, accounting for hardlinks on Unix.
+#[must_use] 
 pub fn blob_disk_usage(blob_path: &Path) -> u64 {
     #[cfg(unix)]
     {

@@ -10,6 +10,7 @@ use std::path::Path;
 
 // === Base58 Snapshot ID encoding ===
 
+#[must_use] 
 pub fn id_to_base58(id: u64) -> String {
     // Note: base58 for zero is a single '1'. We never assign snapshot id 0.
     // Guard: if id==0 is somehow passed, return empty to avoid ambiguity with ID 1.
@@ -25,6 +26,7 @@ pub fn id_to_base58(id: u64) -> String {
         .into_string()
 }
 
+#[must_use] 
 pub fn base58_to_id(s: &str) -> Option<u64> {
     if s.is_empty() {
         return None;
@@ -52,12 +54,14 @@ pub fn base58_to_id(s: &str) -> Option<u64> {
 // === Path encoding ===
 
 /// Normalize a path to use forward slashes for cross-platform manifest storage.
+#[must_use] 
 pub fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
 /// Encode a relative path for manifest storage. If the path is valid UTF-8, normalize slashes.
 /// Otherwise, base64-encode the raw platform bytes with a "b64:" prefix.
+#[must_use] 
 pub fn encode_relpath(rel: &Path) -> String {
     if let Some(s) = rel.to_str() {
         if !s.starts_with("b64:") {
@@ -96,6 +100,7 @@ fn encode_relpath_bytes(rel: &Path) -> String {
 }
 
 /// Decode a manifest relative path back to a platform OsString.
+#[must_use] 
 pub fn decode_relpath_to_os(s: &str) -> OsString {
     if let Some(rest) = s.strip_prefix("b64:") {
         if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(rest) {
@@ -121,6 +126,7 @@ pub fn decode_relpath_to_os(s: &str) -> OsString {
 }
 
 /// Check if file is executable (Unix)
+#[must_use] 
 pub fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
