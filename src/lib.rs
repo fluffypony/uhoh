@@ -1,3 +1,6 @@
+//! Local-first filesystem snapshot and recovery system for AI-assisted
+//! development workflows.
+
 pub(crate) mod agent;
 pub(crate) mod ai;
 pub mod cas;

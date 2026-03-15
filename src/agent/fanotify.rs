@@ -125,7 +125,7 @@ impl PendingAuditBatch {
 }
 
 #[cfg(all(target_os = "linux", feature = "audit-trail"))]
-pub fn run_permission_monitor_with_roots(
+pub(crate) fn run_permission_monitor_with_roots(
     ctx: &AgentContext,
     _agents: &[AgentEntry],
     monitor_roots: &[PathBuf],
@@ -167,7 +167,7 @@ pub fn run_permission_monitor_with_roots(
 }
 
 #[cfg(not(all(target_os = "linux", feature = "audit-trail")))]
-pub fn run_permission_monitor_with_roots(
+pub(crate) fn run_permission_monitor_with_roots(
     _ctx: &crate::subsystem::AgentContext,
     _agents: &[crate::db::AgentEntry],
     _monitor_roots: &[std::path::PathBuf],

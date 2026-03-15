@@ -645,7 +645,7 @@ impl Database {
     }
 
     /// Get the cached blob bytes total; returns 0 if missing.
-    pub fn get_blob_bytes(&self) -> Result<u64> {
+    pub fn blob_bytes(&self) -> Result<u64> {
         let conn = self.conn()?;
         let v: i64 = conn
             .query_row(

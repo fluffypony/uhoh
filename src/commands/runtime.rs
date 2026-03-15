@@ -149,7 +149,7 @@ pub async fn status(uhoh: &Path, database: &db::Database) -> Result<()> {
         })
         .sum();
     println!("Snapshots: {total}");
-    match database.get_blob_bytes() {
+    match database.blob_bytes() {
         Ok(size) => println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0),
         Err(e) => println!("Blob storage: unavailable ({e})"),
     }
@@ -322,6 +322,8 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
                 .wait()
                 .with_context(|| format!("Failed to collect status for {}", command[0]))?;
             if !exit_status.success() {
+                // process::exit is intentional: we must forward the wrapped child's exact
+                // exit code to the parent without printing spurious error output.
                 std::process::exit(exit_status.code().unwrap_or(1));
             }
         } else {
@@ -333,6 +335,7 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
                 .wait()
                 .with_context(|| format!("Failed to wait for command: {}", command[0]))?;
             if !status.success() {
+                // process::exit is intentional: forward the child's exact exit code.
                 std::process::exit(status.code().unwrap_or(1));
             }
         }
@@ -344,6 +347,7 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
             .status()
             .with_context(|| format!("Failed to run command: {}", command[0]))?;
         if !status.success() {
+            // process::exit is intentional: forward the child's exact exit code.
             std::process::exit(status.code().unwrap_or(1));
         }
     }
@@ -560,10 +564,12 @@ async fn verify_install() -> Result<()> {
                 println!("\u{2713} Binary hash matches DNS record.");
                 Ok(())
             } else {
+                // Exit code 2 is the install-script contract for hash mismatch.
+                // process::exit is intentional: the specific exit code is part of the
+                // external protocol and cannot be expressed through anyhow::Result.
                 eprintln!("Binary hash does not match DNS record!");
                 eprintln!("  Local:    {local_hash}");
                 eprintln!("  Expected: {expected}");
-                // Exit code 2 is the install-script contract for hash mismatch
                 std::process::exit(2);
             }
         }

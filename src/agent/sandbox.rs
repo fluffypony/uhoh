@@ -32,7 +32,7 @@ fn runtime_probe() -> anyhow::Result<()> {
 }
 
 #[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
-pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
+pub(crate) fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
     // SAFETY: prctl(PR_SET_NO_NEW_PRIVS, 1) is safe to call — it restricts the
     // current thread from gaining new privileges, which is a prerequisite for
     // Landlock enforcement. Failure is checked and surfaced as an error.
@@ -113,13 +113,13 @@ pub fn apply_landlock(profile: &crate::agent::profiles::AgentProfile) -> anyhow:
 }
 
 #[cfg(all(target_os = "linux", not(feature = "landlock-sandbox")))]
-pub fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
+pub(crate) fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
     anyhow::bail!("Landlock sandboxing requires building uhoh with --features landlock-sandbox")
 }
 
 #[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
-pub fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
+pub(crate) fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
     tracing::warn!("Sandboxing is only available on Linux. Running without sandbox.");
     Ok(())
 }

@@ -98,16 +98,16 @@ pub fn verify(database: &db::Database) -> Result<()> {
         return Ok(());
     }
 
-    println!(
+    let broken_ids = broken
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::bail!(
         "Ledger verification failed: {} broken event(s): {}",
         broken.len(),
-        broken
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
+        broken_ids
     );
-    std::process::exit(2);
 }
 
 fn normalize_timeline_source(source: &str) -> Result<LedgerSource> {

@@ -2,12 +2,12 @@ use std::collections::HashSet;
 use std::fmt;
 
 #[derive(Debug)]
-pub struct RestoreBusyError {
+pub(crate) struct RestoreBusyError {
     message: String,
 }
 
 impl RestoreBusyError {
-    pub fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -22,13 +22,13 @@ impl fmt::Display for RestoreBusyError {
 
 impl std::error::Error for RestoreBusyError {}
 
-pub struct RestoreLockGuard {
+pub(crate) struct RestoreLockGuard {
     locks: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
     key: String,
 }
 
 impl RestoreLockGuard {
-    pub fn acquire(
+    pub(crate) fn acquire(
         locks: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
         key: String,
     ) -> anyhow::Result<Self> {
@@ -55,12 +55,12 @@ impl Drop for RestoreLockGuard {
     }
 }
 
-pub struct RestoreFlagGuard {
+pub(crate) struct RestoreFlagGuard {
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RestoreFlagGuard {
-    pub fn acquire(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> anyhow::Result<Self> {
+    pub(crate) fn acquire(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> anyhow::Result<Self> {
         if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return Err(RestoreBusyError::new("Another restore is already in progress").into());
         }

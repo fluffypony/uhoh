@@ -22,7 +22,7 @@ pub fn generate_token() -> String {
     hex::encode(bytes)
 }
 
-pub fn write_token_file(uhoh_dir: &Path, token: &str) -> anyhow::Result<PathBuf> {
+pub(crate) fn write_token_file(uhoh_dir: &Path, token: &str) -> anyhow::Result<PathBuf> {
     let token_path = uhoh_dir.join("server.token");
     let tmp_path = uhoh_dir.join(".server.token.tmp");
     fs::write(&tmp_path, token)?;
@@ -37,7 +37,7 @@ pub fn write_token_file(uhoh_dir: &Path, token: &str) -> anyhow::Result<PathBuf>
     Ok(token_path)
 }
 
-pub fn write_port_file(uhoh_dir: &Path, port: u16) -> anyhow::Result<()> {
+pub(crate) fn write_port_file(uhoh_dir: &Path, port: u16) -> anyhow::Result<()> {
     let port_path = uhoh_dir.join("server.port");
     let tmp = port_path.with_extension("tmp");
     fs::write(&tmp, port.to_string())?;
