@@ -337,7 +337,6 @@ async fn origin_validation_middleware(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{build_app, ApiState, AppState, HealthState, WsState};
     use axum::body::{to_bytes, Body};

@@ -110,7 +110,6 @@ pub fn validate_path_within_project(project_path: &Path, relative_path: &str) ->
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::fs;

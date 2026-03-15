@@ -97,7 +97,6 @@ pub fn scan_for_markers(search_paths: &[PathBuf]) -> Vec<(String, PathBuf)> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::fs;

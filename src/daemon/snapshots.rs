@@ -822,7 +822,6 @@ fn requeue_snapshot_changes(state: &mut ProjectDaemonState, drained: Vec<PathBuf
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::collections::HashMap;

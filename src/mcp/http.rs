@@ -30,7 +30,6 @@ pub async fn delete_not_supported() -> impl IntoResponse {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use axum::http::StatusCode;

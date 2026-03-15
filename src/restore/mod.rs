@@ -604,7 +604,6 @@ pub(crate) fn apply_restore(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::safe_remove_dir_tree_within;
 

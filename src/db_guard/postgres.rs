@@ -903,7 +903,6 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
         drain_listen_payloads, parse_watched_tables, reconcile_listen_workers, run_postgres_task,

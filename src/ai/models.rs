@@ -214,7 +214,6 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::config::{AiConfig, ModelTierConfig};

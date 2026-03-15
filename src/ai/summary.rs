@@ -343,7 +343,6 @@ pub fn generate_summary_blocking(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{prepare_summary_inputs, SummaryBlobRef, SummaryDiffEntry};
     use crate::cas;

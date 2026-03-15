@@ -147,7 +147,6 @@ async fn async_tail_one_file(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

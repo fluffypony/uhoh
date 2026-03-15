@@ -187,7 +187,6 @@ pub fn severity_for_ratio(ratio: f64) -> crate::db::LedgerSeverity {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::fs;
