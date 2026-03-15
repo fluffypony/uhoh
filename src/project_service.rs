@@ -151,3 +151,63 @@ fn classify_restore_error(err: anyhow::Error) -> RestoreProjectError {
 
     RestoreProjectError::Internal(err)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_error_not_found_display() {
+        let err = RestoreProjectError::NotFound("snapshot not found".to_string());
+        assert_eq!(format!("{err}"), "snapshot not found");
+    }
+
+    #[test]
+    fn restore_error_conflict_display() {
+        let err = RestoreProjectError::Conflict("restore in progress".to_string());
+        assert_eq!(format!("{err}"), "restore in progress");
+    }
+
+    #[test]
+    fn restore_error_invalid_input_display() {
+        let err = RestoreProjectError::InvalidInput("bad input".to_string());
+        assert_eq!(format!("{err}"), "bad input");
+    }
+
+    #[test]
+    fn restore_error_internal_display() {
+        let err = RestoreProjectError::Internal(anyhow::anyhow!("db failure"));
+        assert_eq!(format!("{err}"), "db failure");
+    }
+
+    #[test]
+    fn restore_error_internal_has_source() {
+        let err = RestoreProjectError::Internal(anyhow::anyhow!("inner error"));
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn restore_error_not_found_no_source() {
+        let err = RestoreProjectError::NotFound("msg".to_string());
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn snapshot_create_result_none() {
+        let result = SnapshotCreateResult {
+            snapshot_id: None,
+            snapshot_event: None,
+        };
+        assert!(result.snapshot_id.is_none());
+        assert!(result.snapshot_event.is_none());
+    }
+
+    #[test]
+    fn classify_restore_error_unknown_is_internal() {
+        let err = anyhow::anyhow!("unknown error");
+        match classify_restore_error(err) {
+            RestoreProjectError::Internal(e) => assert_eq!(e.to_string(), "unknown error"),
+            other => panic!("Expected Internal, got: {other}"),
+        }
+    }
+}
