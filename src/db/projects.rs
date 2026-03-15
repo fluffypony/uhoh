@@ -125,3 +125,115 @@ impl Database {
         Ok(projects)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db() -> (tempfile::TempDir, Database) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = Database::open(&tmp.path().join("test.db")).unwrap();
+        (tmp, db)
+    }
+
+    #[test]
+    fn add_and_get_project() {
+        let (_tmp, db) = temp_db();
+        db.add_project("abc123", "/home/user/project").unwrap();
+        let project = db.get_project("abc123").unwrap().unwrap();
+        assert_eq!(project.hash, "abc123");
+        assert_eq!(project.current_path, "/home/user/project");
+    }
+
+    #[test]
+    fn get_missing_project_returns_none() {
+        let (_tmp, db) = temp_db();
+        let result = db.get_project("nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_project_by_path() {
+        let (_tmp, db) = temp_db();
+        db.add_project("hash1", "/path/to/project").unwrap();
+        let found = db
+            .find_project_by_path(Path::new("/path/to/project"))
+            .unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().hash, "hash1");
+    }
+
+    #[test]
+    fn find_project_by_path_missing() {
+        let (_tmp, db) = temp_db();
+        let found = db.find_project_by_path(Path::new("/nowhere")).unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_project_by_hash_prefix() {
+        let (_tmp, db) = temp_db();
+        db.add_project("abcdef123456", "/project1").unwrap();
+        let found = db.find_project_by_hash_prefix("abcdef").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().hash, "abcdef123456");
+    }
+
+    #[test]
+    fn find_project_by_hash_prefix_ambiguous() {
+        let (_tmp, db) = temp_db();
+        db.add_project("abc111", "/p1").unwrap();
+        db.add_project("abc222", "/p2").unwrap();
+        let result = db.find_project_by_hash_prefix("abc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Ambiguous"));
+    }
+
+    #[test]
+    fn find_project_by_hash_prefix_no_match() {
+        let (_tmp, db) = temp_db();
+        db.add_project("abc123", "/p1").unwrap();
+        let found = db.find_project_by_hash_prefix("xyz").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn update_project_path() {
+        let (_tmp, db) = temp_db();
+        db.add_project("hash1", "/old/path").unwrap();
+        db.update_project_path("hash1", "/new/path").unwrap();
+        let project = db.get_project("hash1").unwrap().unwrap();
+        assert_eq!(project.current_path, "/new/path");
+    }
+
+    #[test]
+    fn remove_project() {
+        let (_tmp, db) = temp_db();
+        db.add_project("hash1", "/path").unwrap();
+        db.remove_project("hash1").unwrap();
+        let result = db.get_project("hash1").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn list_projects_order() {
+        let (_tmp, db) = temp_db();
+        db.add_project("z_hash", "/z").unwrap();
+        db.add_project("a_hash", "/a").unwrap();
+        let projects = db.list_projects().unwrap();
+        assert_eq!(projects.len(), 2);
+        // Ordered by created_at, which is insertion order
+        assert_eq!(projects[0].hash, "z_hash");
+        assert_eq!(projects[1].hash, "a_hash");
+    }
+
+    #[test]
+    fn find_by_hash_prefix_escapes_wildcards() {
+        let (_tmp, db) = temp_db();
+        db.add_project("abc%def", "/p1").unwrap();
+        // "abc%" should not match "abc%def" via wildcard expansion
+        let found = db.find_project_by_hash_prefix("abc%").unwrap();
+        // It should match literally because % is escaped
+        assert!(found.is_some());
+    }
+}

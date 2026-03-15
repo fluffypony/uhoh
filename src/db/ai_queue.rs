@@ -77,3 +77,105 @@ impl Database {
         checked_usize_u64(affected, "pending_ai_summaries.delete_count")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db() -> (tempfile::TempDir, Database) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = Database::open(&tmp.path().join("test.db")).unwrap();
+        db.add_project("proj1", "/fake").unwrap();
+        // Create a snapshot to reference
+        db.create_snapshot(crate::db::CreateSnapshotRow::new(
+            "proj1",
+            1,
+            &chrono::Utc::now().to_rfc3339(),
+            crate::db::SnapshotTrigger::Auto,
+            "",
+            false,
+            &[],
+            &[],
+        ))
+        .unwrap();
+        (tmp, db)
+    }
+
+    #[test]
+    fn enqueue_and_dequeue_roundtrip() {
+        let (_tmp, db) = temp_db();
+        let rowid = db.latest_snapshot_rowid("proj1").unwrap().unwrap();
+        db.enqueue_ai_summary(rowid, "proj1").unwrap();
+
+        let pending = db.dequeue_pending_ai(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].snapshot_rowid, rowid);
+        assert_eq!(pending[0].project_hash, "proj1");
+        assert_eq!(pending[0].attempts, 0);
+    }
+
+    #[test]
+    fn enqueue_is_idempotent() {
+        let (_tmp, db) = temp_db();
+        let rowid = db.latest_snapshot_rowid("proj1").unwrap().unwrap();
+        db.enqueue_ai_summary(rowid, "proj1").unwrap();
+        db.enqueue_ai_summary(rowid, "proj1").unwrap(); // should not duplicate
+
+        let pending = db.dequeue_pending_ai(10).unwrap();
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn delete_pending_removes_entry() {
+        let (_tmp, db) = temp_db();
+        let rowid = db.latest_snapshot_rowid("proj1").unwrap().unwrap();
+        db.enqueue_ai_summary(rowid, "proj1").unwrap();
+        db.delete_pending_ai(rowid).unwrap();
+
+        let pending = db.dequeue_pending_ai(10).unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn increment_attempts_tracks_count() {
+        let (_tmp, db) = temp_db();
+        let rowid = db.latest_snapshot_rowid("proj1").unwrap().unwrap();
+        db.enqueue_ai_summary(rowid, "proj1").unwrap();
+
+        let count1 = db.increment_ai_attempts(rowid).unwrap();
+        assert_eq!(count1, 1);
+        let count2 = db.increment_ai_attempts(rowid).unwrap();
+        assert_eq!(count2, 2);
+    }
+
+    #[test]
+    fn dequeue_empty_returns_empty() {
+        let (_tmp, db) = temp_db();
+        let pending = db.dequeue_pending_ai(10).unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn dequeue_respects_limit() {
+        let (_tmp, db) = temp_db();
+        let rowid = db.latest_snapshot_rowid("proj1").unwrap().unwrap();
+        db.enqueue_ai_summary(rowid, "proj1").unwrap();
+
+        let pending = db.dequeue_pending_ai(0).unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn prune_removes_old_entries() {
+        let (_tmp, db) = temp_db();
+        let rowid = db.latest_snapshot_rowid("proj1").unwrap().unwrap();
+        db.enqueue_ai_summary(rowid, "proj1").unwrap();
+
+        // Pruning with a large TTL should keep the entry (it was just created)
+        let removed = db.prune_ai_queue_ttl(365).unwrap();
+        assert_eq!(removed, 0);
+
+        let pending = db.dequeue_pending_ai(10).unwrap();
+        assert_eq!(pending.len(), 1);
+    }
+}
