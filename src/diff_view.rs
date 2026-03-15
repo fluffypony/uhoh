@@ -267,7 +267,14 @@ pub fn cmd_diff(
             continue;
         }
 
-        let old_bytes = old_hash.and_then(|h| cas::read_blob(&blob_root, h).ok().flatten());
+        let old_bytes = match old_hash.map(|h| cas::read_blob(&blob_root, h)) {
+            Some(Ok(content)) => content,
+            Some(Err(e)) => {
+                tracing::warn!("Failed to read old blob for {path}: {e:#}");
+                None
+            }
+            None => None,
+        };
         let new_bytes = if is_current_tree {
             let file_on_disk = project_path.join(encoding::decode_relpath_to_os(path));
             // Use symlink_metadata to avoid following symlinks; read symlink target as content
@@ -283,7 +290,14 @@ pub fn cmd_diff(
                 None
             }
         } else {
-            new_hash.and_then(|h| cas::read_blob(&blob_root, h).ok().flatten())
+            match new_hash.map(|h| cas::read_blob(&blob_root, h)) {
+                Some(Ok(content)) => content,
+                Some(Err(e)) => {
+                    tracing::warn!("Failed to read new blob for {path}: {e:#}");
+                    None
+                }
+                None => None,
+            }
         };
 
         // Detect binary content before converting to string

@@ -119,11 +119,15 @@ pub fn resolve_event(
     event_id: i64,
 ) -> Result<()> {
     if database.event_ledger_get(event_id)?.is_some() {
-        let mut ordered = database
-            .event_ledger_descendant_ids(event_id)?
-            .into_iter()
-            .filter_map(|id| database.event_ledger_get(id).ok().flatten())
-            .collect::<Vec<_>>();
+        let descendant_ids = database.event_ledger_descendant_ids(event_id)?;
+        let mut ordered = Vec::with_capacity(descendant_ids.len());
+        for id in descendant_ids {
+            if let Some(entry) = database.event_ledger_get(id)? {
+                ordered.push(entry);
+            } else {
+                tracing::warn!("Event ledger entry {id} not found during undo resolve");
+            }
+        }
         ordered.sort_by(|a, b| b.id.cmp(&a.id));
         for ev in ordered {
             revert_event(uhoh_dir, database, &ev)?;

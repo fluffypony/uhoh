@@ -109,7 +109,6 @@ dunce = "1.0"
 content_inspector = "0.2"
 
 # Random bytes for marker generation
-getrandom = "0.2"
 rand = "0.8"
 
 # Hex encoding

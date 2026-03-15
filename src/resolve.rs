@@ -72,10 +72,7 @@ pub fn resolve_project(
     }
 
     if projects.len() == 1 {
-        if let Some(project) = projects.first() {
-            let project = project.clone();
-            return Ok(project);
-        }
+        return Ok(projects[0].clone());
     }
 
     bail!(

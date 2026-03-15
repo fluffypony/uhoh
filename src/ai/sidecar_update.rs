@@ -297,22 +297,6 @@ pub fn download_and_install(
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn check_mlx_lm_version() -> Option<String> {
-    let default_python = if cfg!(windows) { "python" } else { "python3" };
-    let output = std::process::Command::new(default_python)
-        .args(["-c", "import mlx_lm; print(mlx_lm.__version__)"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        None
-    }
-}
-
 pub fn run_update_check(
     sidecar_dir: &Path,
     repo: &str,

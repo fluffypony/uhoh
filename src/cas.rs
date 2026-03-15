@@ -3,13 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
 
-// Re-export encoding utilities that were historically part of this module.
-// Internal code should use `crate::encoding::*` directly.
-pub use crate::encoding::{
-    base58_to_id, decode_relpath_to_os, encode_relpath, id_to_base58, is_executable,
-    normalize_path,
-};
-
 #[cfg(feature = "compression")]
 const COMPRESSION_MAGIC: &[u8; 12] = b"UHZS\x00ZSTD\x00v1";
 

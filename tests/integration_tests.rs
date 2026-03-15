@@ -18,16 +18,16 @@ fn test_non_utf8_path_roundtrip() {
     let b64_collision = project.join("b64:notactuallybase64");
     std::fs::write(&b64_collision, b"collision test content").unwrap();
 
-    let encoded = uhoh::cas::encode_relpath(bad_rel);
+    let encoded = uhoh::encoding::encode_relpath(bad_rel);
     assert!(encoded.starts_with("b64:"));
 
-    let decoded = uhoh::cas::decode_relpath_to_os(&encoded);
+    let decoded = uhoh::encoding::decode_relpath_to_os(&encoded);
     assert_eq!(decoded.as_os_str().as_bytes(), bad_name.as_bytes());
 
     let rel2 = b64_collision.strip_prefix(&project).unwrap();
-    let encoded2 = uhoh::cas::encode_relpath(rel2);
+    let encoded2 = uhoh::encoding::encode_relpath(rel2);
     assert!(encoded2.starts_with("b64:"));
-    let decoded2 = uhoh::cas::decode_relpath_to_os(&encoded2);
+    let decoded2 = uhoh::encoding::decode_relpath_to_os(&encoded2);
     assert_eq!(decoded2.to_string_lossy(), "b64:notactuallybase64");
 }
 
@@ -239,19 +239,19 @@ async fn test_http_range_resume() {
 
 #[test]
 fn test_base58_id_roundtrip() {
-    assert_eq!(uhoh::cas::id_to_base58(0), "");
-    assert_eq!(uhoh::cas::base58_to_id(""), None);
+    assert_eq!(uhoh::encoding::id_to_base58(0), "");
+    assert_eq!(uhoh::encoding::base58_to_id(""), None);
 
-    let encoded = uhoh::cas::id_to_base58(1);
+    let encoded = uhoh::encoding::id_to_base58(1);
     assert!(!encoded.is_empty());
-    assert_eq!(uhoh::cas::base58_to_id(&encoded), Some(1));
+    assert_eq!(uhoh::encoding::base58_to_id(&encoded), Some(1));
 
-    let encoded_large = uhoh::cas::id_to_base58(u64::MAX);
-    assert_eq!(uhoh::cas::base58_to_id(&encoded_large), Some(u64::MAX));
+    let encoded_large = uhoh::encoding::id_to_base58(u64::MAX);
+    assert_eq!(uhoh::encoding::base58_to_id(&encoded_large), Some(u64::MAX));
 
     for id in [1u64, 2, 57, 58, 59, 100, 1000, 1_000_000, u64::MAX - 1] {
-        let enc = uhoh::cas::id_to_base58(id);
-        let dec = uhoh::cas::base58_to_id(&enc);
+        let enc = uhoh::encoding::id_to_base58(id);
+        let dec = uhoh::encoding::base58_to_id(&enc);
         assert_eq!(dec, Some(id));
     }
 }
@@ -704,7 +704,7 @@ fn test_restore_sets_and_clears_restore_marker_file() {
     )
     .unwrap()
     .unwrap();
-    let snap_id = uhoh::cas::id_to_base58(snap);
+    let snap_id = uhoh::encoding::id_to_base58(snap);
 
     // Modify file then restore
     std::fs::write(project_dir.join("keep.txt"), "v2").unwrap();

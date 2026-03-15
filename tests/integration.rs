@@ -115,18 +115,18 @@ fn test_snapshot_creation_and_query() {
 #[test]
 fn test_base58_edge_cases() {
     // ID 0 rejected
-    let s = uhoh::cas::id_to_base58(0);
-    assert_eq!(uhoh::cas::base58_to_id(&s), None);
+    let s = uhoh::encoding::id_to_base58(0);
+    assert_eq!(uhoh::encoding::base58_to_id(&s), None);
 
     // ID 1 should be short
-    let s1 = uhoh::cas::id_to_base58(1);
+    let s1 = uhoh::encoding::id_to_base58(1);
     assert!(s1.len() <= 2);
-    assert_eq!(uhoh::cas::base58_to_id(&s1), Some(1));
+    assert_eq!(uhoh::encoding::base58_to_id(&s1), Some(1));
 
     // Large ID
-    let big = uhoh::cas::id_to_base58(u64::MAX);
-    assert_eq!(uhoh::cas::base58_to_id(&big), Some(u64::MAX));
+    let big = uhoh::encoding::id_to_base58(u64::MAX);
+    assert_eq!(uhoh::encoding::base58_to_id(&big), Some(u64::MAX));
 
     // Invalid input
-    assert_eq!(uhoh::cas::base58_to_id("not-valid-base58!!!"), None);
+    assert_eq!(uhoh::encoding::base58_to_id("not-valid-base58!!!"), None);
 }
