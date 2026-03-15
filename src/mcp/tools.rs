@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::db::{LedgerSeverity, LedgerSource};
+use crate::db::{LedgerEventType, LedgerSeverity, LedgerSource};
 use crate::event_ledger::{new_event, EventLedger};
 use crate::events::publish_event;
 use crate::project_service::RestoreProjectError;
@@ -380,7 +380,7 @@ fn handle_pre_notify_tool_call(
     context: &RuntimeBundle,
     args: PreNotifyArgs,
 ) -> Result<Value, McpToolError> {
-    let mut event = new_event(LedgerSource::Agent, "pre_notify", LedgerSeverity::Info);
+    let mut event = new_event(LedgerSource::Agent, LedgerEventType::PreNotify, LedgerSeverity::Info);
     event.agent_name = Some(args.agent);
     event.path = args.path;
     event.detail = Some(format!("action={}", args.action));

@@ -4,7 +4,7 @@ use tempfile::NamedTempFile;
 use url::Url;
 
 use super::credentials::{load_encrypted_credentials, scrub_error_message, CredentialMaterial};
-use crate::db::{DbGuardEntry, LedgerSeverity, LedgerSource};
+use crate::db::{DbGuardEntry, LedgerEventType, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::DbGuardContext;
 
@@ -114,7 +114,7 @@ pub fn tick_mysql_guard(
     state.last_row_total = Some(snapshot.row_total);
     state.last_table_count = Some(snapshot.table_count);
 
-    let mut heartbeat = new_event(LedgerSource::DbGuard, "mysql_tick", LedgerSeverity::Info);
+    let mut heartbeat = new_event(LedgerSource::DbGuard, LedgerEventType::MysqlTick, LedgerSeverity::Info);
     heartbeat.guard_name = Some(guard.name.clone());
     heartbeat.detail = Some(
         serde_json::json!({

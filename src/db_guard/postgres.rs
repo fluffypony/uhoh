@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::postgres_connection::{connect_postgres_client, ResolvedPostgresConnection};
 use super::{credentials, recovery};
-use crate::db::{DbGuardEntry, DbGuardMode, LedgerSeverity, LedgerSource};
+use crate::db::{DbGuardEntry, DbGuardMode, LedgerEventType, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::DbGuardContext;
 
@@ -332,7 +332,7 @@ fn emit_postgres_tick_event(
     connection: &ResolvedPostgresConnection,
     row_counters_disabled: bool,
 ) {
-    let mut event = new_event(LedgerSource::DbGuard, "postgres_tick", LedgerSeverity::Info);
+    let mut event = new_event(LedgerSource::DbGuard, LedgerEventType::PostgresTick, LedgerSeverity::Info);
     event.guard_name = Some(guard.name.clone());
     event.detail = Some(if row_counters_disabled {
         format!(

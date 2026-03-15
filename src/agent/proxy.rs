@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use zeroize::Zeroize;
 
-use crate::db::{LedgerSeverity, LedgerSource};
+use crate::db::{LedgerEventType, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::AgentContext;
 use tokio_util::sync::CancellationToken;
@@ -370,7 +370,7 @@ async fn intercept_tool_call(
         }
     }
 
-    let mut event = new_event(LedgerSource::Agent, "tool_call", LedgerSeverity::Info);
+    let mut event = new_event(LedgerSource::Agent, LedgerEventType::ToolCall, LedgerSeverity::Info);
     event.path = path;
     event.pre_state_ref = pre_state_ref;
     event.detail = Some(

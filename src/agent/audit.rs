@@ -1,4 +1,4 @@
-use crate::db::{AgentEntry, LedgerSeverity, LedgerSource};
+use crate::db::{AgentEntry, LedgerEventType, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::AgentContext;
 
@@ -22,7 +22,7 @@ pub enum AuditEvent {
 pub fn tick_audit(ctx: &AgentContext, agents: &[AgentEntry]) {
     for agent in agents {
         let session_id = format!("agent:{}", agent.name);
-        let mut event = new_event(LedgerSource::Agent, "audit_tick", LedgerSeverity::Info);
+        let mut event = new_event(LedgerSource::Agent, LedgerEventType::AuditTick, LedgerSeverity::Info);
         event.agent_name = Some(agent.name.clone());
         let payload = AuditEvent::Heartbeat {
             agent: agent.name.clone(),

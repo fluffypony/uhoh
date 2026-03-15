@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use crate::config::WatchConfig;
-use crate::db::{Database, LedgerSeverity, LedgerSource, SnapshotRow};
+use crate::db::{Database, LedgerEventType, LedgerSeverity, LedgerSource, SnapshotRow};
 use crate::event_ledger::{new_event, EventLedger};
 use crate::events::{publish_event, ServerEvent};
 
@@ -226,7 +226,7 @@ pub(super) fn emit_emergency_delete_detected(event: EmergencyDeleteEvent<'_>) {
     } else {
         crate::emergency::severity_for_ratio(ratio)
     };
-    let mut ledger_event = new_event(LedgerSource::Fs, "emergency_delete_detected", severity);
+    let mut ledger_event = new_event(LedgerSource::Fs, LedgerEventType::EmergencyDeleteDetected, severity);
     ledger_event.project_hash = Some(project_hash.to_string());
     ledger_event.detail = Some(detail.to_string());
     if let Err(err) = event_ledger.append(ledger_event) {
