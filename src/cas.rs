@@ -747,6 +747,7 @@ mod tests {
         assert!(read_blob(&blob_root, "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab").unwrap().is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn read_blob_corruption_detected() {
         let tmp = tempfile::tempdir().unwrap();
@@ -758,12 +759,9 @@ mod tests {
         let (hash, _) = store_blob(&blob_root, content).unwrap();
         let blob_path = blob_root.join(&hash[..2]).join(&hash);
 
-        // Make writable, tamper, make readonly again
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&blob_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        }
+        // Make writable so we can tamper
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&blob_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::write(&blob_path, b"TAMPERED").unwrap();
 
         let result = read_blob(&blob_root, &hash);
