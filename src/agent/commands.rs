@@ -163,13 +163,13 @@ tool_call_format = "jsonl"
                         if !profile.session_log_pattern.is_empty() {
                             match profiles::resolve_session_log_path(&profile.session_log_pattern) {
                                 Ok(Some(path)) => {
-                                    println!("  Session log: {} (found)", path.display())
+                                    println!("  Session log: {} (found)", path.display());
                                 }
                                 Ok(None) => {
                                     println!(
                                         "  Session log: no match for pattern '{}'",
                                         profile.session_log_pattern
-                                    )
+                                    );
                                 }
                                 Err(err) => println!("  Session log: error resolving: {err}"),
                             }

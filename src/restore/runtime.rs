@@ -43,6 +43,7 @@ impl RestoreCoordinator {
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct RestoreRuntime {
     pub database: Arc<Database>,
     pub uhoh_dir: PathBuf,

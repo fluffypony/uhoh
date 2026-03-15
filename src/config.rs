@@ -87,6 +87,7 @@ pub struct WatchConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CompactionConfig {
     #[serde(default = "default_keep_all_minutes")]
     pub keep_all_minutes: u64,
@@ -198,6 +199,7 @@ pub struct ModelTierConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct UpdateConfig {
     /// Enable auto-update checks
     #[serde(default = "default_auto_update")]

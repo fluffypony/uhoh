@@ -13,6 +13,7 @@ use subtle::ConstantTimeEq;
 use crate::server::transport_security::TransportSecurityPolicy;
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct AuthToken(pub String);
 
 pub fn generate_token() -> String {

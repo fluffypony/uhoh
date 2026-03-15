@@ -49,11 +49,13 @@ pub struct AppState {
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ApiState {
     pub runtime: RuntimeBundle,
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct HealthState {
     pub subsystem_manager: Arc<Mutex<SubsystemManager>>,
 }

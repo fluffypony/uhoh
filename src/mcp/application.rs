@@ -4,6 +4,7 @@ use super::protocol::{dispatch_protocol_request, JsonRpcRequest, JsonRpcResponse
 use super::tools::{mcp_tool_call_response, mcp_tools_list_response};
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct McpApplication {
     pub runtime: RuntimeBundle,
 }

@@ -214,6 +214,7 @@ pub struct SearchResult {
     pub match_context: String,
 }
 
+#[non_exhaustive]
 pub struct CreateSnapshotRow<'a> {
     pub project_hash: &'a str,
     pub snapshot_id: u64,
@@ -796,6 +797,7 @@ impl Database {
 
 // Types used around snapshot creation
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SnapFileEntry {
     pub path: String,
     pub hash: String,

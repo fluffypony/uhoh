@@ -8,6 +8,7 @@ use crate::events::ServerEvent;
 use crate::restore::{RestoreBusyError, RestoreRuntime};
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SnapshotCreateResult {
     pub snapshot_id: Option<u64>,
     pub snapshot_event: Option<ServerEvent>,

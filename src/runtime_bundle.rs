@@ -22,6 +22,7 @@ struct RuntimeBundleInner {
     sidecar_manager: SidecarManager,
 }
 
+#[non_exhaustive]
 pub struct RuntimeBundleConfig {
     pub database: Arc<Database>,
     pub uhoh_dir: PathBuf,

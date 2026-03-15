@@ -1,5 +1,3 @@
-use anyhow::Result;
-
 use crate::db::{AgentEntry, LedgerSeverity, LedgerSource};
 use crate::event_ledger::new_event;
 use crate::subsystem::AgentContext;
@@ -21,7 +19,7 @@ pub enum AuditEvent {
     },
 }
 
-pub fn tick_audit(ctx: &AgentContext, agents: &[AgentEntry]) -> Result<()> {
+pub fn tick_audit(ctx: &AgentContext, agents: &[AgentEntry]) {
     for agent in agents {
         let session_id = format!("agent:{}", agent.name);
         let mut event = new_event(LedgerSource::Agent, "audit_tick", LedgerSeverity::Info);
@@ -41,5 +39,4 @@ pub fn tick_audit(ctx: &AgentContext, agents: &[AgentEntry]) -> Result<()> {
             tracing::error!("failed to append audit_tick event: {err}");
         }
     }
-    Ok(())
 }

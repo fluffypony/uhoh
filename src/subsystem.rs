@@ -30,6 +30,7 @@ pub enum SubsystemHealth {
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct SubsystemContext {
     pub database: Arc<Database>,
     pub event_ledger: EventLedger,

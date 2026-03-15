@@ -90,6 +90,7 @@ pub struct CliCredentialResolution {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CredentialStoreOutcome {
     pub keyring_status: KeyringStatus,
 }

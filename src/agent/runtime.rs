@@ -224,7 +224,7 @@ impl AgentSubsystem {
         self.sync_intercept_tailers(ctx, agents);
         self.sync_fanotify_supervision(ctx, agents)?;
         if ctx.config.agent.audit_enabled {
-            audit::tick_audit(ctx, agents)?;
+            audit::tick_audit(ctx, agents);
         }
         self.sync_proxy_supervision(ctx);
         Ok(())
