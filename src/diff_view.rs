@@ -440,6 +440,146 @@ pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> 
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_diff_identical_content() {
+        let content = b"line1\nline2\nline3\n";
+        let diff = compute_structured_diff(content, content, "test.rs", false);
+        assert_eq!(diff.status, "modified");
+        assert!(!diff.binary);
+        assert!(!diff.too_large);
+        // All lines are context (equal), no adds or removes
+        for hunk in &diff.hunks {
+            for line in &hunk.lines {
+                assert_eq!(line.change_type, "context");
+            }
+        }
+    }
+
+    #[test]
+    fn structured_diff_added_file() {
+        let diff = compute_structured_diff(b"", b"new content\n", "new.rs", false);
+        assert_eq!(diff.status, "added");
+        assert_eq!(diff.hunks.len(), 1);
+        let hunk = &diff.hunks[0];
+        assert_eq!(hunk.old_count, 0);
+        assert!(hunk.new_count > 0);
+        assert!(hunk.lines.iter().all(|l| l.change_type == "add"));
+    }
+
+    #[test]
+    fn structured_diff_deleted_file() {
+        let diff = compute_structured_diff(b"old content\n", b"", "deleted.rs", false);
+        assert_eq!(diff.status, "deleted");
+        assert_eq!(diff.hunks.len(), 1);
+        let hunk = &diff.hunks[0];
+        assert!(hunk.old_count > 0);
+        assert_eq!(hunk.new_count, 0);
+        assert!(hunk.lines.iter().all(|l| l.change_type == "remove"));
+    }
+
+    #[test]
+    fn structured_diff_modified_file() {
+        let old = b"line1\nline2\nline3\n";
+        let new = b"line1\nchanged\nline3\n";
+        let diff = compute_structured_diff(old, new, "mod.rs", false);
+        assert_eq!(diff.status, "modified");
+        assert_eq!(diff.hunks.len(), 1);
+        let hunk = &diff.hunks[0];
+
+        // Should have context, remove, add, context lines
+        let types: Vec<&str> = hunk.lines.iter().map(|l| l.change_type.as_str()).collect();
+        assert!(types.contains(&"context"));
+        assert!(types.contains(&"remove"));
+        assert!(types.contains(&"add"));
+    }
+
+    #[test]
+    fn structured_diff_line_numbers() {
+        let old = b"a\nb\nc\n";
+        let new = b"a\nB\nc\n";
+        let diff = compute_structured_diff(old, new, "test.txt", false);
+        let hunk = &diff.hunks[0];
+
+        // First line (context "a") should be old_line=1, new_line=1
+        assert_eq!(hunk.lines[0].old_line, Some(1));
+        assert_eq!(hunk.lines[0].new_line, Some(1));
+        assert_eq!(hunk.lines[0].change_type, "context");
+
+        // Remove "b" should have old_line=2, no new_line
+        let remove = hunk.lines.iter().find(|l| l.change_type == "remove").unwrap();
+        assert_eq!(remove.old_line, Some(2));
+        assert_eq!(remove.new_line, None);
+
+        // Add "B" should have new_line=2, no old_line
+        let add = hunk.lines.iter().find(|l| l.change_type == "add").unwrap();
+        assert_eq!(add.old_line, None);
+        assert_eq!(add.new_line, Some(2));
+    }
+
+    #[test]
+    fn structured_diff_hunk_counts() {
+        let old = b"a\nb\nc\nd\n";
+        let new = b"a\nX\nY\nc\nd\n";
+        let diff = compute_structured_diff(old, new, "test.txt", false);
+        let hunk = &diff.hunks[0];
+
+        // old has 4 lines, new has 5 lines
+        assert_eq!(hunk.old_count, 4);
+        assert_eq!(hunk.new_count, 5);
+    }
+
+    #[test]
+    fn structured_diff_binary_detection() {
+        let binary = &[0u8, 1, 2, 3, 0, 0, 0xFF, 0xFE];
+        let diff = compute_structured_diff(binary, b"text", "test.bin", false);
+        assert!(diff.binary);
+        assert!(diff.hunks.is_empty());
+    }
+
+    #[test]
+    fn structured_diff_too_large() {
+        let big = vec![b'x'; MAX_STRUCTURED_DIFF_BYTES + 1];
+        let diff = compute_structured_diff(&big, b"small", "big.txt", false);
+        assert!(diff.too_large);
+        assert!(diff.hunks.is_empty());
+    }
+
+    #[test]
+    fn structured_diff_with_highlighting() {
+        let old = b"fn main() {}\n";
+        let new = b"fn main() {\n    println!(\"hello\");\n}\n";
+        let diff = compute_structured_diff(old, new, "test.rs", true);
+
+        // Lines with highlighting should have highlighted_html set
+        let has_html = diff
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .any(|l| l.highlighted_html.is_some());
+        assert!(has_html);
+    }
+
+    #[test]
+    fn structured_diff_path_preserved() {
+        let diff = compute_structured_diff(b"a", b"b", "src/deep/path.rs", false);
+        assert_eq!(diff.path, "src/deep/path.rs");
+    }
+
+    #[test]
+    fn structured_diff_no_trailing_newline() {
+        // Content without trailing newlines shouldn't break
+        let old = b"no newline";
+        let new = b"different no newline";
+        let diff = compute_structured_diff(old, new, "test.txt", false);
+        assert_eq!(diff.status, "modified");
+        assert!(!diff.hunks.is_empty());
+    }
+}
+
 /// Build a file list from the current working directory (for diffing against current state).
 fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db::FileEntryRow>> {
     let walker = crate::ignore_rules::build_walker(project_path);

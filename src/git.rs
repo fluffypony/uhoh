@@ -130,11 +130,7 @@ pub fn cmd_gitstash(
                 path.replace('\\', "/")
             };
             // Path traversal guard
-            let p = std::path::Path::new(&git_path);
-            if p.is_absolute()
-                || p.components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
+            if !is_safe_git_path(&git_path) {
                 tracing::warn!("Skipping suspicious path in git stash: {}", git_path);
                 continue;
             }
@@ -417,6 +413,17 @@ fn run_git_with_index(cwd: &Path, index_file: &Path, args: &[&str]) -> Result<()
     Ok(())
 }
 
+/// Returns true if the path is safe for inclusion in a git index entry.
+/// Rejects absolute paths and paths containing `..` components to prevent
+/// path traversal attacks when constructing stash entries.
+fn is_safe_git_path(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    !p.is_absolute()
+        && !p
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
 fn run_git_output_with_index(cwd: &Path, index_file: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .current_dir(cwd)
@@ -434,4 +441,168 @@ fn run_git_output_with_index(cwd: &Path, index_file: &Path, args: &[&str]) -> Re
         );
     }
     Ok(String::from_utf8(output.stdout)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- is_safe_git_path tests ----
+
+    #[test]
+    fn safe_relative_paths() {
+        assert!(is_safe_git_path("src/main.rs"));
+        assert!(is_safe_git_path("README.md"));
+        assert!(is_safe_git_path("a/b/c/d.txt"));
+        assert!(is_safe_git_path("file"));
+    }
+
+    #[test]
+    fn rejects_absolute_paths() {
+        assert!(!is_safe_git_path("/etc/passwd"));
+        assert!(!is_safe_git_path("/home/user/.ssh/id_rsa"));
+    }
+
+    #[test]
+    fn rejects_parent_traversal() {
+        assert!(!is_safe_git_path("../etc/passwd"));
+        assert!(!is_safe_git_path("src/../../secret"));
+        assert!(!is_safe_git_path("a/b/../../../etc/shadow"));
+    }
+
+    #[test]
+    fn allows_dots_in_names() {
+        // ".." as a component is rejected, but dots in filenames are fine
+        assert!(is_safe_git_path(".gitignore"));
+        assert!(is_safe_git_path("src/.hidden"));
+        assert!(is_safe_git_path("..."));
+        assert!(is_safe_git_path("a/..b/c"));
+    }
+
+    // ---- resolve_git_dir tests ----
+
+    #[test]
+    fn resolve_git_dir_real_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+
+        // Initialize a real git repo
+        let status = std::process::Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&project)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let git_dir = resolve_git_dir(&project).unwrap();
+        assert!(git_dir.exists());
+        assert!(git_dir.join("HEAD").exists());
+    }
+
+    #[test]
+    fn resolve_git_dir_not_a_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = resolve_git_dir(tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_git_dir_worktree_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("worktree");
+        std::fs::create_dir_all(&project).unwrap();
+
+        // Create a real gitdir target so canonicalize works
+        let real_gitdir = tmp.path().join("real-gitdir");
+        std::fs::create_dir_all(&real_gitdir).unwrap();
+
+        // Write a .git file pointing to the real gitdir
+        let git_file = project.join(".git");
+        std::fs::write(
+            &git_file,
+            format!("gitdir: {}", real_gitdir.to_string_lossy()),
+        )
+        .unwrap();
+
+        let resolved = resolve_git_dir(&project).unwrap();
+        assert_eq!(
+            dunce::canonicalize(&resolved).unwrap(),
+            dunce::canonicalize(&real_gitdir).unwrap()
+        );
+    }
+
+    // ---- hook install/remove tests ----
+
+    #[test]
+    fn install_and_remove_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let status = std::process::Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&project)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        // Install
+        install_hook(&project).unwrap();
+        let hook = project.join(".git/hooks/pre-commit");
+        assert!(hook.exists());
+        let content = std::fs::read_to_string(&hook).unwrap();
+        assert!(content.contains("uhoh pre-commit hook"));
+
+        // Reinstall should be idempotent
+        install_hook(&project).unwrap();
+        let content2 = std::fs::read_to_string(&hook).unwrap();
+        assert_eq!(
+            content.matches("uhoh pre-commit hook").count(),
+            content2.matches("uhoh pre-commit hook").count()
+        );
+
+        // Remove
+        remove_hook(&project).unwrap();
+        assert!(!hook.exists());
+    }
+
+    #[test]
+    fn remove_hook_preserves_other_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let status = std::process::Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&project)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        // Write an existing pre-commit hook with other content
+        let hooks_dir = project.join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join("pre-commit");
+        std::fs::write(&hook_path, "#!/bin/sh\necho 'custom hook'\n").unwrap();
+
+        // Install uhoh hook (appends)
+        install_hook(&project).unwrap();
+        let content = std::fs::read_to_string(&hook_path).unwrap();
+        assert!(content.contains("custom hook"));
+        assert!(content.contains("uhoh pre-commit hook"));
+
+        // Remove uhoh hook, other content stays
+        remove_hook(&project).unwrap();
+        assert!(hook_path.exists());
+        let remaining = std::fs::read_to_string(&hook_path).unwrap();
+        assert!(remaining.contains("custom hook"));
+        assert!(!remaining.contains("uhoh pre-commit hook"));
+    }
 }
