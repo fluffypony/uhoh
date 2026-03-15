@@ -192,7 +192,7 @@ pub async fn status(uhoh: &Path, database: &db::Database) -> Result<()> {
                         .get("status")
                         .and_then(|value| value.as_str())
                         .unwrap_or("unknown");
-                    lines.push(format!("  - {}: {}", name, status));
+                    lines.push(format!("  - {name}: {status}"));
                 }
                 lines.join("\n")
             }
@@ -452,18 +452,12 @@ async fn run_doctor(
     let mut orphans = Vec::new();
     if blob_root.exists() {
         for pref in std::fs::read_dir(&blob_root)? {
-            let pref = match pref {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
+            let Ok(pref) = pref else { continue };
             if !pref.file_type()?.is_dir() || pref.file_name() == "tmp" {
                 continue;
             }
             for entry in std::fs::read_dir(pref.path())? {
-                let entry = match entry {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                };
+                let Ok(entry) = entry else { continue };
                 let name = entry.file_name().to_string_lossy().to_string();
                 if !referenced.contains(&name) {
                     orphans.push(entry.path());

@@ -28,7 +28,7 @@ pub fn blame(database: &db::Database, path: &str) -> Result<()> {
         .find(|entry| entry.path.as_deref() == Some(path))
     {
         let chain = database.event_ledger_trace(seed.id)?;
-        println!("Blame chain for {}", path);
+        println!("Blame chain for {path}");
         for entry in chain.entries {
             println!(
                 "#{} {} {} [{}] {}",
@@ -41,7 +41,7 @@ pub fn blame(database: &db::Database, path: &str) -> Result<()> {
             );
         }
     } else {
-        println!("No events found for path {}", path);
+        println!("No events found for path {path}");
     }
     Ok(())
 }
@@ -94,7 +94,7 @@ pub fn timeline(
 pub fn verify(database: &db::Database) -> Result<()> {
     let (count, broken) = database.verify_event_ledger_chain()?;
     if broken.is_empty() {
-        println!("Ledger verified: {} event(s), chain intact", count);
+        println!("Ledger verified: {count} event(s), chain intact");
         return Ok(());
     }
 
@@ -114,8 +114,7 @@ fn normalize_timeline_source(source: &str) -> Result<LedgerSource> {
     let source = source.trim().to_ascii_lowercase();
     LedgerSource::parse(&source).ok_or_else(|| {
         anyhow::anyhow!(
-            "Invalid --source '{}'. Expected one of: fs, db_guard, agent, daemon, mlx",
-            source
+            "Invalid --source '{source}'. Expected one of: fs, db_guard, agent, daemon, mlx"
         )
     })
 }
@@ -126,10 +125,7 @@ fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
         anyhow::bail!("--since cannot be empty");
     }
     if since.len() < 2 {
-        anyhow::bail!(
-            "Invalid --since format '{}'; use forms like 30m, 1h, 2d",
-            raw
-        );
+        anyhow::bail!("Invalid --since format '{raw}'; use forms like 30m, 1h, 2d");
     }
 
     let split_pos = since
@@ -139,7 +135,7 @@ fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
     let unit_part = &since[split_pos..];
     let qty: i64 = num_part
         .parse()
-        .with_context(|| format!("Invalid --since quantity '{}'", num_part))?;
+        .with_context(|| format!("Invalid --since quantity '{num_part}'"))?;
     if qty <= 0 {
         anyhow::bail!("--since quantity must be positive");
     }
@@ -149,10 +145,7 @@ fn parse_since_cutoff(raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
         "m" | "min" | "mins" => chrono::Duration::minutes(qty),
         "h" | "hr" | "hrs" | "hour" | "hours" => chrono::Duration::hours(qty),
         "d" | "day" | "days" => chrono::Duration::days(qty),
-        _ => anyhow::bail!(
-            "Invalid --since unit '{}'. Use one of s, m, h, d",
-            unit_part
-        ),
+        _ => anyhow::bail!("Invalid --since unit '{unit_part}'. Use one of s, m, h, d"),
     };
 
     Ok(chrono::Utc::now() - delta)

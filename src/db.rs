@@ -621,9 +621,7 @@ impl Database {
                 Err(err) => {
                     if attempt == MAX_ATTEMPTS {
                         return Err(anyhow::anyhow!(
-                            "Database connection pool unavailable after {} attempts: {}",
-                            MAX_ATTEMPTS,
-                            err
+                            "Database connection pool unavailable after {MAX_ATTEMPTS} attempts: {err}"
                         ));
                     }
                     tracing::error!(

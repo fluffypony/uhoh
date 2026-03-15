@@ -57,22 +57,16 @@ pub fn should_run_ai_with(config: &AiConfig, sys: &sysinfo::System) -> bool {
 /// - Battery present and discharging → false
 /// - API error → false (conservative: skip AI rather than drain battery)
 fn on_ac_power() -> bool {
-    let manager = match battery::Manager::new() {
-        Ok(m) => m,
-        Err(_) => {
-            // Manager creation failed — likely no battery subsystem (desktop/VM). Assume AC.
-            return true;
-        }
+    let Ok(manager) = battery::Manager::new() else {
+        // Manager creation failed — likely no battery subsystem (desktop/VM). Assume AC.
+        return true;
     };
-    let mut batteries = match manager.batteries() {
-        Ok(b) => b,
-        Err(_) => {
-            // API error enumerating batteries. On Linux, this can happen on battery-less
-            // desktops/VMs where Manager::new() succeeds but batteries() fails.
-            // Default to AC (true) since Manager creation would have failed on a
-            // truly unsupported platform.
-            return true;
-        }
+    let Ok(mut batteries) = manager.batteries() else {
+        // API error enumerating batteries. On Linux, this can happen on battery-less
+        // desktops/VMs where Manager::new() succeeds but batteries() fails.
+        // Default to AC (true) since Manager creation would have failed on a
+        // truly unsupported platform.
+        return true;
     };
     // If no batteries found at all, this is a desktop/VM — assume AC
     let mut found_any = false;

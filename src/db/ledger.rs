@@ -392,9 +392,7 @@ impl Database {
         )?;
         if count >= limit {
             anyhow::bail!(
-                "Descendant expansion reached limit of {} entries for root event #{}",
-                limit,
-                root_id
+                "Descendant expansion reached limit of {limit} entries for root event #{root_id}"
             );
         }
 
@@ -435,9 +433,7 @@ impl Database {
         )?;
         if count >= limit {
             anyhow::bail!(
-                "Cascade descendant expansion reached limit of {} entries for root event #{}",
-                limit,
-                root_id
+                "Cascade descendant expansion reached limit of {limit} entries for root event #{root_id}"
             );
         }
         let changed = conn.execute(
@@ -482,9 +478,7 @@ impl Database {
         )?;
         if count >= limit {
             anyhow::bail!(
-                "Cascade descendant expansion reached limit of {} entries for root event #{}",
-                limit,
-                root_id
+                "Cascade descendant expansion reached limit of {limit} entries for root event #{root_id}"
             );
         }
         let changed = conn.execute(

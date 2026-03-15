@@ -116,10 +116,7 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
         loop {
             match event_rx.recv().await {
                 Ok(event) => {
-                    let payload = match serde_json::to_string(&event) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
+                    let Ok(payload) = serde_json::to_string(&event) else { continue };
                     if sender.send(Message::Text(payload.into())).await.is_err() {
                         break;
                     }

@@ -646,15 +646,12 @@ async fn spawn_snapshot_task(
     snapshot_runtime: &snapshot::SnapshotRuntime,
     request: SnapshotSpawnRequest,
 ) {
-    let permit = match semaphore.clone().acquire_owned().await {
-        Ok(permit) => permit,
-        Err(_) => {
-            tracing::warn!(
-                "Semaphore closed while scheduling {} task",
-                request.kind.trigger()
-            );
-            return;
-        }
+    let Ok(permit) = semaphore.clone().acquire_owned().await else {
+        tracing::warn!(
+            "Semaphore closed while scheduling {} task",
+            request.kind.trigger()
+        );
+        return;
     };
 
     let uhoh_dir = uhoh_dir.to_path_buf();

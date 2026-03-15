@@ -147,7 +147,7 @@ impl ServerEvent {
                 old_version,
                 new_version,
             } => {
-                format!("Sidecar updated: {:?} -> {}", old_version, new_version)
+                format!("Sidecar updated: {old_version:?} -> {new_version}")
             }
             ServerEvent::MlxUpdateStatus { status, detail } => {
                 format!("MLX update {status}: {detail}")

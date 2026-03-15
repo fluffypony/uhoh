@@ -44,10 +44,7 @@ pub fn resolve_session_log_path(pattern: &str) -> Result<Option<std::path::PathB
     let expanded = super::expand_home(pattern);
     let mut matches = Vec::new();
     for entry in glob::glob(&expanded)? {
-        let path = match entry {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+        let Ok(path) = entry else { continue };
         if path.is_file() {
             matches.push(path);
         }

@@ -74,16 +74,13 @@ pub fn handle_agent_action(uhoh_dir: &Path, database: &Database, action: &AgentA
                         .context("Root event not found")?;
                     if !session_matches_event(&root_event, session_id) {
                         anyhow::bail!(
-                            "Root event #{} does not belong to session {}",
-                            root_id,
-                            session_id
+                            "Root event #{root_id} does not belong to session {session_id}"
                         );
                     }
                     let changed = database
                         .event_ledger_mark_resolved_cascade_with_session(root_id, session_id)?;
                     println!(
-                        "Marked {} session-matching event(s) as resolved for cascade root #{}",
-                        changed, root_id
+                        "Marked {changed} session-matching event(s) as resolved for cascade root #{root_id}"
                     );
                     return Ok(());
                 }
@@ -97,13 +94,13 @@ pub fn handle_agent_action(uhoh_dir: &Path, database: &Database, action: &AgentA
                 if let Some(session_id) = session.as_deref() {
                     let event = database.event_ledger_get(*id)?.context("Event not found")?;
                     if !session_matches_event(&event, session_id) {
-                        anyhow::bail!("Event #{} does not belong to session {}", id, session_id);
+                        anyhow::bail!("Event #{id} does not belong to session {session_id}");
                     }
                 }
                 let ledger_db = std::sync::Arc::new(database.clone_handle());
                 let ledger = crate::event_ledger::EventLedger::new(ledger_db);
                 undo::resolve_event(database, &ledger, uhoh_dir, *id)?;
-                println!("Reverted event #{} and marked it as resolved", id);
+                println!("Reverted event #{id} and marked it as resolved");
             } else {
                 anyhow::bail!("Provide event id or --cascade");
             }

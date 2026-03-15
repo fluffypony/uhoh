@@ -63,8 +63,7 @@ impl fmt::Display for RestoreApplyError {
             }
             Self::ConfirmationRequired { delete_count } => write!(
                 f,
-                "Refusing to delete {} tracked files without confirmation. Re-run with force or confirm the restore from the caller.",
-                delete_count
+                "Refusing to delete {delete_count} tracked files without confirmation. Re-run with force or confirm the restore from the caller."
             ),
         }
     }

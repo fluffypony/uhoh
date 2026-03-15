@@ -344,7 +344,7 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
 
     // Create 20 files
     for i in 0..20 {
-        std::fs::write(project_dir.join(format!("file{}.rs", i)), "content").unwrap();
+        std::fs::write(project_dir.join(format!("file{i}.rs")), "content").unwrap();
     }
 
     db.add_project("emrg1", project_dir.to_str().unwrap())
@@ -370,7 +370,7 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
 
     // Delete 15 of 20 files (75% > 30% threshold, 15 > 5 min_files)
     for i in 0..15 {
-        std::fs::remove_file(project_dir.join(format!("file{}.rs", i))).unwrap();
+        std::fs::remove_file(project_dir.join(format!("file{i}.rs"))).unwrap();
     }
 
     // Second snapshot should auto-upgrade to "emergency"
@@ -414,7 +414,7 @@ fn test_sub_threshold_no_emergency_upgrade() {
 
     // Create 100 files
     for i in 0..100 {
-        std::fs::write(project_dir.join(format!("file{}.rs", i)), "content").unwrap();
+        std::fs::write(project_dir.join(format!("file{i}.rs")), "content").unwrap();
     }
 
     db.add_project("emrg2", project_dir.to_str().unwrap())

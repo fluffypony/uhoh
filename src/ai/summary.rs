@@ -209,7 +209,7 @@ fn append_change_diff(
                 diff_chars,
                 max_diff_chars,
                 diff_truncated,
-                &format!("{}{}", sign, change),
+                &format!("{sign}{change}"),
             );
         }
 

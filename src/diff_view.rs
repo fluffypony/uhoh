@@ -602,18 +602,12 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
     let walker = crate::ignore_rules::build_walker(project_path);
     let mut entries = Vec::new();
     for entry in walker {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
         if path.file_name().is_some_and(|n| n == ".uhoh") {
             continue;
         }
-        let meta = match std::fs::symlink_metadata(path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+        let Ok(meta) = std::fs::symlink_metadata(path) else { continue };
         let ft = meta.file_type();
         if !ft.is_file() && !ft.is_symlink() {
             continue;
@@ -623,10 +617,7 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
             Err(_) => continue,
         };
         let (hash, size, is_symlink, executable) = if ft.is_symlink() {
-            let target = match std::fs::read_link(path) {
-                Ok(t) => t,
-                Err(_) => continue, // Skip unreadable symlinks
-            };
+            let Ok(target) = std::fs::read_link(path) else { continue }; // Skip unreadable symlinks
             #[cfg(unix)]
             let target_bytes = {
                 use std::os::unix::ffi::OsStrExt;
@@ -657,10 +648,7 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
                 }
                 Ok((hasher.finalize().to_hex().to_string(), total))
             })();
-            let (hash, size) = match hash_result {
-                Ok(v) => v,
-                Err(_) => continue, // Skip unreadable files
-            };
+            let Ok((hash, size)) = hash_result else { continue }; // Skip unreadable files
             (hash, size, false, encoding::is_executable(path))
         };
         entries.push(crate::db::FileEntryRow {

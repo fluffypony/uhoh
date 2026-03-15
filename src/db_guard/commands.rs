@@ -270,9 +270,8 @@ fn store_credentials_if_needed(
     let previous = super::credentials::load_encrypted_credentials(connection_ref).unwrap_or(None);
     super::credentials::store_encrypted_credential(connection_ref, creds).with_context(|| {
         format!(
-            "Failed to persist credentials for guard '{}'. \
-             Ensure UHOH_MASTER_KEY is set and valid before adding a DSN with embedded credentials",
-            guard_name
+            "Failed to persist credentials for guard '{guard_name}'. \
+             Ensure UHOH_MASTER_KEY is set and valid before adding a DSN with embedded credentials"
         )
     })?;
 
