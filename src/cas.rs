@@ -264,19 +264,26 @@ pub fn store_blob_from_file(
         return Ok((hash, actual_size, StorageMethod::Reflink, 0));
     }
 
-    // Attempt compression if enabled; returns Some((compressed_size)) if the
+    // Attempt compression if enabled; returns Some((method, compressed_size)) if the
     // compressed blob was placed at blob_path, None if we should use uncompressed.
     if do_compress {
-        if let Some(result) = try_compress_and_place(
+        match try_compress_and_place(
             &tmp_path,
             &tmp_dir,
             &blob_path,
             actual_size,
             params.compress_level,
             &mut buf,
-        )? {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Ok((hash, actual_size, result.0, result.1));
+        ) {
+            Ok(Some(result)) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Ok((hash, actual_size, result.0, result.1));
+            }
+            Ok(None) => {} // Compression didn't help; fall through to uncompressed
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e);
+            }
         }
     }
 
