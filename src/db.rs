@@ -653,6 +653,15 @@ pub struct NewEventLedgerEntry {
     pub prev_hash: Option<String>,
 }
 
+pub struct DbGuardRegistration<'a> {
+    pub name: &'a str,
+    pub engine: DbGuardEngine,
+    pub connection_ref: &'a str,
+    pub tables_csv: &'a str,
+    pub watched_tables_cache: Option<&'a str>,
+    pub mode: DbGuardMode,
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct DbGuardEntry {
@@ -835,27 +844,19 @@ impl Database {
         .context("Failed to fetch latest event ledger hash")
     }
 
-    pub fn add_db_guard(
-        &self,
-        name: &str,
-        engine: DbGuardEngine,
-        connection_ref: &str,
-        tables_csv: &str,
-        watched_tables_cache: Option<&str>,
-        mode: DbGuardMode,
-    ) -> Result<()> {
+    pub fn add_db_guard(&self, reg: &DbGuardRegistration<'_>) -> Result<()> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO db_guards (name, engine, connection_ref, tables_csv, watched_tables_cache, mode, created_at, active)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
             params![
-                name,
-                engine.as_str(),
-                connection_ref,
-                tables_csv,
-                watched_tables_cache,
-                mode.as_str(),
+                reg.name,
+                reg.engine.as_str(),
+                reg.connection_ref,
+                reg.tables_csv,
+                reg.watched_tables_cache,
+                reg.mode.as_str(),
                 now
             ],
         )?;

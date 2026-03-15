@@ -308,14 +308,14 @@ fn install_and_register(
         None
     };
 
-    database.add_db_guard(
-        guard_name,
+    database.add_db_guard(&crate::db::DbGuardRegistration {
+        name: guard_name,
         engine,
         connection_ref,
         tables_csv,
-        watched_tables_cache.as_deref(),
-        mode_kind,
-    )?;
+        watched_tables_cache: watched_tables_cache.as_deref(),
+        mode: mode_kind,
+    })?;
     Ok(())
 }
 

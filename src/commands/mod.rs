@@ -35,7 +35,7 @@ pub async fn dispatch(uhoh: &Path, database: db::Database, command: Commands) ->
         Commands::Start { service } => runtime::start(uhoh, &database, service).await?,
         Commands::Stop => runtime::stop(uhoh)?,
         Commands::Restart => runtime::restart(uhoh)?,
-        Commands::Hook { action } => runtime::hook(&action)?,
+        Commands::Hook { action } => runtime::hook(action)?,
         Commands::Config { action } => runtime::config_action(uhoh, action)?,
         Commands::Gc => runtime::run_gc(uhoh, &database)?,
         Commands::Update => runtime::update(uhoh).await?,

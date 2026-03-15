@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::cas;
-use crate::cli::ConfigAction;
+use crate::cli::{ConfigAction, HookAction};
 use crate::config;
 use crate::daemon;
 use crate::db;
@@ -36,12 +36,11 @@ pub fn restart(uhoh: &Path) -> Result<()> {
     daemon::spawn_detached_daemon(uhoh)
 }
 
-pub fn hook(action: &str) -> Result<()> {
+pub fn hook(action: HookAction) -> Result<()> {
     let project_path = dunce::canonicalize(std::env::current_dir()?)?;
     match action {
-        "install" => git::install_hook(&project_path),
-        "remove" => git::remove_hook(&project_path),
-        other => anyhow::bail!("Unknown hook action: '{other}'. Use 'install' or 'remove'."),
+        HookAction::Install => git::install_hook(&project_path),
+        HookAction::Remove => git::remove_hook(&project_path),
     }
 }
 

@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::db::DbGuardMode;
 
@@ -105,8 +105,7 @@ pub enum Commands {
 
     /// Install or remove git pre-commit hook
     Hook {
-        /// "install" or "remove"
-        action: String,
+        action: HookAction,
     },
 
     Config {
@@ -191,6 +190,12 @@ pub enum Commands {
 #[derive(Subcommand)]
 pub enum LedgerAction {
     Verify,
+}
+
+#[derive(Clone, ValueEnum)]
+pub enum HookAction {
+    Install,
+    Remove,
 }
 
 #[derive(Subcommand)]

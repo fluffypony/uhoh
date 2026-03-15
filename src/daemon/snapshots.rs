@@ -57,12 +57,12 @@ pub(super) struct SnapshotSpawnRequest {
     pub(super) message: Option<String>,
 }
 
-type SnapshotTaskResult = (
-    String,
-    Vec<PathBuf>,
-    anyhow::Result<Option<SnapshotResult>>,
-    bool,
-);
+struct SnapshotTaskResult {
+    project_path_key: String,
+    changed_for_requeue: Vec<PathBuf>,
+    result: anyhow::Result<Option<SnapshotResult>>,
+    is_emergency: bool,
+}
 
 #[derive(Default)]
 struct SnapshotExecutionPlan {
@@ -706,12 +706,12 @@ async fn spawn_snapshot_task(
         };
 
         drop(permit);
-        (
+        SnapshotTaskResult {
             project_path_key,
             changed_for_requeue,
-            task_result,
-            kind.is_emergency(),
-        )
+            result: task_result,
+            is_emergency: kind.is_emergency(),
+        }
     });
 }
 
@@ -723,13 +723,20 @@ fn apply_snapshot_result(
     event_ledger: &EventLedger,
     task_result: SnapshotTaskResult,
 ) {
-    match task_result {
-        (project_path, _, Ok(Some(SnapshotResult::Created(snapshot_id))), was_emergency_spawn) => {
-            if let Some(state) = states.get_mut(&project_path) {
+    let SnapshotTaskResult {
+        project_path_key,
+        changed_for_requeue,
+        result,
+        is_emergency,
+    } = task_result;
+
+    match result {
+        Ok(Some(SnapshotResult::Created(snapshot_id))) => {
+            if let Some(state) = states.get_mut(&project_path_key) {
                 handle_created_snapshot(
                     state,
                     snapshot_id,
-                    was_emergency_spawn,
+                    is_emergency,
                     database,
                     watch,
                     event_tx,
@@ -737,16 +744,16 @@ fn apply_snapshot_result(
                 );
             }
         }
-        (project_path, _, Ok(Some(SnapshotResult::NoChanges)), _) => {
-            if let Some(state) = states.get_mut(&project_path) {
+        Ok(Some(SnapshotResult::NoChanges)) => {
+            if let Some(state) = states.get_mut(&project_path_key) {
                 state.last_snapshot = Instant::now();
                 state.deleted_paths.clear();
                 state.overflow_occurred = false;
             }
         }
-        (project_path, drained, Ok(None), _) | (project_path, drained, Err(_), _) => {
-            if let Some(state) = states.get_mut(&project_path) {
-                requeue_snapshot_changes(state, drained);
+        Ok(None) | Err(_) => {
+            if let Some(state) = states.get_mut(&project_path_key) {
+                requeue_snapshot_changes(state, changed_for_requeue);
             }
         }
     }
