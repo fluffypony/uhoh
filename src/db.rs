@@ -658,6 +658,7 @@ pub struct NewEventLedgerEntry {
     pub prev_hash: Option<String>,
 }
 
+#[non_exhaustive]
 pub struct DbGuardRegistration<'a> {
     pub name: &'a str,
     pub engine: DbGuardEngine,

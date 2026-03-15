@@ -127,6 +127,7 @@ pub fn store_symlink_target(blob_root: &Path, abs_path: &Path) -> Result<(String
 }
 
 /// Configuration for blob storage size limits and compression.
+#[non_exhaustive]
 pub struct BlobStorageParams {
     pub max_copy_blob_bytes: u64,
     pub max_binary_blob_bytes: u64,
