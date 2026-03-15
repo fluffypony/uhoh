@@ -615,13 +615,13 @@ fn record_file_entry(
     match cas::store_blob_from_file(
         ctx.blob_root,
         abs_path,
-        &cas::BlobStorageParams {
-            max_copy_blob_bytes: ctx.settings.storage.max_copy_blob_bytes,
-            max_binary_blob_bytes: ctx.settings.storage.max_binary_blob_bytes,
-            max_text_blob_bytes: ctx.settings.storage.max_text_blob_bytes,
-            compress_enabled: cfg!(feature = "compression") && ctx.settings.storage.compress,
-            compress_level: ctx.settings.storage.compress_level,
-        },
+        &cas::BlobStorageParams::new(
+            ctx.settings.storage.max_copy_blob_bytes,
+            ctx.settings.storage.max_binary_blob_bytes,
+            ctx.settings.storage.max_text_blob_bytes,
+            cfg!(feature = "compression") && ctx.settings.storage.compress,
+            ctx.settings.storage.compress_level,
+        ),
     ) {
         Ok((hash, stored_size, method, bytes_written)) => {
             let stored = method.is_recoverable();

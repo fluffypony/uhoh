@@ -136,6 +136,24 @@ pub struct BlobStorageParams {
     pub compress_level: i32,
 }
 
+impl BlobStorageParams {
+    pub fn new(
+        max_copy_blob_bytes: u64,
+        max_binary_blob_bytes: u64,
+        max_text_blob_bytes: u64,
+        compress_enabled: bool,
+        compress_level: i32,
+    ) -> Self {
+        Self {
+            max_copy_blob_bytes,
+            max_binary_blob_bytes,
+            max_text_blob_bytes,
+            compress_enabled,
+            compress_level,
+        }
+    }
+}
+
 /// Store a blob from a file path using single-pass streaming hash+write.
 /// Returns (hash, size, storage_method, bytes_on_disk).
 pub fn store_blob_from_file(
