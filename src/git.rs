@@ -4,6 +4,7 @@ use std::process::Command;
 
 use crate::cas;
 use crate::db::{Database, ProjectEntry};
+use crate::encoding;
 use which::which;
 
 /// Create a git stash entry from a snapshot using plumbing commands.
@@ -123,7 +124,7 @@ pub fn cmd_gitstash(
             // Decode b64:-encoded paths back to filesystem paths for git,
             // normalizing to forward slashes (git index requires forward slashes).
             let git_path = if path.starts_with("b64:") {
-                cas::decode_relpath_to_os(path)
+                encoding::decode_relpath_to_os(path)
                     .to_string_lossy()
                     .replace('\\', "/")
             } else {

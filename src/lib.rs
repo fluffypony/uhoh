@@ -4,6 +4,7 @@ pub mod cas;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod encoding;
 pub(crate) mod daemon;
 pub mod db;
 pub(crate) mod db_guard;

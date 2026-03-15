@@ -475,7 +475,7 @@ impl Database {
         project_hash: &str,
         base58_id: &str,
     ) -> Result<Option<SnapshotRow>> {
-        let snapshot_id = crate::cas::base58_to_id(base58_id).context("Invalid snapshot ID")?;
+        let snapshot_id = crate::encoding::base58_to_id(base58_id).context("Invalid snapshot ID")?;
         let conn = self.conn()?;
         conn.query_row(
             "SELECT s.rowid, s.snapshot_id, s.timestamp, s.trigger, s.message, s.pinned,

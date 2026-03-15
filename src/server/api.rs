@@ -202,7 +202,7 @@ pub(crate) async fn list_snapshots(
                 .iter()
                 .map(|s| {
                     json!({
-                        "id": crate::cas::id_to_base58(s.snapshot_id),
+                        "id": crate::encoding::id_to_base58(s.snapshot_id),
                         "rowid": s.rowid,
                         "timestamp": s.timestamp,
                         "trigger": s.trigger,
@@ -230,7 +230,7 @@ pub(crate) async fn get_snapshot(
             .find_snapshot_by_base58(&hash, &snap_id)?
             .ok_or_else(|| ApiError::not_found("Snapshot not found"))?;
         Ok(json!({
-            "id": crate::cas::id_to_base58(snap.snapshot_id),
+            "id": crate::encoding::id_to_base58(snap.snapshot_id),
             "rowid": snap.rowid,
             "timestamp": snap.timestamp,
             "trigger": snap.trigger,
@@ -255,7 +255,7 @@ pub(crate) async fn get_snapshot_files(
 ) -> impl IntoResponse {
     let db = state.runtime.database();
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
-        let id = crate::cas::base58_to_id(&snap_id)
+        let id = crate::encoding::base58_to_id(&snap_id)
             .ok_or_else(|| ApiError::invalid_input("Invalid snapshot ID"))?;
         if id == 0 {
             return Err(ApiError::invalid_input(
@@ -553,7 +553,7 @@ pub(crate) async fn create_snapshot(
             if let (Some(tx), Some(event)) = (event_tx.as_ref(), result.snapshot_event) {
                 crate::events::publish_event(tx, event);
             }
-            Ok(json!({ "snapshot_id": crate::cas::id_to_base58(id) }))
+            Ok(json!({ "snapshot_id": crate::encoding::id_to_base58(id) }))
         } else {
             Ok(json!({ "message": "No changes detected" }))
         }
@@ -580,7 +580,7 @@ pub(crate) async fn set_snapshot_pin(
             .ok_or_else(|| ApiError::not_found("Snapshot not found"))?;
         db.pin_snapshot(snap.rowid, pinned)?;
         Ok(json!({
-            "id": crate::cas::id_to_base58(snap.snapshot_id),
+            "id": crate::encoding::id_to_base58(snap.snapshot_id),
             "pinned": pinned,
         }))
     })
@@ -620,7 +620,7 @@ pub(crate) async fn restore_snapshot(
         if let Some(tp) = target_path_for_validation.as_deref() {
             resolve::validate_path_within_project(std::path::Path::new(&project.current_path), tp)
                 .map_err(ApiError::invalid_input)?;
-            let encoded_target = crate::cas::encode_relpath(std::path::Path::new(tp));
+            let encoded_target = crate::encoding::encode_relpath(std::path::Path::new(tp));
             let target_exists = db
                 .get_snapshot_files(snapshot.rowid)?
                 .into_iter()
@@ -677,7 +677,7 @@ pub(crate) async fn search(
                 .iter()
                 .map(|r| {
                     json!({
-                        "snapshot_id": crate::cas::id_to_base58(r.snapshot_id),
+                        "snapshot_id": crate::encoding::id_to_base58(r.snapshot_id),
                         "timestamp": r.timestamp,
                         "trigger": r.trigger,
                         "message": r.message,
@@ -719,7 +719,7 @@ pub(crate) async fn get_timeline(
             let mut auto_saves = Vec::new();
             for (s, ai_summary) in &summaries {
                 let entry = json!({
-                    "id": crate::cas::id_to_base58(s.snapshot_id),
+                    "id": crate::encoding::id_to_base58(s.snapshot_id),
                     "timestamp": s.timestamp,
                     "trigger": s.trigger,
                     "message": s.message,

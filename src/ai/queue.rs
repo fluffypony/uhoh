@@ -94,7 +94,7 @@ pub async fn process_summary_queue(
                             event_tx,
                             ServerEvent::AiSummaryCompleted {
                                 project_hash: job.project_hash.clone(),
-                                snapshot_id: crate::cas::id_to_base58(snapshot.snapshot_id),
+                                snapshot_id: crate::encoding::id_to_base58(snapshot.snapshot_id),
                                 summary: text,
                             },
                         );

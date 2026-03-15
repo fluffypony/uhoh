@@ -286,8 +286,8 @@ fn tool_create_snapshot(
             publish_event(&tx, event);
         }
         Ok(json!({
-            "content": [{"type": "text", "text": format!("Snapshot created: {}", crate::cas::id_to_base58(snapshot_id))}],
-            "snapshot_id": crate::cas::id_to_base58(snapshot_id)
+            "content": [{"type": "text", "text": format!("Snapshot created: {}", crate::encoding::id_to_base58(snapshot_id))}],
+            "snapshot_id": crate::encoding::id_to_base58(snapshot_id)
         }))
     } else {
         Ok(json!({
@@ -311,7 +311,7 @@ fn tool_list_snapshots(
         .iter()
         .map(|s| {
             json!({
-                "id": crate::cas::id_to_base58(s.snapshot_id),
+                "id": crate::encoding::id_to_base58(s.snapshot_id),
                 "timestamp": s.timestamp,
                 "trigger": s.trigger,
                 "message": s.message,

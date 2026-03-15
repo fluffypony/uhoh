@@ -8,6 +8,7 @@ use std::path::Path;
 
 use crate::cas;
 use crate::db::{Database, ProjectEntry};
+use crate::encoding;
 use chrono::TimeZone;
 use syntect::easy::HighlightLines;
 // Style imported implicitly via ranges; suppress unused warnings by not importing it explicitly
@@ -252,7 +253,7 @@ pub fn cmd_diff(
 
         let old_bytes = old_hash.and_then(|h| cas::read_blob(&blob_root, h).ok().flatten());
         let new_bytes = if is_current_tree {
-            let file_on_disk = project_path.join(cas::decode_relpath_to_os(path));
+            let file_on_disk = project_path.join(encoding::decode_relpath_to_os(path));
             // Use symlink_metadata to avoid following symlinks; read symlink target as content
             if let Ok(meta) = std::fs::symlink_metadata(&file_on_disk) {
                 if meta.file_type().is_symlink() {
@@ -281,7 +282,7 @@ pub fn cmd_diff(
 
         if old_is_binary || new_is_binary {
             let display_path = if path.strip_prefix("b64:").is_some() {
-                crate::cas::decode_relpath_to_os(path)
+                crate::encoding::decode_relpath_to_os(path)
                     .to_string_lossy()
                     .into_owned()
             } else {
@@ -311,7 +312,7 @@ pub fn cmd_diff(
         }
 
         let display_path = if path.strip_prefix("b64:").is_some() {
-            let os = crate::cas::decode_relpath_to_os(path);
+            let os = crate::encoding::decode_relpath_to_os(path);
             os.to_string_lossy().into_owned()
         } else {
             path.to_string()
@@ -380,7 +381,7 @@ pub fn cmd_cat(
                     .map(|d| d.with_timezone(&chrono::Utc) <= target)
                     .unwrap_or(false)
             })
-    } else if crate::cas::base58_to_id(id_str).is_some() {
+    } else if crate::encoding::base58_to_id(id_str).is_some() {
         database.find_snapshot_by_base58(&project.hash, id_str)?
     } else {
         None
@@ -398,7 +399,7 @@ pub fn cmd_cat(
                 return f.path == file_path;
             }
             // Try decoding stored path for non-UTF8 encoding
-            let stored_os = crate::cas::decode_relpath_to_os(&f.path);
+            let stored_os = crate::encoding::decode_relpath_to_os(&f.path);
             stored_os.to_string_lossy() == file_path
         })
         .ok_or_else(|| anyhow::anyhow!("File '{file_path}' not in snapshot {id_str}"))?;
@@ -425,7 +426,7 @@ pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> 
     println!("History of '{file_path}':");
     let mut prev_hash = String::new();
     for item in &history {
-        let id_str = cas::id_to_base58(item.snapshot_id);
+        let id_str = encoding::id_to_base58(item.snapshot_id);
         let changed = if item.hash != prev_hash {
             "changed"
         } else {
@@ -602,7 +603,7 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
             continue;
         }
         let rel_path = match path.strip_prefix(project_path) {
-            Ok(r) => cas::encode_relpath(r),
+            Ok(r) => encoding::encode_relpath(r),
             Err(_) => continue,
         };
         let (hash, size, is_symlink, executable) = if ft.is_symlink() {
@@ -644,7 +645,7 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
                 Ok(v) => v,
                 Err(_) => continue, // Skip unreadable files
             };
-            (hash, size, false, cas::is_executable(path))
+            (hash, size, false, encoding::is_executable(path))
         };
         entries.push(crate::db::FileEntryRow {
             path: rel_path,

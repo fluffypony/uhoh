@@ -260,7 +260,7 @@ pub(super) fn handle_watch_event(
         let mut new_deletes = 0usize;
         if let Some(manifest) = state.cached_prev_manifest.as_ref() {
             if let Ok(relative) = path.strip_prefix(project_path_key.as_str()) {
-                let rel_path = crate::cas::encode_relpath(relative);
+                let rel_path = crate::encoding::encode_relpath(relative);
                 if manifest.contains(&rel_path) {
                     if state.deleted_paths.insert(path.clone()) {
                         new_deletes += 1;
@@ -788,7 +788,7 @@ fn handle_created_snapshot(
                 event_tx,
                 ServerEvent::SnapshotCreated {
                     project_hash: state.hash.clone(),
-                    snapshot_id: crate::cas::id_to_base58(snapshot_id),
+                    snapshot_id: crate::encoding::id_to_base58(snapshot_id),
                     timestamp: row.timestamp,
                     trigger: row.trigger,
                     file_count: row.file_count as usize,

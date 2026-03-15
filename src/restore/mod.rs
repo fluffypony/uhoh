@@ -15,6 +15,7 @@ pub(crate) use self::runtime::{
 
 use crate::cas;
 use crate::db::{Database, ProjectEntry};
+use crate::encoding;
 use crate::snapshot;
 
 pub(crate) const RESTORE_IN_PROGRESS_FILE: &str = ".restore-in-progress";
@@ -236,7 +237,7 @@ pub(crate) fn apply_restore(
     let snap = database
         .find_snapshot_by_base58(&project.hash, id_str)?
         .ok_or(RestoreApplyError::SnapshotNotFound)?;
-    let snap_id_str = cas::id_to_base58(snap.snapshot_id);
+    let snap_id_str = encoding::id_to_base58(snap.snapshot_id);
 
     let project_path = Path::new(&project.current_path);
     let blob_root = uhoh_dir.join("blobs");
@@ -248,7 +249,7 @@ pub(crate) fn apply_restore(
             Ok::<String, anyhow::Error>(if path.starts_with("b64:") {
                 path.to_string()
             } else {
-                cas::encode_relpath(Path::new(path))
+                encoding::encode_relpath(Path::new(path))
             })
         })
         .transpose()?;
@@ -285,7 +286,7 @@ pub(crate) fn apply_restore(
                         .is_some_and(|ft| ft.is_file() || ft.is_symlink())
                     {
                         if let Ok(rel) = ent.path().strip_prefix(project_path) {
-                            set.insert(crate::cas::encode_relpath(rel));
+                            set.insert(crate::encoding::encode_relpath(rel));
                         }
                     }
                 }
@@ -320,14 +321,14 @@ pub(crate) fn apply_restore(
                 continue;
             }
             crate::resolve::validate_path_within_project(project_path, &file.path)?;
-            let rel = crate::cas::decode_relpath_to_os(&file.path);
+            let rel = crate::encoding::decode_relpath_to_os(&file.path);
             let abs_path = project_path.join(&rel);
             // Skip if current file already matches target (hash, type, and exec bit)
             if abs_path.exists() && !file.is_symlink {
                 if let Ok(meta) = std::fs::symlink_metadata(&abs_path) {
                     // Only skip regular files (not symlinks masquerading as files)
                     if meta.file_type().is_file() {
-                        let exec_matches = crate::cas::is_executable(&abs_path) == file.executable;
+                        let exec_matches = crate::encoding::is_executable(&abs_path) == file.executable;
                         if exec_matches {
                             if let Ok(current_hash) = quick_hash_file(&abs_path) {
                                 if current_hash == file.hash {
@@ -360,7 +361,7 @@ pub(crate) fn apply_restore(
                 files_to_delete: to_delete
                     .iter()
                     .map(|path| {
-                        cas::decode_relpath_to_os(path)
+                        encoding::decode_relpath_to_os(path)
                             .to_string_lossy()
                             .to_string()
                     })
@@ -479,7 +480,7 @@ pub(crate) fn apply_restore(
 
         for path in &to_delete {
             crate::resolve::validate_path_within_project(project_path, path)?;
-            let dst = project_path.join(crate::cas::decode_relpath_to_os(path));
+            let dst = project_path.join(crate::encoding::decode_relpath_to_os(path));
             if let Ok(meta) = dst.symlink_metadata() {
                 if meta.is_dir() {
                     safe_remove_dir_tree_within(project_path, &dst)?;
@@ -550,7 +551,7 @@ pub(crate) fn apply_restore(
             files_to_delete: to_delete
                 .iter()
                 .map(|path| {
-                    cas::decode_relpath_to_os(path)
+                    encoding::decode_relpath_to_os(path)
                         .to_string_lossy()
                         .to_string()
                 })
