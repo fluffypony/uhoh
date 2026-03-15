@@ -190,6 +190,7 @@ mod tests {
         assert_eq!(loaded, offsets);
     }
 
+    #[cfg(unix)] // rename-replace is not atomic on Windows
     #[test]
     fn persist_offsets_overwrites_previous() {
         let tmp = tempfile::tempdir().unwrap();

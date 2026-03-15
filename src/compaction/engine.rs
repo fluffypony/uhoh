@@ -328,15 +328,19 @@ mod tests {
         // Set keep_all_minutes=0 so all snapshots are subject to bucket logic
         let config = CompactionConfig::new(0, 14, 30, 180, true, 48);
 
+        // Use fixed timestamps guaranteed to be in the same 5-minute bucket.
+        // Both are at minute :01 and :02 of the same hour, well within one
+        // 5-minute window (bucket = timestamp / 300). Using fixed times avoids
+        // flakiness from Utc::now() landing near a 5-minute boundary.
         let now = Utc::now();
-        // Insert two snapshots 1 minute apart (same 5-min bucket)
-        // Both within keep_5min_days range (14 days)
+        let base = now - Duration::hours(2);
+        // Round down to a 5-minute boundary, then add 1 and 2 minutes
+        let bucket_start_secs = (base.timestamp() / 300) * 300;
+        let ts_older = Utc.timestamp_opt(bucket_start_secs + 60, 0).unwrap().to_rfc3339();
+        let ts_newer = Utc.timestamp_opt(bucket_start_secs + 120, 0).unwrap().to_rfc3339();
+
         // Use explicit snapshot IDs to ensure deterministic sort order:
         // older timestamp gets lower ID, newer timestamp gets higher ID.
-        // compact_project sorts by snapshot_id DESC, so the newer one (higher ID)
-        // claims the bucket first, and the older one is dominated.
-        let ts_older = (now - Duration::hours(2) - Duration::minutes(1)).to_rfc3339();
-        let ts_newer = (now - Duration::hours(2)).to_rfc3339();
         db.create_snapshot(crate::db::CreateSnapshotRow::new(
             "proj1", 900_001, &ts_older, SnapshotTrigger::Auto, "", false, &[], &[],
         )).unwrap();

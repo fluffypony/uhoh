@@ -154,6 +154,7 @@ mod tests {
         assert_eq!(content, "test-token");
     }
 
+    #[cfg(unix)] // rename-replace is not atomic on Windows
     #[test]
     fn write_token_file_overwrites() {
         let tmp = tempfile::tempdir().unwrap();
@@ -171,6 +172,7 @@ mod tests {
         assert_eq!(content, "22822");
     }
 
+    #[cfg(unix)] // rename-replace is not atomic on Windows
     #[test]
     fn write_port_file_overwrites() {
         let tmp = tempfile::tempdir().unwrap();
