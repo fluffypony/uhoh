@@ -102,6 +102,85 @@ fn token_matches(provided: &str, expected: &str) -> bool {
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_token_length() {
+        let token = generate_token();
+        assert_eq!(token.len(), 64, "Token should be 64 hex chars (32 bytes)");
+    }
+
+    #[test]
+    fn generate_token_is_hex() {
+        let token = generate_token();
+        assert!(
+            token.chars().all(|c| c.is_ascii_hexdigit()),
+            "Token should be all hex characters"
+        );
+    }
+
+    #[test]
+    fn generate_token_unique() {
+        let t1 = generate_token();
+        let t2 = generate_token();
+        assert_ne!(t1, t2, "Two generated tokens should differ");
+    }
+
+    #[test]
+    fn token_matches_correct() {
+        assert!(token_matches("secret123", "secret123"));
+    }
+
+    #[test]
+    fn token_matches_wrong() {
+        assert!(!token_matches("wrong", "secret123"));
+    }
+
+    #[test]
+    fn token_matches_empty() {
+        assert!(token_matches("", ""));
+        assert!(!token_matches("", "notempty"));
+        assert!(!token_matches("notempty", ""));
+    }
+
+    #[test]
+    fn write_token_file_creates_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_token_file(tmp.path(), "test-token").unwrap();
+        assert!(path.exists());
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "test-token");
+    }
+
+    #[test]
+    fn write_token_file_overwrites() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_token_file(tmp.path(), "first").unwrap();
+        write_token_file(tmp.path(), "second").unwrap();
+        let content = fs::read_to_string(tmp.path().join("server.token")).unwrap();
+        assert_eq!(content, "second");
+    }
+
+    #[test]
+    fn write_port_file_creates_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_port_file(tmp.path(), 22822).unwrap();
+        let content = fs::read_to_string(tmp.path().join("server.port")).unwrap();
+        assert_eq!(content, "22822");
+    }
+
+    #[test]
+    fn write_port_file_overwrites() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_port_file(tmp.path(), 8080).unwrap();
+        write_port_file(tmp.path(), 9090).unwrap();
+        let content = fs::read_to_string(tmp.path().join("server.port")).unwrap();
+        assert_eq!(content, "9090");
+    }
+}
+
 pub async fn host_validation_middleware(
     State(transport_policy): State<TransportSecurityPolicy>,
     headers: HeaderMap,

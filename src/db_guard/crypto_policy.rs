@@ -25,3 +25,60 @@ pub(crate) fn derive_argon2id_key(master: &str, salt: &[u8; 16]) -> Result<[u8; 
         .map_err(|err| anyhow::anyhow!("Argon2 key derivation failed: {err}"))?;
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn argon2id_creates_valid_instance() {
+        let result = argon2id();
+        assert!(result.is_ok(), "argon2id() should succeed with default params");
+    }
+
+    #[test]
+    fn derive_key_produces_32_bytes() {
+        let salt = [0u8; 16];
+        let key = derive_argon2id_key("test-password", &salt).unwrap();
+        assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn derive_key_deterministic() {
+        let salt = [1u8; 16];
+        let key1 = derive_argon2id_key("password", &salt).unwrap();
+        let key2 = derive_argon2id_key("password", &salt).unwrap();
+        assert_eq!(key1, key2, "Same input should produce same key");
+    }
+
+    #[test]
+    fn derive_key_different_passwords_differ() {
+        let salt = [2u8; 16];
+        let key1 = derive_argon2id_key("password1", &salt).unwrap();
+        let key2 = derive_argon2id_key("password2", &salt).unwrap();
+        assert_ne!(key1, key2, "Different passwords should produce different keys");
+    }
+
+    #[test]
+    fn derive_key_different_salts_differ() {
+        let salt1 = [3u8; 16];
+        let salt2 = [4u8; 16];
+        let key1 = derive_argon2id_key("password", &salt1).unwrap();
+        let key2 = derive_argon2id_key("password", &salt2).unwrap();
+        assert_ne!(key1, key2, "Different salts should produce different keys");
+    }
+
+    #[test]
+    fn derive_key_empty_password() {
+        let salt = [5u8; 16];
+        let key = derive_argon2id_key("", &salt).unwrap();
+        assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn constants_are_reasonable() {
+        assert!(ARGON2_MEMORY_KIB >= 1024, "Memory should be at least 1 MiB");
+        assert!(ARGON2_TIME_COST >= 1);
+        assert!(ARGON2_PARALLELISM >= 1);
+    }
+}

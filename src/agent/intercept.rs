@@ -146,6 +146,75 @@ async fn async_tail_one_file(
     Ok(new_offset)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offset_key_format() {
+        let key = offset_key("my-agent", Path::new("/tmp/session.log"));
+        assert_eq!(key, "my-agent|/tmp/session.log");
+    }
+
+    #[test]
+    fn offset_key_empty_agent() {
+        let key = offset_key("", Path::new("/path"));
+        assert_eq!(key, "|/path");
+    }
+
+    #[test]
+    fn offsets_path_location() {
+        let path = offsets_path(Path::new("/home/user/.uhoh"));
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/.uhoh/agents/runtime/tail_offsets.json")
+        );
+    }
+
+    #[test]
+    fn load_offsets_missing_dir_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let offsets = load_offsets(tmp.path()).unwrap();
+        assert!(offsets.is_empty());
+    }
+
+    #[test]
+    fn persist_and_load_offsets_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut offsets = HashMap::new();
+        offsets.insert("agent1|/log1".to_string(), 42u64);
+        offsets.insert("agent2|/log2".to_string(), 100u64);
+
+        persist_offsets(tmp.path(), &offsets).unwrap();
+        let loaded = load_offsets(tmp.path()).unwrap();
+        assert_eq!(loaded, offsets);
+    }
+
+    #[test]
+    fn persist_offsets_overwrites_previous() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut offsets1 = HashMap::new();
+        offsets1.insert("key".to_string(), 10u64);
+        persist_offsets(tmp.path(), &offsets1).unwrap();
+
+        let mut offsets2 = HashMap::new();
+        offsets2.insert("key".to_string(), 20u64);
+        persist_offsets(tmp.path(), &offsets2).unwrap();
+
+        let loaded = load_offsets(tmp.path()).unwrap();
+        assert_eq!(loaded["key"], 20);
+    }
+
+    #[test]
+    fn persist_offsets_empty_map() {
+        let tmp = tempfile::tempdir().unwrap();
+        let offsets = HashMap::new();
+        persist_offsets(tmp.path(), &offsets).unwrap();
+        let loaded = load_offsets(tmp.path()).unwrap();
+        assert!(loaded.is_empty());
+    }
+}
+
 async fn process_jsonl_event(
     ctx: &AgentContext,
     agent: &AgentEntry,

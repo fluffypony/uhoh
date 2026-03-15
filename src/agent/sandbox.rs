@@ -124,6 +124,34 @@ pub(crate) fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) ->
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_supported_returns_bool() {
+        let supported = sandbox_supported();
+        // On macOS and non-Linux, this should be false
+        #[cfg(not(target_os = "linux"))]
+        assert!(!supported, "sandbox_supported() should be false on non-Linux");
+        // On Linux without the feature, also false
+        #[cfg(all(target_os = "linux", not(feature = "landlock-sandbox")))]
+        assert!(!supported, "sandbox_supported() should be false without landlock feature");
+        // Just verify it returns without panicking on any platform
+        let _ = supported;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn apply_landlock_non_linux_succeeds() {
+        // Parse a minimal TOML profile to get a valid AgentProfile
+        let profile: crate::agent::profiles::AgentProfile =
+            toml::from_str("name = \"test\"").unwrap();
+        // On non-Linux, apply_landlock logs a warning but returns Ok
+        assert!(apply_landlock(&profile).is_ok());
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "landlock-sandbox"))]
 fn log_restriction_status(status: &RestrictionStatus) {
     match status {

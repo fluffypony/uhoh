@@ -108,6 +108,133 @@ fn extract_protocol_token(protocols: &str) -> Option<&str> {
     None
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── extract_protocol_token ──
+
+    #[test]
+    fn extract_protocol_token_bearer_comma_format() {
+        assert_eq!(
+            extract_protocol_token("bearer, my-secret-token"),
+            Some("my-secret-token")
+        );
+    }
+
+    #[test]
+    fn extract_protocol_token_bearer_dot_format() {
+        assert_eq!(
+            extract_protocol_token("bearer.my-secret-token"),
+            Some("my-secret-token")
+        );
+    }
+
+    #[test]
+    fn extract_protocol_token_bearer_case_insensitive() {
+        assert_eq!(
+            extract_protocol_token("Bearer, my-token"),
+            Some("my-token")
+        );
+        assert_eq!(
+            extract_protocol_token("BEARER, my-token"),
+            Some("my-token")
+        );
+    }
+
+    #[test]
+    fn extract_protocol_token_no_bearer() {
+        assert_eq!(extract_protocol_token("mcp"), None);
+        assert_eq!(extract_protocol_token(""), None);
+    }
+
+    #[test]
+    fn extract_protocol_token_bearer_alone_no_token() {
+        assert_eq!(extract_protocol_token("bearer"), None);
+    }
+
+    #[test]
+    fn extract_protocol_token_bearer_dot_empty() {
+        assert_eq!(extract_protocol_token("bearer."), None);
+    }
+
+    #[test]
+    fn extract_protocol_token_multiple_protocols() {
+        assert_eq!(
+            extract_protocol_token("mcp, bearer, abc123"),
+            Some("abc123")
+        );
+    }
+
+    // ── extract_matched_protocol ──
+
+    #[test]
+    fn extract_matched_protocol_bearer_comma() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-websocket-protocol", "bearer, token123".parse().unwrap());
+        assert_eq!(extract_matched_protocol(&headers), Some("bearer".to_string()));
+    }
+
+    #[test]
+    fn extract_matched_protocol_bearer_dot() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-websocket-protocol", "bearer.token123".parse().unwrap());
+        assert_eq!(
+            extract_matched_protocol(&headers),
+            Some("bearer.token123".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_matched_protocol_no_bearer() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-websocket-protocol", "mcp".parse().unwrap());
+        assert_eq!(extract_matched_protocol(&headers), None);
+    }
+
+    #[test]
+    fn extract_matched_protocol_no_header() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_matched_protocol(&headers), None);
+    }
+
+    // ── websocket_auth_ok ──
+
+    #[test]
+    fn websocket_auth_ok_bearer_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret123".parse().unwrap());
+        assert!(websocket_auth_ok(&headers, Some("secret123")));
+    }
+
+    #[test]
+    fn websocket_auth_ok_wrong_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer wrong".parse().unwrap());
+        assert!(!websocket_auth_ok(&headers, Some("secret123")));
+    }
+
+    #[test]
+    fn websocket_auth_ok_protocol_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-websocket-protocol", "bearer, secret123".parse().unwrap());
+        assert!(websocket_auth_ok(&headers, Some("secret123")));
+    }
+
+    #[test]
+    fn websocket_auth_ok_no_token_configured() {
+        let headers = HeaderMap::new();
+        assert!(!websocket_auth_ok(&headers, None));
+        assert!(!websocket_auth_ok(&headers, Some("")));
+    }
+
+    #[test]
+    fn websocket_auth_ok_no_auth_headers() {
+        let headers = HeaderMap::new();
+        assert!(!websocket_auth_ok(&headers, Some("secret")));
+    }
+}
+
 async fn handle_socket(socket: WebSocket, state: WsState) {
     let (mut sender, mut receiver) = socket.split();
     let mut event_rx = state.event_tx.subscribe();

@@ -331,12 +331,18 @@ mod tests {
         let now = Utc::now();
         // Insert two snapshots 1 minute apart (same 5-min bucket)
         // Both within keep_5min_days range (14 days)
-        // Insert older one first (lower snapshot_id) then newer one (higher snapshot_id)
-        // so that when sorted by snapshot_id DESC, the newer one claims the bucket.
+        // Use explicit snapshot IDs to ensure deterministic sort order:
+        // older timestamp gets lower ID, newer timestamp gets higher ID.
+        // compact_project sorts by snapshot_id DESC, so the newer one (higher ID)
+        // claims the bucket first, and the older one is dominated.
         let ts_older = (now - Duration::hours(2) - Duration::minutes(1)).to_rfc3339();
         let ts_newer = (now - Duration::hours(2)).to_rfc3339();
-        insert_snapshot(&db, &ts_older, SnapshotTrigger::Auto, false, "");
-        insert_snapshot(&db, &ts_newer, SnapshotTrigger::Auto, false, "");
+        db.create_snapshot(crate::db::CreateSnapshotRow::new(
+            "proj1", 900_001, &ts_older, SnapshotTrigger::Auto, "", false, &[], &[],
+        )).unwrap();
+        db.create_snapshot(crate::db::CreateSnapshotRow::new(
+            "proj1", 900_002, &ts_newer, SnapshotTrigger::Auto, "", false, &[], &[],
+        )).unwrap();
 
         let before = db.list_snapshots("proj1").unwrap().len();
         assert_eq!(before, 2, "Should have 2 snapshots before compaction");
