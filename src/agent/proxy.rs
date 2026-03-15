@@ -15,6 +15,19 @@ use tokio_util::sync::CancellationToken;
 const PROXY_TOKEN_FILE: &str = "server.token";
 const APPROVAL_RESPONSE_FILE_SUFFIX: &str = ".approved.json";
 
+fn emit_proxy_event(
+    ctx: &AgentContext,
+    event_type: LedgerEventType,
+    severity: LedgerSeverity,
+    detail: String,
+) {
+    let mut event = new_event(LedgerSource::Agent, event_type, severity);
+    event.detail = Some(detail);
+    if let Err(err) = ctx.event_ledger.append(event) {
+        tracing::error!("failed to append proxy event: {err}");
+    }
+}
+
 pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result<()> {
     let _ = ensure_proxy_token(&ctx.uhoh_dir)?;
     let addr = format!("127.0.0.1:{}", ctx.config.agent.mcp_proxy_port);
@@ -22,15 +35,12 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
         .await
         .with_context(|| format!("Failed to bind MCP proxy listener on {addr}"))?;
 
-    let mut event = new_event(
-        LedgerSource::Agent,
+    emit_proxy_event(
+        &ctx,
         LedgerEventType::McpProxyStarted,
         LedgerSeverity::Info,
+        format!("addr={addr}"),
     );
-    event.detail = Some(format!("addr={addr}"));
-    if let Err(err) = ctx.event_ledger.append(event) {
-        tracing::error!("failed to append mcp_proxy_started event: {err}");
-    }
 
     loop {
         tokio::select! {
@@ -42,15 +52,12 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
                     .ok()
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                let mut event = new_event(
-                    LedgerSource::Agent,
+                emit_proxy_event(
+                    &ctx,
                     LedgerEventType::McpProxyClientConnected,
                     LedgerSeverity::Info,
+                    format!("peer={peer}"),
                 );
-                event.detail = Some(format!("peer={peer}"));
-                if let Err(err) = ctx.event_ledger.append(event) {
-                    tracing::error!("failed to append mcp_proxy_client_connected event: {err}");
-                }
                 let upstream = resolve_upstream_addr();
                 let uhoh_dir = ctx.uhoh_dir.clone();
                 let event_ledger = ctx.event_ledger.clone();
@@ -65,30 +72,25 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
                     )
                     .await
                     {
-                        let mut event = new_event(
+                        let mut ev = new_event(
                             LedgerSource::Agent,
                             LedgerEventType::McpProxyConnectionFailed,
                             LedgerSeverity::Warn,
                         );
-                        event.detail = Some(format!("peer={addr}, error={e}"));
-                        if let Err(err) = event_ledger.append(event) {
-                            tracing::error!(
-                                "failed to append mcp_proxy_connection_failed event: {err}"
-                            );
+                        ev.detail = Some(format!("peer={addr}, error={e}"));
+                        if let Err(err) = event_ledger.append(ev) {
+                            tracing::error!("failed to append proxy event: {err}");
                         }
                     }
                 });
             }
             Err(e) => {
-                let mut event = new_event(
-                    LedgerSource::Agent,
+                emit_proxy_event(
+                    &ctx,
                     LedgerEventType::McpProxyAcceptFailed,
                     LedgerSeverity::Warn,
+                    e.to_string(),
                 );
-                event.detail = Some(e.to_string());
-                if let Err(err) = ctx.event_ledger.append(event) {
-                    tracing::error!("failed to append mcp_proxy_accept_failed event: {err}");
-                }
                 break;
             }
             }
