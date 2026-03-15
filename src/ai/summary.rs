@@ -116,6 +116,7 @@ pub fn prepare_summary_inputs(
     PreparedSummaryInput { files, diff_text }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_change_diff(
     blob_root: &Path,
     path: &str,

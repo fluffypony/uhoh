@@ -226,6 +226,31 @@ pub struct CreateSnapshotRow<'a> {
     pub deleted: &'a [DeletedFile],
 }
 
+impl<'a> CreateSnapshotRow<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        project_hash: &'a str,
+        snapshot_id: u64,
+        timestamp: &'a str,
+        trigger: SnapshotTrigger,
+        message: &'a str,
+        pinned: bool,
+        files: &'a [SnapFileEntry],
+        deleted: &'a [DeletedFile],
+    ) -> Self {
+        Self {
+            project_hash,
+            snapshot_id,
+            timestamp,
+            trigger,
+            message,
+            pinned,
+            files,
+            deleted,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct EventLedgerEntry {
@@ -807,6 +832,31 @@ pub struct SnapFileEntry {
     pub mtime: Option<i64>,
     pub storage_method: StorageMethod,
     pub is_symlink: bool,
+}
+
+impl SnapFileEntry {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        path: String,
+        hash: String,
+        size: u64,
+        stored: bool,
+        executable: bool,
+        mtime: Option<i64>,
+        storage_method: StorageMethod,
+        is_symlink: bool,
+    ) -> Self {
+        Self {
+            path,
+            hash,
+            size,
+            stored,
+            executable,
+            mtime,
+            storage_method,
+            is_symlink,
+        }
+    }
 }
 #[derive(Debug, Clone)]
 #[non_exhaustive]

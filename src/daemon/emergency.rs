@@ -12,6 +12,7 @@ use super::snapshots::{ProjectDaemonState, SnapshotSpawnRequest, SnapshotTaskKin
 
 const POST_RESTORE_GRACE_SECS: u64 = 10;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn evaluate_emergency_for_project(
     project_path: &str,
     state: &mut ProjectDaemonState,
@@ -173,6 +174,7 @@ pub(super) fn evaluate_emergency_for_project(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_emergency_delete_detected(
     event_tx: &broadcast::Sender<ServerEvent>,
     event_ledger: &EventLedger,

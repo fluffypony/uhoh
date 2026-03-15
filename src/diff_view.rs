@@ -457,6 +457,74 @@ pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> 
     Ok(())
 }
 
+/// Build a file list from the current working directory (for diffing against current state).
+fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db::FileEntryRow>> {
+    let walker = crate::ignore_rules::build_walker(project_path);
+    let mut entries = Vec::new();
+    for entry in walker {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.file_name().is_some_and(|n| n == ".uhoh") {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(path) else { continue };
+        let ft = meta.file_type();
+        if !ft.is_file() && !ft.is_symlink() {
+            continue;
+        }
+        let rel_path = match path.strip_prefix(project_path) {
+            Ok(r) => encoding::encode_relpath(r),
+            Err(_) => continue,
+        };
+        let (hash, size, is_symlink, executable) = if ft.is_symlink() {
+            let Ok(target) = std::fs::read_link(path) else { continue }; // Skip unreadable symlinks
+            #[cfg(unix)]
+            let target_bytes = {
+                use std::os::unix::ffi::OsStrExt;
+                target.as_os_str().as_bytes().to_vec()
+            };
+            #[cfg(not(unix))]
+            let target_bytes = target.to_string_lossy().into_owned().into_bytes();
+
+            (
+                blake3::hash(&target_bytes).to_hex().to_string(),
+                target_bytes.len() as u64,
+                true,
+                false,
+            )
+        } else {
+            let hash_result: std::io::Result<(String, u64)> = (|| {
+                let mut hasher = blake3::Hasher::new();
+                let mut f = std::fs::File::open(path)?;
+                let mut buf = [0u8; 64 * 1024];
+                let mut total = 0u64;
+                loop {
+                    let n = std::io::Read::read(&mut f, &mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                    total += n as u64;
+                }
+                Ok((hasher.finalize().to_hex().to_string(), total))
+            })();
+            let Ok((hash, size)) = hash_result else { continue }; // Skip unreadable files
+            (hash, size, false, encoding::is_executable(path))
+        };
+        entries.push(crate::db::FileEntryRow {
+            path: rel_path,
+            hash,
+            size,
+            stored: false,
+            executable,
+            mtime: None,
+            storage_method: crate::cas::StorageMethod::None,
+            is_symlink,
+        });
+    }
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,72 +663,4 @@ mod tests {
         assert_eq!(diff.status, DiffStatus::Modified);
         assert!(!diff.hunks.is_empty());
     }
-}
-
-/// Build a file list from the current working directory (for diffing against current state).
-fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db::FileEntryRow>> {
-    let walker = crate::ignore_rules::build_walker(project_path);
-    let mut entries = Vec::new();
-    for entry in walker {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if path.file_name().is_some_and(|n| n == ".uhoh") {
-            continue;
-        }
-        let Ok(meta) = std::fs::symlink_metadata(path) else { continue };
-        let ft = meta.file_type();
-        if !ft.is_file() && !ft.is_symlink() {
-            continue;
-        }
-        let rel_path = match path.strip_prefix(project_path) {
-            Ok(r) => encoding::encode_relpath(r),
-            Err(_) => continue,
-        };
-        let (hash, size, is_symlink, executable) = if ft.is_symlink() {
-            let Ok(target) = std::fs::read_link(path) else { continue }; // Skip unreadable symlinks
-            #[cfg(unix)]
-            let target_bytes = {
-                use std::os::unix::ffi::OsStrExt;
-                target.as_os_str().as_bytes().to_vec()
-            };
-            #[cfg(not(unix))]
-            let target_bytes = target.to_string_lossy().into_owned().into_bytes();
-
-            (
-                blake3::hash(&target_bytes).to_hex().to_string(),
-                target_bytes.len() as u64,
-                true,
-                false,
-            )
-        } else {
-            let hash_result: std::io::Result<(String, u64)> = (|| {
-                let mut hasher = blake3::Hasher::new();
-                let mut f = std::fs::File::open(path)?;
-                let mut buf = [0u8; 64 * 1024];
-                let mut total = 0u64;
-                loop {
-                    let n = std::io::Read::read(&mut f, &mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    hasher.update(&buf[..n]);
-                    total += n as u64;
-                }
-                Ok((hasher.finalize().to_hex().to_string(), total))
-            })();
-            let Ok((hash, size)) = hash_result else { continue }; // Skip unreadable files
-            (hash, size, false, encoding::is_executable(path))
-        };
-        entries.push(crate::db::FileEntryRow {
-            path: rel_path,
-            hash,
-            size,
-            stored: false,
-            executable,
-            mtime: None,
-            storage_method: crate::cas::StorageMethod::None,
-            is_symlink,
-        });
-    }
-    Ok(entries)
 }

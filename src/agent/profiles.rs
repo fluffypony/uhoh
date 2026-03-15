@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 #[non_exhaustive]
+#[allow(dead_code)]
 pub struct AgentProfile {
     pub name: String,
     #[serde(default)]

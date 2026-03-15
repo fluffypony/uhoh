@@ -297,6 +297,7 @@ pub fn download_and_install(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn check_mlx_lm_version() -> Option<String> {
     let default_python = if cfg!(windows) { "python" } else { "python3" };
     let output = std::process::Command::new(default_python)

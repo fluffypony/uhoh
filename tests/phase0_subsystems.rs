@@ -70,13 +70,13 @@ async fn subsystem_manager_starts_reports_health_and_shuts_down() {
     let (tmp, db) = temp_db();
     let ledger = EventLedger::new(db.clone());
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
-    let ctx = SubsystemContext {
-        database: db,
-        event_ledger: ledger,
-        config: uhoh::config::Config::default(),
-        uhoh_dir: tmp.path().to_path_buf(),
-        server_event_tx: event_tx,
-    };
+    let ctx = SubsystemContext::new(
+        db,
+        ledger,
+        uhoh::config::Config::default(),
+        tmp.path().to_path_buf(),
+        event_tx,
+    );
 
     let counters = TestCounters {
         run: Arc::new(AtomicUsize::new(0)),

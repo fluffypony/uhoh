@@ -39,6 +39,20 @@ pub struct PreRestoreSnapshot<'a> {
     pub snapshot_runtime: &'a crate::snapshot::SnapshotRuntime,
 }
 
+impl<'a> PreRestoreSnapshot<'a> {
+    pub fn new(
+        trigger: crate::db::SnapshotTrigger,
+        message: Option<String>,
+        snapshot_runtime: &'a crate::snapshot::SnapshotRuntime,
+    ) -> Self {
+        Self {
+            trigger,
+            message,
+            snapshot_runtime,
+        }
+    }
+}
+
 #[non_exhaustive]
 pub struct RestoreRequest<'a> {
     pub snapshot_id: &'a str,
@@ -47,6 +61,26 @@ pub struct RestoreRequest<'a> {
     pub force: bool,
     pub pre_restore_snapshot: Option<PreRestoreSnapshot<'a>>,
     pub confirm_large_delete: Option<&'a dyn Fn(usize) -> Result<bool>>,
+}
+
+impl<'a> RestoreRequest<'a> {
+    pub fn new(
+        snapshot_id: &'a str,
+        target_path: Option<&'a str>,
+        dry_run: bool,
+        force: bool,
+        pre_restore_snapshot: Option<PreRestoreSnapshot<'a>>,
+        confirm_large_delete: Option<&'a dyn Fn(usize) -> Result<bool>>,
+    ) -> Self {
+        Self {
+            snapshot_id,
+            target_path,
+            dry_run,
+            force,
+            pre_restore_snapshot,
+            confirm_large_delete,
+        }
+    }
 }
 
 #[derive(Debug)]

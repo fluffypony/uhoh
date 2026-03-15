@@ -56,39 +56,39 @@ fn test_snapshot_creation_and_query() {
     let snap_id = 1;
 
     let files: Vec<uhoh::db::SnapFileEntry> = vec![
-        uhoh::db::SnapFileEntry {
-            path: "src/main.rs".into(),
-            hash: "hash1".into(),
-            size: 100,
-            stored: true,
-            executable: false,
-            mtime: None,
-            storage_method: uhoh::cas::StorageMethod::Copy,
-            is_symlink: false,
-        },
-        uhoh::db::SnapFileEntry {
-            path: "README.md".into(),
-            hash: "hash2".into(),
-            size: 50,
-            stored: true,
-            executable: false,
-            mtime: None,
-            storage_method: uhoh::cas::StorageMethod::Copy,
-            is_symlink: false,
-        },
+        uhoh::db::SnapFileEntry::new(
+            "src/main.rs".into(),
+            "hash1".into(),
+            100,
+            true,
+            false,
+            None,
+            uhoh::cas::StorageMethod::Copy,
+            false,
+        ),
+        uhoh::db::SnapFileEntry::new(
+            "README.md".into(),
+            "hash2".into(),
+            50,
+            true,
+            false,
+            None,
+            uhoh::cas::StorageMethod::Copy,
+            false,
+        ),
     ];
 
     let (rowid, _sid) = db
-        .create_snapshot(uhoh::db::CreateSnapshotRow {
-            project_hash: "proj1",
-            snapshot_id: snap_id,
-            timestamp: "2025-01-01T00:00:00Z",
-            trigger: uhoh::db::SnapshotTrigger::Manual,
-            message: "test",
-            pinned: false,
-            files: &files,
-            deleted: &[],
-        })
+        .create_snapshot(uhoh::db::CreateSnapshotRow::new(
+            "proj1",
+            snap_id,
+            "2025-01-01T00:00:00Z",
+            uhoh::db::SnapshotTrigger::Manual,
+            "test",
+            false,
+            &files,
+            &[],
+        ))
         .unwrap();
 
     let snap_files = db.get_snapshot_files(rowid).unwrap();

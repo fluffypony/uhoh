@@ -522,6 +522,14 @@ fn cleanup_old_files(dir: &std::path::Path, retention_days: u64) -> Result<()> {
     Ok(())
 }
 
+pub fn cleanup_retention(dir: &std::path::Path, retention_days: u64) -> Result<()> {
+    cleanup_old_files(dir, retention_days)
+}
+
+fn timestamp_tag() -> String {
+    chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::load_or_create_machine_key;
@@ -536,12 +544,4 @@ mod tests {
         let raw = std::fs::read_to_string(temp.path().join("master.key")).expect("master.key");
         assert_eq!(raw.trim(), hex::encode(first));
     }
-}
-
-pub fn cleanup_retention(dir: &std::path::Path, retention_days: u64) -> Result<()> {
-    cleanup_old_files(dir, retention_days)
-}
-
-fn timestamp_tag() -> String {
-    chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
 }

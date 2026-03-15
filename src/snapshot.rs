@@ -33,6 +33,24 @@ pub struct CreateSnapshotRequest<'a> {
     pub changed_paths: Option<&'a [PathBuf]>,
 }
 
+impl<'a> CreateSnapshotRequest<'a> {
+    pub fn new(
+        project_hash: &'a str,
+        project_path: &'a Path,
+        trigger: crate::db::SnapshotTrigger,
+        message: Option<&'a str>,
+        changed_paths: Option<&'a [PathBuf]>,
+    ) -> Self {
+        Self {
+            project_hash,
+            project_path,
+            trigger,
+            message,
+            changed_paths,
+        }
+    }
+}
+
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct SnapshotSettings {
@@ -440,6 +458,7 @@ fn collect_current_files(project_path: &Path) -> HashMap<String, (PathBuf, std::
     current_files
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_current_entry(
     database: &Database,
     settings: &SnapshotSettings,
@@ -526,6 +545,7 @@ fn apply_manifest_entry(
         .insert(rel_path.to_string(), (hash, stored));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_symlink_entry(
     database: &Database,
     blob_root: &Path,
@@ -583,6 +603,7 @@ fn record_symlink_entry(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_file_entry(
     database: &Database,
     settings: &SnapshotSettings,
@@ -712,6 +733,7 @@ fn persist_snapshot(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_snapshot_post_commit(
     uhoh_dir: &Path,
     database: &Database,
@@ -797,6 +819,7 @@ fn update_active_operation_snapshot(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn schedule_ai_summary(
     uhoh_dir: &Path,
     database: &Database,

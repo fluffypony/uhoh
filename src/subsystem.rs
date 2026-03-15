@@ -39,6 +39,24 @@ pub struct SubsystemContext {
     pub server_event_tx: tokio::sync::broadcast::Sender<ServerEvent>,
 }
 
+impl SubsystemContext {
+    pub fn new(
+        database: Arc<Database>,
+        event_ledger: EventLedger,
+        config: crate::config::Config,
+        uhoh_dir: std::path::PathBuf,
+        server_event_tx: tokio::sync::broadcast::Sender<ServerEvent>,
+    ) -> Self {
+        Self {
+            database,
+            event_ledger,
+            config,
+            uhoh_dir,
+            server_event_tx,
+        }
+    }
+}
+
 pub type AgentContext = SubsystemContext;
 pub type DbGuardContext = SubsystemContext;
 

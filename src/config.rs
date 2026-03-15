@@ -103,6 +103,26 @@ pub struct CompactionConfig {
     pub emergency_expire_hours: u64,
 }
 
+impl CompactionConfig {
+    pub fn new(
+        keep_all_minutes: u64,
+        keep_5min_days: u64,
+        keep_hourly_days: u64,
+        keep_daily_days: u64,
+        keep_weekly_beyond: bool,
+        emergency_expire_hours: u64,
+    ) -> Self {
+        Self {
+            keep_all_minutes,
+            keep_5min_days,
+            keep_hourly_days,
+            keep_daily_days,
+            keep_weekly_beyond,
+            emergency_expire_hours,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct StorageConfig {

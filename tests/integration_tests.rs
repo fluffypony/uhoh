@@ -306,16 +306,16 @@ fn test_compaction_preserves_pinned() {
         let message = if i == 0 { "keep" } else { "" };
         let pinned = i == 0;
         let (rowid, _) = database
-            .create_snapshot(uhoh::db::CreateSnapshotRow {
-                project_hash: "proj",
-                snapshot_id: i + 1,
-                timestamp: &ts.to_rfc3339(),
+            .create_snapshot(uhoh::db::CreateSnapshotRow::new(
+                "proj",
+                i + 1,
+                &ts.to_rfc3339(),
                 trigger,
                 message,
                 pinned,
-                files: &files,
-                deleted: &[],
-            })
+                &files,
+                &[],
+            ))
             .unwrap();
         if pinned {
             pin_rowid = Some(rowid);
@@ -357,13 +357,13 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
         &uhoh_dir,
         &db,
         &snapshot_runtime,
-        uhoh::snapshot::CreateSnapshotRequest {
-            project_hash: "emrg1",
-            project_path: &project_dir,
-            trigger: uhoh::db::SnapshotTrigger::Auto,
-            message: None,
-            changed_paths: None,
-        },
+        uhoh::snapshot::CreateSnapshotRequest::new(
+            "emrg1",
+            &project_dir,
+            uhoh::db::SnapshotTrigger::Auto,
+            None,
+            None,
+        ),
     )
     .unwrap();
     assert!(snap1.is_some());
@@ -378,13 +378,13 @@ fn test_dynamic_trigger_upgrade_on_mass_delete() {
         &uhoh_dir,
         &db,
         &snapshot_runtime,
-        uhoh::snapshot::CreateSnapshotRequest {
-            project_hash: "emrg1",
-            project_path: &project_dir,
-            trigger: uhoh::db::SnapshotTrigger::Auto,
-            message: None,
-            changed_paths: None,
-        },
+        uhoh::snapshot::CreateSnapshotRequest::new(
+            "emrg1",
+            &project_dir,
+            uhoh::db::SnapshotTrigger::Auto,
+            None,
+            None,
+        ),
     )
     .unwrap();
     assert!(snap2.is_some());
@@ -426,13 +426,13 @@ fn test_sub_threshold_no_emergency_upgrade() {
         &uhoh_dir,
         &db,
         &snapshot_runtime,
-        uhoh::snapshot::CreateSnapshotRequest {
-            project_hash: "emrg2",
-            project_path: &project_dir,
-            trigger: uhoh::db::SnapshotTrigger::Auto,
-            message: None,
-            changed_paths: None,
-        },
+        uhoh::snapshot::CreateSnapshotRequest::new(
+            "emrg2",
+            &project_dir,
+            uhoh::db::SnapshotTrigger::Auto,
+            None,
+            None,
+        ),
     )
     .unwrap();
 
@@ -444,13 +444,13 @@ fn test_sub_threshold_no_emergency_upgrade() {
         &uhoh_dir,
         &db,
         &snapshot_runtime,
-        uhoh::snapshot::CreateSnapshotRequest {
-            project_hash: "emrg2",
-            project_path: &project_dir,
-            trigger: uhoh::db::SnapshotTrigger::Auto,
-            message: None,
-            changed_paths: None,
-        },
+        uhoh::snapshot::CreateSnapshotRequest::new(
+            "emrg2",
+            &project_dir,
+            uhoh::db::SnapshotTrigger::Auto,
+            None,
+            None,
+        ),
     )
     .unwrap();
     assert!(snap2.is_some());
@@ -475,16 +475,16 @@ fn test_emergency_snapshot_retained_within_window() {
     let deleted: Vec<uhoh::db::DeletedFile> = Vec::new();
 
     let (rowid, _) = db
-        .create_snapshot(uhoh::db::CreateSnapshotRow {
-            project_hash: "emrg3",
-            snapshot_id: 0,
-            timestamp: &ts_recent,
-            trigger: uhoh::db::SnapshotTrigger::Emergency,
-            message: "mass delete",
-            pinned: false,
-            files: &files,
-            deleted: &deleted,
-        })
+        .create_snapshot(uhoh::db::CreateSnapshotRow::new(
+            "emrg3",
+            0,
+            &ts_recent,
+            uhoh::db::SnapshotTrigger::Emergency,
+            "mass delete",
+            false,
+            &files,
+            &deleted,
+        ))
         .unwrap();
 
     let cfg = uhoh::config::CompactionConfig::default();
@@ -510,41 +510,34 @@ fn test_emergency_snapshot_pruned_after_window() {
     let deleted: Vec<uhoh::db::DeletedFile> = Vec::new();
 
     let (old_rowid, _) = db
-        .create_snapshot(uhoh::db::CreateSnapshotRow {
-            project_hash: "emrg4",
-            snapshot_id: 0,
-            timestamp: &old_ts,
-            trigger: uhoh::db::SnapshotTrigger::Emergency,
-            message: "old mass delete",
-            pinned: false,
-            files: &files,
-            deleted: &deleted,
-        })
+        .create_snapshot(uhoh::db::CreateSnapshotRow::new(
+            "emrg4",
+            0,
+            &old_ts,
+            uhoh::db::SnapshotTrigger::Emergency,
+            "old mass delete",
+            false,
+            &files,
+            &deleted,
+        ))
         .unwrap();
 
     // Create a recent snapshot so the old one can be dominated in buckets
     let recent_ts = chrono::Utc::now().to_rfc3339();
     let (_, _) = db
-        .create_snapshot(uhoh::db::CreateSnapshotRow {
-            project_hash: "emrg4",
-            snapshot_id: 0,
-            timestamp: &recent_ts,
-            trigger: uhoh::db::SnapshotTrigger::Auto,
-            message: "",
-            pinned: false,
-            files: &files,
-            deleted: &deleted,
-        })
+        .create_snapshot(uhoh::db::CreateSnapshotRow::new(
+            "emrg4",
+            0,
+            &recent_ts,
+            uhoh::db::SnapshotTrigger::Auto,
+            "",
+            false,
+            &files,
+            &deleted,
+        ))
         .unwrap();
 
-    let cfg = uhoh::config::CompactionConfig {
-        emergency_expire_hours: 48,
-        keep_all_minutes: 0,
-        keep_5min_days: 0,
-        keep_hourly_days: 0,
-        keep_daily_days: 0,
-        keep_weekly_beyond: false,
-    };
+    let cfg = uhoh::config::CompactionConfig::new(0, 0, 0, 0, false, 48);
     let _ = uhoh::storage::compaction::compact_project(&db, "emrg4", &cfg).unwrap();
 
     let snaps = db.list_snapshots("emrg4").unwrap();
@@ -567,42 +560,35 @@ fn test_predecessor_protection_in_compaction() {
     // Create predecessor snapshot (old but not emergency)
     let pred_ts = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
     let (pred_rowid, _) = db
-        .create_snapshot(uhoh::db::CreateSnapshotRow {
-            project_hash: "emrg5",
-            snapshot_id: 0,
-            timestamp: &pred_ts,
-            trigger: uhoh::db::SnapshotTrigger::Auto,
-            message: "",
-            pinned: false,
-            files: &files,
-            deleted: &deleted,
-        })
+        .create_snapshot(uhoh::db::CreateSnapshotRow::new(
+            "emrg5",
+            0,
+            &pred_ts,
+            uhoh::db::SnapshotTrigger::Auto,
+            "",
+            false,
+            &files,
+            &deleted,
+        ))
         .unwrap();
 
     // Create emergency snapshot (recent, within retention)
     let emrg_ts = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
     let (emrg_rowid, _) = db
-        .create_snapshot(uhoh::db::CreateSnapshotRow {
-            project_hash: "emrg5",
-            snapshot_id: 0,
-            timestamp: &emrg_ts,
-            trigger: uhoh::db::SnapshotTrigger::Emergency,
-            message: "mass delete",
-            pinned: false,
-            files: &files,
-            deleted: &deleted,
-        })
+        .create_snapshot(uhoh::db::CreateSnapshotRow::new(
+            "emrg5",
+            0,
+            &emrg_ts,
+            uhoh::db::SnapshotTrigger::Emergency,
+            "mass delete",
+            false,
+            &files,
+            &deleted,
+        ))
         .unwrap();
 
     // Aggressive compaction config that would normally prune old snapshots
-    let cfg = uhoh::config::CompactionConfig {
-        emergency_expire_hours: 48,
-        keep_all_minutes: 0,
-        keep_5min_days: 0,
-        keep_hourly_days: 0,
-        keep_daily_days: 0,
-        keep_weekly_beyond: false,
-    };
+    let cfg = uhoh::config::CompactionConfig::new(0, 0, 0, 0, false, 48);
     let _ = uhoh::storage::compaction::compact_project(&db, "emrg5", &cfg).unwrap();
 
     let snaps = db.list_snapshots("emrg5").unwrap();
@@ -641,13 +627,13 @@ fn test_fast_path_directory_deletion_fallback() {
         &uhoh_dir,
         &db,
         &snapshot_runtime,
-        uhoh::snapshot::CreateSnapshotRequest {
-            project_hash: "dirtest",
-            project_path: &project_dir,
-            trigger: uhoh::db::SnapshotTrigger::Auto,
-            message: None,
-            changed_paths: None,
-        },
+        uhoh::snapshot::CreateSnapshotRequest::new(
+            "dirtest",
+            &project_dir,
+            uhoh::db::SnapshotTrigger::Auto,
+            None,
+            None,
+        ),
     )
     .unwrap();
 
@@ -660,13 +646,13 @@ fn test_fast_path_directory_deletion_fallback() {
         &uhoh_dir,
         &db,
         &snapshot_runtime,
-        uhoh::snapshot::CreateSnapshotRequest {
-            project_hash: "dirtest",
-            project_path: &project_dir,
-            trigger: uhoh::db::SnapshotTrigger::Auto,
-            message: None,
-            changed_paths: Some(&changed),
-        },
+        uhoh::snapshot::CreateSnapshotRequest::new(
+            "dirtest",
+            &project_dir,
+            uhoh::db::SnapshotTrigger::Auto,
+            None,
+            Some(&changed),
+        ),
     )
     .unwrap();
     assert!(
@@ -708,13 +694,13 @@ fn test_restore_sets_and_clears_restore_marker_file() {
         &uhoh_dir,
         &db,
         &snapshot_runtime,
-        uhoh::snapshot::CreateSnapshotRequest {
-            project_hash: "restmark",
-            project_path: &project_dir,
-            trigger: uhoh::db::SnapshotTrigger::Manual,
-            message: Some("baseline"),
-            changed_paths: None,
-        },
+        uhoh::snapshot::CreateSnapshotRequest::new(
+            "restmark",
+            &project_dir,
+            uhoh::db::SnapshotTrigger::Manual,
+            Some("baseline"),
+            None,
+        ),
     )
     .unwrap()
     .unwrap();
@@ -727,18 +713,18 @@ fn test_restore_sets_and_clears_restore_marker_file() {
         &uhoh_dir,
         &db,
         &project,
-        uhoh::restore::RestoreRequest {
-            snapshot_id: &snap_id,
-            target_path: None,
-            dry_run: false,
-            force: true,
-            pre_restore_snapshot: Some(uhoh::restore::PreRestoreSnapshot {
-                trigger: uhoh::db::SnapshotTrigger::PreRestore,
-                message: Some(format!("Before restore to {snap_id}")),
-                snapshot_runtime: &snapshot_runtime,
-            }),
-            confirm_large_delete: None,
-        },
+        uhoh::restore::RestoreRequest::new(
+            &snap_id,
+            None,
+            false,
+            true,
+            Some(uhoh::restore::PreRestoreSnapshot::new(
+                uhoh::db::SnapshotTrigger::PreRestore,
+                Some(format!("Before restore to {snap_id}")),
+                &snapshot_runtime,
+            )),
+            None,
+        ),
     )
     .unwrap();
     assert!(outcome.applied);

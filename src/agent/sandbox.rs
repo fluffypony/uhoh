@@ -118,6 +118,7 @@ pub fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) -> anyhow
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 pub fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) -> anyhow::Result<()> {
     tracing::warn!("Sandboxing is only available on Linux. Running without sandbox.");
     Ok(())
