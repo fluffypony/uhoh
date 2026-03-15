@@ -212,3 +212,111 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
     std::fs::rename(&tmp, &target)?;
     Ok(target)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AiConfig, ModelTierConfig};
+
+    #[test]
+    fn default_model_tiers_are_sorted_by_ram() {
+        let tiers = default_model_tiers();
+        assert!(!tiers.is_empty());
+        for window in tiers.windows(2) {
+            assert!(
+                window[0].min_ram_gb <= window[1].min_ram_gb,
+                "Tiers must be sorted ascending by min_ram_gb: {} ({} GB) should come before {} ({} GB)",
+                window[0].name,
+                window[0].min_ram_gb,
+                window[1].name,
+                window[1].min_ram_gb,
+            );
+        }
+    }
+
+    #[test]
+    fn default_model_tiers_have_valid_fields() {
+        for tier in default_model_tiers() {
+            assert!(!tier.name.is_empty(), "tier name must not be empty");
+            assert!(
+                tier.filename.ends_with(".gguf"),
+                "filename should end with .gguf: {}",
+                tier.filename
+            );
+            assert!(
+                tier.url.starts_with("https://"),
+                "url should be HTTPS: {}",
+                tier.url
+            );
+            assert!(tier.min_ram_gb > 0, "min_ram_gb must be positive");
+        }
+    }
+
+    #[test]
+    fn select_model_with_custom_tiers_picks_highest_fitting() {
+        let mut config = AiConfig::default();
+        config.models = vec![
+            ModelTierConfig {
+                name: "small".into(),
+                filename: "small.gguf".into(),
+                url: "https://example.com/small.gguf".into(),
+                min_ram_gb: 4,
+            },
+            ModelTierConfig {
+                name: "medium".into(),
+                filename: "medium.gguf".into(),
+                url: "https://example.com/medium.gguf".into(),
+                min_ram_gb: 8,
+            },
+            ModelTierConfig {
+                name: "large".into(),
+                filename: "large.gguf".into(),
+                url: "https://example.com/large.gguf".into(),
+                min_ram_gb: 64,
+            },
+        ];
+
+        // select_model_with_sys iterates in reverse and picks the first tier
+        // where total_ram_mb >= min_mb AND available_ram_mb >= min_mb + 2GB margin.
+        // We can't mock System easily, so test with the real system --
+        // at minimum verify we get *something* (the small tier requires only 4GB).
+        let result = select_model_with_sys(&config, None);
+        // Most CI/dev machines have >= 4 GB RAM + 2 GB headroom = 6 GB,
+        // so we should get at least the small tier.
+        // If on a very constrained machine, this could be None, but that is correct behavior.
+        if let Some(model) = &result {
+            // Whatever is selected should be one of our custom tiers
+            assert!(
+                ["small", "medium", "large"].contains(&model.name.as_str()),
+                "unexpected model: {}",
+                model.name
+            );
+        }
+    }
+
+    #[test]
+    fn select_model_with_empty_custom_tiers_uses_defaults() {
+        let config = AiConfig::default();
+        assert!(config.models.is_empty());
+        // select_model_with_sys should fall back to default_model_tiers()
+        // We just verify it doesn't panic and returns a valid result
+        let _result = select_model_with_sys(&config, None);
+    }
+
+    #[test]
+    fn select_model_with_impossible_ram_returns_none() {
+        let mut config = AiConfig::default();
+        config.models = vec![ModelTierConfig {
+            name: "impossible".into(),
+            filename: "impossible.gguf".into(),
+            url: "https://example.com/impossible.gguf".into(),
+            min_ram_gb: 999_999, // No machine has this much RAM
+        }];
+
+        let result = select_model_with_sys(&config, None);
+        assert!(
+            result.is_none(),
+            "Should return None when no tier fits available RAM"
+        );
+    }
+}

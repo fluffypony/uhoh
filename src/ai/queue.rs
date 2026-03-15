@@ -177,3 +177,104 @@ fn build_summary_inputs(
 
     crate::ai::summary::prepare_summary_inputs(blob_root, ai_config, &changes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cas::StorageMethod;
+    use crate::db::FileEntryRow;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    fn make_file(path: &str, hash: &str, size: u64) -> FileEntryRow {
+        FileEntryRow {
+            path: path.to_string(),
+            hash: hash.to_string(),
+            size,
+            stored: true,
+            executable: false,
+            mtime: None,
+            storage_method: StorageMethod::None,
+            is_symlink: false,
+        }
+    }
+
+    #[test]
+    fn build_summary_inputs_empty_files() {
+        let blob_root = Path::new("/tmp/nonexistent-blobs");
+        let ai_config = crate::config::AiConfig::default();
+        let this_files: Vec<FileEntryRow> = vec![];
+        let prev_map: HashMap<String, (String, bool, u64)> = HashMap::new();
+
+        let result = build_summary_inputs(&blob_root, &ai_config, &this_files, &prev_map);
+
+        assert!(result.files.added.is_empty());
+        assert!(result.files.deleted.is_empty());
+        assert!(result.files.modified.is_empty());
+        assert!(result.diff_text.is_empty());
+    }
+
+    #[test]
+    fn build_summary_inputs_all_new_files() {
+        let blob_root = Path::new("/tmp/nonexistent-blobs");
+        let ai_config = crate::config::AiConfig::default();
+        let this_files = vec![
+            make_file("src/main.rs", "hash_a", 100),
+            make_file("src/lib.rs", "hash_b", 200),
+        ];
+        let prev_map: HashMap<String, (String, bool, u64)> = HashMap::new();
+
+        let result = build_summary_inputs(&blob_root, &ai_config, &this_files, &prev_map);
+
+        assert_eq!(result.files.added.len(), 2);
+        assert!(result.files.added.contains(&"src/main.rs".to_string()));
+        assert!(result.files.added.contains(&"src/lib.rs".to_string()));
+        assert!(result.files.deleted.is_empty());
+        assert!(result.files.modified.is_empty());
+    }
+
+    #[test]
+    fn build_summary_inputs_mixed_changes() {
+        let blob_root = Path::new("/tmp/nonexistent-blobs");
+        let ai_config = crate::config::AiConfig::default();
+
+        // Current snapshot has: main.rs (modified), new.rs (added)
+        // Previous had: main.rs (different hash), deleted.rs (not in current)
+        let this_files = vec![
+            make_file("src/main.rs", "hash_new", 150),
+            make_file("src/new.rs", "hash_c", 300),
+        ];
+        let mut prev_map: HashMap<String, (String, bool, u64)> = HashMap::new();
+        prev_map.insert("src/main.rs".to_string(), ("hash_old".to_string(), true, 100));
+        prev_map.insert(
+            "src/deleted.rs".to_string(),
+            ("hash_d".to_string(), true, 50),
+        );
+
+        let result = build_summary_inputs(&blob_root, &ai_config, &this_files, &prev_map);
+
+        assert_eq!(result.files.added, vec!["src/new.rs".to_string()]);
+        assert_eq!(result.files.deleted, vec!["src/deleted.rs".to_string()]);
+        assert_eq!(result.files.modified, vec!["src/main.rs".to_string()]);
+    }
+
+    #[test]
+    fn build_summary_inputs_unchanged_files_excluded() {
+        let blob_root = Path::new("/tmp/nonexistent-blobs");
+        let ai_config = crate::config::AiConfig::default();
+
+        // File has same hash in both snapshots -- should not appear
+        let this_files = vec![make_file("src/stable.rs", "same_hash", 100)];
+        let mut prev_map: HashMap<String, (String, bool, u64)> = HashMap::new();
+        prev_map.insert(
+            "src/stable.rs".to_string(),
+            ("same_hash".to_string(), true, 100),
+        );
+
+        let result = build_summary_inputs(&blob_root, &ai_config, &this_files, &prev_map);
+
+        assert!(result.files.added.is_empty());
+        assert!(result.files.deleted.is_empty());
+        assert!(result.files.modified.is_empty());
+    }
+}

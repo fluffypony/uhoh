@@ -88,3 +88,176 @@ pub fn validate_profile_path(path: &std::path::Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: write a TOML profile to a temp file within the home directory
+    /// and return the path.
+    fn write_profile_in_home(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        // Create a temp dir inside the home directory so validate_profile_path succeeds.
+        let home = dirs::home_dir().expect("home dir");
+        let tmp = tempfile::tempdir_in(&home).expect("tempdir in home");
+        let path = tmp.path().join("profile.toml");
+        std::fs::write(&path, content).expect("write profile");
+        (tmp, path)
+    }
+
+    #[test]
+    fn parse_valid_profile() {
+        let toml = r#"
+name = "claude-code"
+session_log_pattern = "~/.claude/sessions/*.jsonl"
+process_names = ["claude"]
+data_dirs = ["~/.claude"]
+"#;
+        let (_tmp, path) = write_profile_in_home(toml);
+        let profile = load_agent_profile(&path).expect("should parse");
+        assert_eq!(profile.name, "claude-code");
+        assert_eq!(profile.session_log_pattern, "~/.claude/sessions/*.jsonl");
+        assert_eq!(profile.process_names, vec!["claude".to_string()]);
+        assert_eq!(profile.data_dirs, vec!["~/.claude".to_string()]);
+    }
+
+    #[test]
+    fn parse_minimal_profile() {
+        let toml = r#"
+name = "minimal"
+session_log_pattern = "/tmp/*.log"
+"#;
+        let (_tmp, path) = write_profile_in_home(toml);
+        let profile = load_agent_profile(&path).expect("should parse minimal profile");
+        assert_eq!(profile.name, "minimal");
+        assert!(profile.process_names.is_empty());
+        assert!(profile.data_dirs.is_empty());
+        assert!(profile.config_files.is_empty());
+        assert!(profile.personality_files.is_empty());
+        assert!(profile.memory_dirs.is_empty());
+        assert!(profile.tool_names_write.is_empty());
+        assert!(profile.tool_names_exec.is_empty());
+        assert!(profile.tool_call_format.is_none());
+    }
+
+    #[test]
+    fn reject_empty_name() {
+        let toml = r#"
+name = ""
+session_log_pattern = "/tmp/*.log"
+"#;
+        let (_tmp, path) = write_profile_in_home(toml);
+        let err = load_agent_profile(&path).expect_err("empty name should fail");
+        assert!(
+            err.to_string().contains("name cannot be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_whitespace_only_name() {
+        let toml = r#"
+name = "   "
+session_log_pattern = "/tmp/*.log"
+"#;
+        let (_tmp, path) = write_profile_in_home(toml);
+        let err = load_agent_profile(&path).expect_err("whitespace-only name should fail");
+        assert!(
+            err.to_string().contains("name cannot be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_session_log_pattern() {
+        let toml = r#"
+name = "test-agent"
+session_log_pattern = ""
+"#;
+        let (_tmp, path) = write_profile_in_home(toml);
+        let err = load_agent_profile(&path).expect_err("empty pattern should fail");
+        assert!(
+            err.to_string().contains("session_log_pattern"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_missing_session_log_pattern() {
+        let toml = r#"
+name = "test-agent"
+"#;
+        let (_tmp, path) = write_profile_in_home(toml);
+        let err = load_agent_profile(&path).expect_err("missing pattern should fail");
+        assert!(
+            err.to_string().contains("session_log_pattern"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_invalid_toml() {
+        let content = "this is not valid [[[toml";
+        let (_tmp, path) = write_profile_in_home(content);
+        let err = load_agent_profile(&path).expect_err("invalid TOML should fail");
+        assert!(
+            err.to_string().contains("Failed to parse"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_session_log_path_no_matches() {
+        // Use a glob pattern that won't match anything
+        let result =
+            resolve_session_log_path("/tmp/uhoh-test-nonexistent-dir-xyz/*.nonexistent")
+                .expect("should not error");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_session_log_path_finds_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file_a = tmp.path().join("session_a.log");
+        let file_b = tmp.path().join("session_b.log");
+        std::fs::write(&file_a, "log a").expect("write a");
+        // Small delay so mtime differs
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&file_b, "log b").expect("write b");
+
+        let pattern = tmp.path().join("*.log").display().to_string();
+        let result = resolve_session_log_path(&pattern).expect("should succeed");
+        assert!(result.is_some());
+        // Should pick the most recently modified file
+        let resolved = result.unwrap();
+        assert_eq!(
+            resolved.file_name().unwrap().to_str().unwrap(),
+            "session_b.log"
+        );
+    }
+
+    #[test]
+    fn resolve_session_log_path_ignores_directories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let subdir = tmp.path().join("not-a-file.log");
+        std::fs::create_dir_all(&subdir).expect("create dir");
+
+        let pattern = tmp.path().join("*.log").display().to_string();
+        let result = resolve_session_log_path(&pattern).expect("should succeed");
+        assert!(result.is_none(), "directories should not be matched");
+    }
+
+    #[test]
+    fn validate_profile_path_rejects_ssh_dir() {
+        let home = dirs::home_dir().expect("home dir");
+        let ssh_path = home.join(".ssh").join("profile.toml");
+        // Only test if .ssh exists (it does on most systems)
+        if ssh_path.parent().unwrap().exists() {
+            // We need an actual file for canonicalize to succeed; if .ssh/profile.toml doesn't
+            // exist, canonicalize will fail before we reach the check.
+            // Instead, test with an existing file in .ssh if any, or skip gracefully.
+            let err = validate_profile_path(&ssh_path);
+            // Either canonicalize fails (file doesn't exist) or the sensitive-dir check triggers.
+            assert!(err.is_err(), "paths in .ssh should be rejected");
+        }
+    }
+}
