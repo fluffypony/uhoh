@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::db::Database;
 
 /// Run garbage collection: delete blobs not referenced by any snapshot.
-/// Applies a grace period: blobs younger than 10 minutes are never deleted
+/// Applies a grace period: blobs younger than 15 minutes are never deleted
 /// (prevents race with in-progress snapshot creation).
 pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
     // Coordinate with restore: skip GC while restore is actively rewriting files.
