@@ -788,14 +788,16 @@ fn index_snapshot_for_search(
         .map(|file| file.path.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    let _ = database.index_snapshot_for_search(
+    if let Err(e) = database.index_snapshot_for_search(
         rowid,
         project_hash,
         decision.trigger.as_str(),
         &decision.message,
         "",
         &file_paths_str,
-    );
+    ) {
+        tracing::warn!("Failed to index snapshot for search: {e}");
+    }
 }
 
 fn update_active_operation_snapshot(
@@ -808,7 +810,9 @@ fn update_active_operation_snapshot(
         return;
     }
     if let Ok(Some(op)) = database.get_active_operation(project_hash) {
-        let _ = database.update_operation_last_snapshot(op.id, snapshot_id);
+        if let Err(e) = database.update_operation_last_snapshot(op.id, snapshot_id) {
+            tracing::warn!("Failed to update operation last snapshot: {e}");
+        }
     }
 }
 
@@ -819,7 +823,9 @@ fn schedule_ai_summary(
     deleted_for_manifest: &[crate::db::DeletedFile],
 ) {
     if !ai::should_run_ai(&ctx.runtime.settings().ai) {
-        let _ = ctx.database.enqueue_ai_summary(rowid, ctx.project_hash);
+        if let Err(e) = ctx.database.enqueue_ai_summary(rowid, ctx.project_hash) {
+            tracing::warn!("Failed to enqueue AI summary: {e}");
+        }
         return;
     }
 
@@ -872,14 +878,20 @@ fn schedule_ai_summary(
             &prepared.files,
         ) {
             Ok(Some(text)) => {
-                let _ = db_handle.set_ai_summary(rowid, &text);
+                if let Err(e) = db_handle.set_ai_summary(rowid, &text) {
+                    tracing::warn!("Failed to save AI summary: {e}");
+                }
             }
             Ok(None) => {
-                let _ = db_handle.enqueue_ai_summary(rowid, &project_hash);
+                if let Err(e) = db_handle.enqueue_ai_summary(rowid, &project_hash) {
+                    tracing::warn!("Failed to enqueue AI summary: {e}");
+                }
             }
             Err(err) => {
                 tracing::warn!("AI summary generation failed: {}", err);
-                let _ = db_handle.enqueue_ai_summary(rowid, &project_hash);
+                if let Err(e) = db_handle.enqueue_ai_summary(rowid, &project_hash) {
+                    tracing::warn!("Failed to enqueue AI summary after failure: {e}");
+                }
             }
         }
     });
