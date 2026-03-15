@@ -366,7 +366,8 @@ impl FromStr for LedgerSource {
     type Err = String;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        Self::parse(value).ok_or_else(|| {
+        let normalized = value.trim().to_ascii_lowercase();
+        Self::parse(&normalized).ok_or_else(|| {
             format!(
                 "invalid source '{value}'; expected one of: fs, db_guard, agent, daemon, mlx"
             )
