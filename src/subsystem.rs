@@ -165,7 +165,7 @@ impl SubsystemManager {
                 .restart_times
                 .retain(|t| now.duration_since(*t) <= self.restart_window);
             runner.restart_times.push(now);
-            if runner.restart_times.len() as u32 > self.max_restarts {
+            if runner.restart_times.len() > self.max_restarts as usize {
                 tracing::error!(
                     "Subsystem '{}' exceeded restart threshold ({} in {:?}), leaving disabled",
                     runner.name,

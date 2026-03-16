@@ -9,7 +9,7 @@ pub mod summary;
 // into sub-modules directly.
 pub use mlx_update::MlxAutoUpdateState;
 pub use mlx_update::maybe_run_mlx_auto_update;
-pub use queue::process_summary_queue;
+pub use queue::drain_pending_summaries;
 pub use sidecar::SidecarManager;
 pub use sidecar_update::read_manifest;
 pub use sidecar_update::run_update_check;

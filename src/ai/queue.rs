@@ -16,7 +16,7 @@ const MAX_AI_SUMMARY_ATTEMPTS: i64 = 5;
 /// Skipped summaries and generation failures share the same retry budget so
 /// callers can distinguish intentional skips from operational errors without
 /// changing the queue policy.
-pub async fn process_summary_queue(
+pub async fn drain_pending_summaries(
     uhoh_dir: &Path,
     database: &Database,
     ai_config: &AiConfig,

@@ -113,7 +113,6 @@ rand = "0.8"
 
 # Hex encoding
 hex = "0.4"
-sha2 = "0.10"
 
 # Sidecar update archive handling
 zip = "2"

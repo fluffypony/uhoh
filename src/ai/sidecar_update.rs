@@ -8,7 +8,7 @@ use std::path::Path;
 pub struct SidecarManifest {
     pub version: String,
     pub platform: String,
-    pub sha256: String,
+    pub binary_hash: String,
     pub source_url: String,
     pub installed_at: String,
     pub binary_size: u64,
@@ -253,12 +253,7 @@ pub fn download_and_install(
     }
 
     let binary_bytes = fs::read(&tmp_binary)?;
-    let sha256 = {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&binary_bytes);
-        format!("{:x}", hasher.finalize())
-    };
+    let binary_hash = blake3::hash(&binary_bytes).to_hex().to_string();
     let binary_size = binary_bytes.len() as u64;
 
     match std::process::Command::new(&tmp_binary)
@@ -287,7 +282,7 @@ pub fn download_and_install(
     let manifest = SidecarManifest {
         version: version.to_string(),
         platform: platform.to_string(),
-        sha256,
+        binary_hash,
         source_url: download_url.to_string(),
         installed_at: chrono::Utc::now().to_rfc3339(),
         binary_size,
@@ -349,7 +344,7 @@ mod tests {
         let manifest = SidecarManifest {
             version: "b5000".to_string(),
             platform: "macos-arm64".to_string(),
-            sha256: "abcdef1234567890".to_string(),
+            binary_hash: "abcdef1234567890".to_string(),
             source_url: "https://github.com/example/release".to_string(),
             installed_at: "2026-01-01T00:00:00Z".to_string(),
             binary_size: 42_000_000,
@@ -360,7 +355,7 @@ mod tests {
 
         assert_eq!(parsed.version, "b5000");
         assert_eq!(parsed.platform, "macos-arm64");
-        assert_eq!(parsed.sha256, "abcdef1234567890");
+        assert_eq!(parsed.binary_hash, "abcdef1234567890");
         assert_eq!(parsed.binary_size, 42_000_000);
     }
 
@@ -369,7 +364,7 @@ mod tests {
         let manifest = SidecarManifest {
             version: "v1".to_string(),
             platform: "linux".to_string(),
-            sha256: "hash".to_string(),
+            binary_hash: "hash".to_string(),
             source_url: "url".to_string(),
             installed_at: "now".to_string(),
             binary_size: 100,
@@ -378,7 +373,7 @@ mod tests {
         let json: serde_json::Value = serde_json::to_value(&manifest).unwrap();
         assert!(json.get("version").is_some());
         assert!(json.get("platform").is_some());
-        assert!(json.get("sha256").is_some());
+        assert!(json.get("binary_hash").is_some());
         assert!(json.get("source_url").is_some());
         assert!(json.get("installed_at").is_some());
         assert!(json.get("binary_size").is_some());

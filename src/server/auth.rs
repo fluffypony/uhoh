@@ -67,6 +67,9 @@ pub async fn auth_middleware(
         if !auth_policy.requires_mcp_auth() {
             return next.run(request).await;
         }
+    // Read endpoints (GET/HEAD) are unauthenticated to allow the web UI to load
+    // before JavaScript can prompt for a token. Only write operations require
+    // bearer token auth.
     } else if path == "/ws"
         || !auth_policy.requires_http_auth()
         || matches!(method, Method::GET | Method::HEAD)

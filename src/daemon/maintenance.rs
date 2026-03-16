@@ -222,7 +222,7 @@ impl DaemonMaintenanceSubsystem {
         let mut tick_sys = sysinfo::System::new();
         tick_sys.refresh_memory();
         if crate::ai::should_run_ai_with(&settings.ai, &tick_sys) {
-            crate::ai::process_summary_queue(
+            crate::ai::drain_pending_summaries(
                 &ctx.uhoh_dir,
                 &ctx.database,
                 &settings.ai,
