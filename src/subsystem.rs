@@ -129,7 +129,7 @@ impl SubsystemManager {
         out
     }
 
-    pub async fn start_all(&mut self, ctx: SubsystemContext) {
+    pub fn start_all(&mut self, ctx: SubsystemContext) {
         for runner in &mut self.runners {
             start_runner_task(runner, self.shutdown.child_token(), ctx.clone());
         }

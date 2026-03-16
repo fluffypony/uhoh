@@ -20,6 +20,13 @@ use crate::snapshot;
 
 pub(crate) const RESTORE_IN_PROGRESS_FILE: &str = ".restore-in-progress";
 
+struct FileToRestore {
+    path: std::path::PathBuf,
+    hash: String,
+    executable: bool,
+    is_symlink: bool,
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RestoreOutcome {
@@ -332,7 +339,7 @@ pub(crate) fn apply_restore(
         };
 
     let mut to_delete: Vec<String> = Vec::new();
-    let mut to_restore: Vec<(std::path::PathBuf, String, bool, bool)> = Vec::new(); // (path, hash, executable, is_symlink)
+    let mut to_restore: Vec<FileToRestore> = Vec::new();
 
     let mut cleanup_staging: Option<std::path::PathBuf> = None;
 
@@ -376,12 +383,12 @@ pub(crate) fn apply_restore(
                     }
                 }
             }
-            to_restore.push((
-                std::path::PathBuf::from(rel),
-                file.hash.clone(),
-                file.executable,
-                file.is_symlink,
-            ));
+            to_restore.push(FileToRestore {
+                path: std::path::PathBuf::from(rel),
+                hash: file.hash.clone(),
+                executable: file.executable,
+                is_symlink: file.is_symlink,
+            });
         }
 
         if dry_run {
@@ -393,7 +400,7 @@ pub(crate) fn apply_restore(
                 files_deleted: to_delete.len(),
                 files_to_restore: to_restore
                     .iter()
-                    .map(|(path, _, _, _)| path.to_string_lossy().to_string())
+                    .map(|f| f.path.to_string_lossy().to_string())
                     .collect(),
                 files_to_delete: to_delete
                     .iter()
@@ -468,7 +475,8 @@ pub(crate) fn apply_restore(
         std::fs::create_dir_all(&restore_tmp)?;
         cleanup_staging = Some(restore_tmp.clone());
 
-        for (path, hash, executable, is_symlink) in &to_restore {
+        for f in &to_restore {
+            let FileToRestore { path, hash, executable, is_symlink } = f;
             if path.is_absolute()
                 || path
                     .components()
@@ -527,7 +535,8 @@ pub(crate) fn apply_restore(
                 }
             }
         }
-        for (path, _, _, _) in &to_restore {
+        for f in &to_restore {
+            let path = &f.path;
             let staged = restore_tmp.join(path);
             let final_dest = project_path.join(path);
             if let Some(parent) = final_dest.parent() {
@@ -583,7 +592,7 @@ pub(crate) fn apply_restore(
             files_deleted: to_delete.len(),
             files_to_restore: to_restore
                 .iter()
-                .map(|(path, _, _, _)| path.to_string_lossy().to_string())
+                .map(|f| f.path.to_string_lossy().to_string())
                 .collect(),
             files_to_delete: to_delete
                 .iter()

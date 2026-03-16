@@ -21,9 +21,18 @@ fn emit_proxy_event(
     severity: LedgerSeverity,
     detail: String,
 ) {
+    emit_proxy_event_to_ledger(&ctx.event_ledger, event_type, severity, detail);
+}
+
+fn emit_proxy_event_to_ledger(
+    ledger: &crate::event_ledger::EventLedger,
+    event_type: LedgerEventType,
+    severity: LedgerSeverity,
+    detail: String,
+) {
     let mut event = new_event(LedgerSource::Agent, event_type, severity);
     event.detail = Some(detail);
-    if let Err(err) = ctx.event_ledger.append(event) {
+    if let Err(err) = ledger.append(event) {
         tracing::error!("failed to append proxy event: {err}");
     }
 }
@@ -70,15 +79,12 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
                     )
                     .await
                     {
-                        let mut ev = new_event(
-                            LedgerSource::Agent,
+                        emit_proxy_event_to_ledger(
+                            &event_ledger,
                             LedgerEventType::McpProxyConnectionFailed,
                             LedgerSeverity::Warn,
+                            format!("peer={addr}, error={e}"),
                         );
-                        ev.detail = Some(format!("peer={addr}, error={e}"));
-                        if let Err(err) = event_ledger.append(ev) {
-                            tracing::error!("failed to append proxy event: {err}");
-                        }
                     }
                 });
             }

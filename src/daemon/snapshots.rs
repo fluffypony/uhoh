@@ -216,7 +216,7 @@ pub(super) fn handle_watch_event(
 
     let path = match event {
         WatchEvent::FileChanged(path) | WatchEvent::FileDeleted(path) => path,
-        WatchEvent::Overflow | WatchEvent::WatcherDied => return,
+        _ => unreachable!("handled by early returns above"),
     };
     let is_delete = matches!(event, WatchEvent::FileDeleted(_));
 

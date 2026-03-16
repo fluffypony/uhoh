@@ -117,7 +117,7 @@ impl DaemonMaintenanceSubsystem {
         if db_projects.is_empty() {
             return None;
         }
-        let db_path = ctx.uhoh_dir.join("uhoh.db");
+        let database = ctx.database.clone();
         let gc_uhoh_dir = ctx.uhoh_dir.clone();
         let cfg = settings.compaction.clone();
         let idx = self.compaction_index;
@@ -125,21 +125,12 @@ impl DaemonMaintenanceSubsystem {
         let projects = db_projects.to_vec();
         tokio::spawn(async move {
             let freed = tokio::task::spawn_blocking(move || {
-                let db = match crate::db::Database::open(&db_path) {
-                    Ok(db) => Some(db),
-                    Err(err) => {
-                        tracing::warn!("Failed to open database for compaction: {err}");
-                        None
-                    }
-                };
                 let mut freed = 0u64;
-                if let Some(d) = db {
-                    let project = &projects[idx % projects.len()];
-                    if let Ok(f) =
-                        crate::compaction::compact_project(&d, &project.hash, &cfg)
-                    {
-                        freed = freed.saturating_add(f);
-                    }
+                let project = &projects[idx % projects.len()];
+                if let Ok(f) =
+                    crate::compaction::compact_project(&database, &project.hash, &cfg)
+                {
+                    freed = freed.saturating_add(f);
                 }
                 freed
             })

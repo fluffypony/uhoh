@@ -412,7 +412,7 @@ async fn start_subsystems(
         uhoh_dir: uhoh_dir.to_path_buf(),
         server_event_tx: server_event_tx.clone(),
     };
-    subsystem_manager.lock().await.start_all(ctx).await;
+    subsystem_manager.lock().await.start_all(ctx);
     subsystem_manager
 }
 
