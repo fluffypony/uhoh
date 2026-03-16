@@ -255,7 +255,7 @@ pub fn cmd_diff(
 
     let all_paths: HashSet<&str> = map1.keys().chain(map2.keys()).copied().collect();
     let mut sorted_paths: Vec<&str> = all_paths.into_iter().collect();
-    sorted_paths.sort();
+    sorted_paths.sort_unstable();
 
     let mut stdout = std::io::stdout().lock();
 

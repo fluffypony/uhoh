@@ -633,9 +633,9 @@ fn resolve_pgpass(connection_ref: &str) -> Result<Option<CredentialMaterial>> {
                 username: if fields[3] == "*" {
                     user.clone()
                 } else {
-                    Some(fields[3].to_string())
+                    Some(fields[3].clone())
                 },
-                password: Some(fields[4].to_string()),
+                password: Some(fields[4].clone()),
             }));
         }
     }

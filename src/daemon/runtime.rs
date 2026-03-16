@@ -412,7 +412,7 @@ async fn start_subsystems(
         uhoh_dir: uhoh_dir.to_path_buf(),
         server_event_tx: server_event_tx.clone(),
     };
-    subsystem_manager.lock().await.start_all(ctx);
+    subsystem_manager.lock().await.start_all(&ctx);
     subsystem_manager
 }
 
@@ -613,7 +613,7 @@ async fn run_tick_maintenance(ctx: TickMaintenanceCtx<'_>) -> TickOutcome {
     subsystem_manager
         .lock()
         .await
-        .tick_restart(subsystem_ctx)
+        .tick_restart(&subsystem_ctx)
         .await;
 
     TickOutcome {

@@ -88,7 +88,7 @@ async fn subsystem_manager_starts_reports_health_and_shuts_down() {
         counters: counters.clone(),
     }));
 
-    mgr.start_all(ctx.clone());
+    mgr.start_all(&ctx);
     for _ in 0..40 {
         if counters.run.load(Ordering::SeqCst) > 0 {
             break;

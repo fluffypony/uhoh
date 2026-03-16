@@ -129,13 +129,13 @@ impl SubsystemManager {
         out
     }
 
-    pub fn start_all(&mut self, ctx: SubsystemContext) {
+    pub fn start_all(&mut self, ctx: &SubsystemContext) {
         for runner in &mut self.runners {
             start_runner_task(runner, self.shutdown.child_token(), ctx.clone());
         }
     }
 
-    pub async fn tick_restart(&mut self, ctx: SubsystemContext) {
+    pub async fn tick_restart(&mut self, ctx: &SubsystemContext) {
         for runner in &mut self.runners {
             let finished = runner
                 .task
