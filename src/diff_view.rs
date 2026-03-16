@@ -470,7 +470,7 @@ pub fn cmd_log(database: &Database, project: &ProjectEntry, file_path: &str) -> 
             "  {} [{id_str}] {changed} ({})",
             item.timestamp, item.trigger
         );
-        prev_hash = item.hash.clone();
+        prev_hash.clone_from(&item.hash);
     }
     Ok(())
 }
