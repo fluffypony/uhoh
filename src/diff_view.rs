@@ -202,6 +202,8 @@ pub fn cmd_diff(
     id1: Option<&str>,
     id2: Option<&str>,
 ) -> Result<()> {
+    // Cap for very large files to avoid excessive memory in diffing
+    const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
     let blob_root = uhoh_dir.join("blobs");
 
     let (files1, files2, label1, label2) = match (id1, id2) {
@@ -257,8 +259,6 @@ pub fn cmd_diff(
 
     let mut stdout = std::io::stdout().lock();
 
-    // Cap for very large files to avoid excessive memory in diffing
-    const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
     for path in sorted_paths {
         let old_hash = map1.get(path).copied();
         let new_hash = map2.get(path).copied();
@@ -311,12 +311,10 @@ pub fn cmd_diff(
         // Detect binary content before converting to string
         let old_is_binary = old_bytes
             .as_ref()
-            .map(|b| content_inspector::inspect(&b[..b.len().min(8192)]).is_binary())
-            .unwrap_or(false);
+            .is_some_and(|b| content_inspector::inspect(&b[..b.len().min(8192)]).is_binary());
         let new_is_binary = new_bytes
             .as_ref()
-            .map(|b| content_inspector::inspect(&b[..b.len().min(8192)]).is_binary())
-            .unwrap_or(false);
+            .is_some_and(|b| content_inspector::inspect(&b[..b.len().min(8192)]).is_binary());
 
         if old_is_binary || new_is_binary {
             let display_path = if path.strip_prefix("b64:").is_some() {
@@ -406,8 +404,7 @@ pub fn cmd_cat(
             .into_iter()
             .find(|s| {
                 chrono::DateTime::parse_from_rfc3339(&s.timestamp)
-                    .map(|d| d.with_timezone(&chrono::Utc) <= target)
-                    .unwrap_or(false)
+                    .is_ok_and(|d| d.with_timezone(&chrono::Utc) <= target)
             })
     } else if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(id_str, "%Y-%m-%dT%H:%M:%S") {
         let target = chrono::Utc.from_utc_datetime(&ts);
@@ -416,8 +413,7 @@ pub fn cmd_cat(
             .into_iter()
             .find(|s| {
                 chrono::DateTime::parse_from_rfc3339(&s.timestamp)
-                    .map(|d| d.with_timezone(&chrono::Utc) <= target)
-                    .unwrap_or(false)
+                    .is_ok_and(|d| d.with_timezone(&chrono::Utc) <= target)
             })
     } else if crate::encoding::base58_to_id(id_str).is_some() {
         database.find_snapshot_by_base58(&project.hash, id_str)?
