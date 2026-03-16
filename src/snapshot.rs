@@ -583,6 +583,7 @@ fn record_symlink_entry(
                 scan,
             );
             if bytes_written > 0 {
+                #[allow(clippy::cast_possible_wrap)] // blob sizes won't exceed i64::MAX
                 let _ = ctx.database.add_blob_bytes(bytes_written as i64);
             }
         }
@@ -650,6 +651,7 @@ fn record_file_entry(
                 scan,
             );
             if bytes_written > 0 {
+                #[allow(clippy::cast_possible_wrap)] // blob sizes won't exceed i64::MAX
                 let _ = ctx.database.add_blob_bytes(bytes_written as i64);
             }
         }
@@ -916,13 +918,15 @@ pub fn mtime_to_millis(t: SystemTime) -> i64 {
     }
 }
 
-#[must_use] 
+#[must_use]
+#[allow(clippy::cast_sign_loss)] // millis >= 0 guard ensures no sign loss
 pub fn millis_to_mtime(millis: i64) -> SystemTime {
     if millis >= 0 {
         std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis as u64)
     } else {
         // Reverse the +1 offset from mtime_to_millis: -1 maps back to epoch, -2 to 1ms before, etc.
         let before_epoch = (-i128::from(millis) - 1).max(0) as u128;
+        #[allow(clippy::cast_possible_truncation)] // clamped to u64::MAX
         let clamped = before_epoch.min(u128::from(u64::MAX)) as u64;
         std::time::UNIX_EPOCH - std::time::Duration::from_millis(clamped)
     }
@@ -934,6 +938,7 @@ fn enforce_storage_limit(
     project_hash: &str,
     settings: &SnapshotSettings,
 ) -> Result<()> {
+    #[allow(clippy::cast_precision_loss)] // acceptable precision loss for storage limit calculations
     let max_blob_size = std::cmp::max(
         (project_size as f64 * settings.storage.storage_limit_fraction) as u64,
         settings.storage.storage_min_bytes,
@@ -944,11 +949,13 @@ fn enforce_storage_limit(
         return Ok(());
     }
 
+    #[allow(clippy::cast_precision_loss)] // display-only MB conversion
+    let (blob_mb, max_mb) = (blob_size as f64 / 1_048_576.0, max_blob_size as f64 / 1_048_576.0);
     tracing::info!(
         "Blob storage for {} exceeds limit: {:.1}MB > {:.1}MB, pruning...",
         &project_hash[..8],
-        blob_size as f64 / 1_048_576.0,
-        max_blob_size as f64 / 1_048_576.0,
+        blob_mb,
+        max_mb,
     );
 
     // Delete oldest unpinned snapshots until under limit (approximate freed space)
