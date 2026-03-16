@@ -363,7 +363,7 @@ fn encrypt_credentials_map(
     map: &std::collections::BTreeMap<String, CredentialMaterial>,
 ) -> Result<Vec<u8>> {
     let mut salt = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
 
     let (kdf_id, key) = if let Ok(mut master) = std::env::var("UHOH_MASTER_KEY") {
         if master.trim().is_empty() {
@@ -397,7 +397,7 @@ fn encrypt_credentials_map(
     for (logical_key, material) in map {
         let serialized = serde_json::to_vec(material)?;
         let mut nonce = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce);
+        rand::rng().fill_bytes(&mut nonce);
         let ciphertext = cipher
             .encrypt(Nonce::from_slice(&nonce), serialized.as_ref())
             .map_err(|_| anyhow::anyhow!("Failed to encrypt credential entry"))?;

@@ -804,13 +804,13 @@ fn secure_eq(left: &[u8], right: &[u8]) -> bool {
 
 fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     hex::encode(buf)
 }
 
 fn uuid_like_id() -> String {
     let mut buf = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     hex::encode(buf)
 }
 

@@ -17,8 +17,9 @@ use crate::server::transport_security::TransportSecurityPolicy;
 pub struct AuthToken(pub String);
 
 pub fn generate_token() -> String {
-    let mut rng = rand::thread_rng();
-    let bytes: [u8; 32] = rng.gen();
+    let mut rng = rand::rng();
+    let mut bytes = [0u8; 32];
+    rng.fill(&mut bytes);
     hex::encode(bytes)
 }
 

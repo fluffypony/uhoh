@@ -299,7 +299,7 @@ fn maybe_encrypt(plaintext: &[u8], uhoh_dir: &std::path::Path) -> Result<Vec<u8>
     let mut material = derive_encryption_material(uhoh_dir)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&material.key));
     let mut nonce_buf = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut nonce_buf);
+    rand::rng().fill_bytes(&mut nonce_buf);
     let nonce = Nonce::from_slice(&nonce_buf);
     let mut out = ENC_MAGIC.to_vec();
     out.push(material.kdf_id);
@@ -328,7 +328,7 @@ fn derive_encryption_material(uhoh_dir: &std::path::Path) -> Result<EncryptionMa
             });
         }
 
-        rand::thread_rng().fill_bytes(&mut salt);
+        rand::rng().fill_bytes(&mut salt);
         let key = match derive_argon2_key(&master, &salt) {
             Ok(k) => {
                 master.zeroize();
@@ -462,7 +462,7 @@ pub(crate) fn load_or_create_machine_key(uhoh_dir: &std::path::Path) -> Result<[
     }
 
     let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::rng().fill_bytes(&mut key);
     std::fs::write(&key_path, format!("{}\n", hex::encode(key)))
         .with_context(|| format!("Failed writing {}", key_path.display()))?;
     set_secure_permissions(&key_path)?;
