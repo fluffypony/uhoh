@@ -40,7 +40,7 @@ pub fn should_run_ai(config: &AiConfig) -> bool {
     true
 }
 
-/// Like should_run_ai, but reuse a provided sysinfo::System snapshot.
+/// Like `should_run_ai`, but reuse a provided `sysinfo::System` snapshot.
 pub fn should_run_ai_with(config: &AiConfig, sys: &sysinfo::System) -> bool {
     if !config.enabled {
         return false;

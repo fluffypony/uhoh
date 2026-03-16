@@ -68,7 +68,7 @@ mod tests {
     fn walk_files(dir: &Path) -> Vec<String> {
         let walker = build_walker(dir);
         let mut files: Vec<String> = walker
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
             .map(|e| {
                 e.path()

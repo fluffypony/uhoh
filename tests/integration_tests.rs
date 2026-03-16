@@ -334,7 +334,7 @@ fn test_compaction_preserves_pinned() {
 
 // ---- Emergency delete detection integration tests ----
 
-/// Mass deletion in create_snapshot triggers dynamic auto→emergency upgrade.
+/// Mass deletion in `create_snapshot` triggers dynamic auto→emergency upgrade.
 #[test]
 fn test_dynamic_trigger_upgrade_on_mass_delete() {
     let tmp = TempDir::new().unwrap();

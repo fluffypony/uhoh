@@ -18,6 +18,14 @@ pub fn uhoh_dir() -> PathBuf {
     }
 }
 
+/// Install the uhoh daemon as a platform service (launchd on macOS, systemd on Linux,
+/// Task Scheduler on Windows).
+///
+/// # Errors
+///
+/// Returns an error if the service unit or plist file cannot be written, if the
+/// binary cannot be copied to the install location, or if the platform service
+/// manager command fails.
 pub fn install_service() -> Result<()> {
     #[cfg(target_os = "macos")]
     install_launchagent()?;
@@ -31,6 +39,12 @@ pub fn install_service() -> Result<()> {
     Ok(())
 }
 
+/// Uninstall the uhoh daemon service from the platform service manager.
+///
+/// # Errors
+///
+/// Returns an error if the service unit file path cannot be resolved or the
+/// platform service manager command fails.
 pub fn remove_service() -> Result<()> {
     #[cfg(target_os = "macos")]
     remove_launchagent()?;
@@ -225,7 +239,7 @@ fn remove_systemd_user_unit() -> Result<()> {
 /// Cross-platform check whether the given PID is a running uhoh process.
 /// macOS: use `ps -p <pid> -o comm=` and check name contains "uhoh".
 /// Linux: read `/proc/<pid>/cmdline` and check name contains "uhoh".
-/// Windows: OpenProcess + GetModuleFileNameExW, check path contains "uhoh".
+/// Windows: `OpenProcess` + `GetModuleFileNameExW`, check path contains "uhoh".
 #[must_use] 
 pub fn is_uhoh_process_alive(pid: u32) -> bool {
     #[cfg(target_os = "macos")]

@@ -46,11 +46,21 @@ impl StorageMethod {
 /// Store a blob in the CAS. Uses atomic write (write-to-temp, fsync, rename).
 /// Returns (BLAKE3 hex hash, bytes actually written to disk).
 /// `bytes_written` is 0 when deduplication hits an existing blob.
+///
+/// # Errors
+///
+/// Returns an error if the blob directory cannot be created, the temp file cannot be
+/// written or synced, or the atomic rename fails.
 pub fn store_blob(blob_root: &Path, content: &[u8]) -> Result<(String, u64)> {
     store_blob_with_level(blob_root, content, 3)
 }
 
 /// Same as `store_blob`, but lets callers override zstd compression level.
+///
+/// # Errors
+///
+/// Returns an error if the blob directory cannot be created, the temp file cannot be
+/// written or synced, or the atomic rename fails.
 pub fn store_blob_with_level(
     blob_root: &Path,
     content: &[u8],
@@ -165,6 +175,11 @@ impl BlobStorageParams {
 
 /// Store a blob from a file path using single-pass streaming hash+write.
 /// Returns `(hash, size, storage_method, bytes_on_disk)`.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be stat'd or opened, if reading fails, or if
+/// writing or renaming the blob to its final location fails.
 pub fn store_blob_from_file(
     blob_root: &Path,
     file_path: &Path,
@@ -442,6 +457,11 @@ fn try_compress_and_place(
 }
 
 /// Read a blob from the CAS with integrity verification.
+///
+/// # Errors
+///
+/// Returns an error if the blob file cannot be read, decompression fails, or the
+/// BLAKE3 integrity check detects corruption.
 pub fn read_blob(blob_root: &Path, hash: &str) -> Result<Option<Vec<u8>>> {
     if hash.len() < 2 {
         return Ok(None);

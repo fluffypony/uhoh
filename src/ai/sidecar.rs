@@ -328,7 +328,7 @@ fn detect_backend(uhoh_dir: &Path) -> Result<Backend> {
     })
 }
 
-/// Map a model file path to a HuggingFace MLX model repo ID.
+/// Map a model file path to a `HuggingFace` MLX model repo ID.
 /// Longer/more-specific patterns come first to avoid "3b" matching "35b" filenames.
 fn mlx_model_id_from_path(model_path: &Path) -> String {
     let stem = model_path

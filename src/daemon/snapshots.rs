@@ -460,7 +460,7 @@ async fn execute_snapshot_plan(ctx: SnapshotExecutionCtx<'_>, plan: SnapshotExec
         event_ledger,
     } = ctx;
 
-    let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let logical = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let concurrency = std::cmp::max(1, (logical / 2).max(1));
     let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
     let mut join: tokio::task::JoinSet<SnapshotTaskResult> = tokio::task::JoinSet::new();

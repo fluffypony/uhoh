@@ -2,6 +2,11 @@ use anyhow::{Context, Result};
 
 use crate::db::{self, LedgerSource};
 
+/// Prints the full ledger trace chain for a given event ID.
+///
+/// # Errors
+///
+/// Returns an error if the database query for the event trace fails.
 pub fn trace(database: &db::Database, event_id: i64) -> Result<()> {
     let chain = database.event_ledger_trace(event_id)?;
     if chain.entries.is_empty() {
@@ -21,6 +26,11 @@ pub fn trace(database: &db::Database, event_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Prints the ledger blame chain for the most recent event touching a given path.
+///
+/// # Errors
+///
+/// Returns an error if the recent-events query or the subsequent trace query fails.
 pub fn blame(database: &db::Database, path: &str) -> Result<()> {
     let events = database.event_ledger_recent(db::LedgerRecentFilters::default(), 500)?;
     if let Some(seed) = events
@@ -46,6 +56,11 @@ pub fn blame(database: &db::Database, path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Prints ledger events in chronological order, optionally filtered by source and time.
+///
+/// # Errors
+///
+/// Returns an error if the `--since` value cannot be parsed, or if the database query fails.
 pub fn timeline(
     database: &db::Database,
     source: Option<LedgerSource>,
@@ -88,6 +103,11 @@ pub fn timeline(
     Ok(())
 }
 
+/// Verifies the integrity of the event ledger's hash chain.
+///
+/// # Errors
+///
+/// Returns an error if the database query fails, or if any broken chain links are detected.
 pub fn verify(database: &db::Database) -> Result<()> {
     let (count, broken) = database.verify_event_ledger_chain()?;
     if broken.is_empty() {

@@ -136,6 +136,12 @@ struct SnapshotDecision {
 }
 
 /// Create a snapshot for a project. Returns the snapshot ID if one was created.
+///
+/// # Errors
+///
+/// Returns an error if the previous snapshot files cannot be loaded from the database,
+/// if blob storage fails unrecoverably, or if persisting the snapshot record to the
+/// database fails.
 pub fn create_snapshot(
     uhoh_dir: &Path,
     database: &Database,
@@ -1001,7 +1007,7 @@ fn enforce_storage_limit(
     Ok(())
 }
 
-/// Load the previous snapshot's file entries as a HashMap for comparison.
+/// Load the previous snapshot's file entries as a `HashMap` for comparison.
 fn load_previous_snapshot_files(
     database: &Database,
     project_hash: &str,

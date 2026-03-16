@@ -17,6 +17,12 @@ use crate::update;
 
 use super::shared::is_daemon_running;
 
+/// Starts the uhoh daemon, either in the foreground as a service or detached.
+///
+/// # Errors
+///
+/// Returns an error if running the daemon in the foreground fails or if spawning
+/// a detached daemon process fails.
 pub async fn start(uhoh: &Path, database: &db::Database, service: bool) -> Result<()> {
     if service {
         daemon::run_foreground(uhoh, Arc::new(database.clone_handle())).await?;
@@ -26,16 +32,32 @@ pub async fn start(uhoh: &Path, database: &db::Database, service: bool) -> Resul
     Ok(())
 }
 
+/// Stops the running uhoh daemon.
+///
+/// # Errors
+///
+/// Returns an error if signalling or waiting for the daemon to stop fails.
 pub fn stop(uhoh: &Path) -> Result<()> {
     daemon::stop_daemon(uhoh)
 }
 
+/// Stops the daemon if running, then spawns a fresh detached daemon process.
+///
+/// # Errors
+///
+/// Returns an error if spawning the new daemon process fails.
 pub fn restart(uhoh: &Path) -> Result<()> {
     daemon::stop_daemon(uhoh).ok();
     std::thread::sleep(std::time::Duration::from_secs(1));
     daemon::spawn_detached_daemon(uhoh)
 }
 
+/// Installs or removes the uhoh git hook in the current project.
+///
+/// # Errors
+///
+/// Returns an error if the current directory cannot be resolved or the hook
+/// install/remove operation fails.
 pub fn hook(action: HookAction) -> Result<()> {
     let project_path = dunce::canonicalize(std::env::current_dir()?)?;
     match action {
@@ -44,6 +66,12 @@ pub fn hook(action: HookAction) -> Result<()> {
     }
 }
 
+/// Reads or modifies the uhoh configuration file.
+///
+/// # Errors
+///
+/// Returns an error if the config file cannot be loaded or written, the editor
+/// process cannot be spawned, or the key nesting depth exceeds two levels.
 pub fn config_action(uhoh: &Path, action: Option<ConfigAction>) -> Result<()> {
     let config_path = uhoh.join("config.toml");
     match action {
@@ -111,14 +139,29 @@ pub fn config_action(uhoh: &Path, action: Option<ConfigAction>) -> Result<()> {
     Ok(())
 }
 
+/// Runs garbage collection to remove unreferenced blobs from the store.
+///
+/// # Errors
+///
+/// Returns an error if the GC operation fails.
 pub fn run_gc(uhoh: &Path, database: &db::Database) -> Result<()> {
     gc::run_gc(uhoh, database)
 }
 
+/// Checks for a newer release and applies it if one is available.
+///
+/// # Errors
+///
+/// Returns an error if the update check or download fails.
 pub async fn update(uhoh: &Path) -> Result<()> {
     update::check_and_apply_update(uhoh).await
 }
 
+/// Runs diagnostics on the uhoh installation, optionally fixing problems found.
+///
+/// # Errors
+///
+/// Returns an error if the install verification or the doctor run itself fails.
 pub async fn doctor(
     uhoh_dir: &Path,
     database: db::Database,
@@ -132,6 +175,11 @@ pub async fn doctor(
     run_doctor(uhoh_dir, database, fix, restore_latest).await
 }
 
+/// Prints a summary of daemon status, project counts, storage usage, and subsystem health.
+///
+/// # Errors
+///
+/// Returns an error if listing projects from the database fails.
 pub async fn status(uhoh: &Path, database: &db::Database) -> Result<()> {
     let running = is_daemon_running(uhoh);
     println!("Daemon: {}", if running { "running" } else { "stopped" });
@@ -216,6 +264,12 @@ async fn fetch_subsystem_health(uhoh: &Path) -> Result<Vec<serde_json::Value>> {
         .ok_or_else(|| anyhow::anyhow!("no subsystems field in health response"))
 }
 
+/// Runs an external command under uhoh supervision, injecting sandbox and MCP proxy config.
+///
+/// # Errors
+///
+/// Returns an error if no command is provided, the config cannot be loaded, sandbox is
+/// requested but unsupported on this platform, or the command cannot be spawned.
 pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()> {
     if command.is_empty() {
         anyhow::bail!("No command provided");
@@ -354,12 +408,22 @@ pub async fn run_wrapped_command(uhoh: &Path, command: Vec<String>) -> Result<()
     Ok(())
 }
 
+/// Installs uhoh as a platform system service (e.g. launchd or systemd).
+///
+/// # Errors
+///
+/// Returns an error if the platform service installation fails.
 pub fn install_service() -> Result<()> {
     platform::install_service()?;
     println!("Service installed.");
     Ok(())
 }
 
+/// Removes the uhoh platform system service registration.
+///
+/// # Errors
+///
+/// Returns an error if the platform service removal fails.
 pub fn remove_service() -> Result<()> {
     platform::remove_service()?;
     println!("Service removed.");

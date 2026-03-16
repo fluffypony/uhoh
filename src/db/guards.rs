@@ -4,6 +4,11 @@ use rusqlite::params;
 use super::{Database, DbGuardEngine, DbGuardEntry, DbGuardMode, DbGuardRegistration};
 
 impl Database {
+    /// Register a new database guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn add_db_guard(&self, reg: &DbGuardRegistration<'_>) -> Result<()> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -23,6 +28,11 @@ impl Database {
         Ok(())
     }
 
+    /// List all registered database guards ordered by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails or a persisted engine/mode value is unrecognized.
     pub fn list_db_guards(&self) -> Result<Vec<DbGuardEntry>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -66,6 +76,11 @@ impl Database {
         Ok(out)
     }
 
+    /// Update the cached watched-tables list for a database guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn set_db_guard_watched_tables_cache(&self, name: &str, cache: Option<&str>) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -75,12 +90,22 @@ impl Database {
         Ok(())
     }
 
+    /// Delete a database guard by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn remove_db_guard(&self, name: &str) -> Result<()> {
         let conn = self.conn()?;
         conn.execute("DELETE FROM db_guards WHERE name = ?1", params![name])?;
         Ok(())
     }
 
+    /// Record the timestamp of the last successful baseline for a database guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn set_db_guard_baseline_time(&self, name: &str, ts: &str) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(

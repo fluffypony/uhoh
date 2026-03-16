@@ -694,7 +694,7 @@ mod tests {
             } => {
                 assert_eq!(deleted_paths_sample.len(), 20);
             }
-            other => panic!("Expected Triggered, got {:?}", other),
+            other => panic!("Expected Triggered, got {other:?}"),
         }
     }
 }

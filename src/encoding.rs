@@ -99,7 +99,7 @@ fn encode_relpath_bytes(rel: &Path) -> String {
     }
 }
 
-/// Decode a manifest relative path back to a platform OsString.
+/// Decode a manifest relative path back to a platform `OsString`.
 #[must_use] 
 pub fn decode_relpath_to_os(s: &str) -> OsString {
     if let Some(rest) = s.strip_prefix("b64:") {

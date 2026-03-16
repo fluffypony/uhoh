@@ -79,7 +79,7 @@ fn marker_path_for(project_path: &Path) -> PathBuf {
 }
 
 /// Scan for marker files to detect moved projects.
-/// Returns Vec<(project_hash, discovered_path)>.
+/// Returns Vec<(`project_hash`, `discovered_path`)>.
 pub fn scan_for_markers(search_paths: &[PathBuf]) -> Vec<(String, PathBuf)> {
     let mut found = Vec::new();
     for base in search_paths {

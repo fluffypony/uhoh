@@ -29,6 +29,11 @@ impl EventLedger {
         self
     }
 
+    /// Persist an event to the ledger and broadcast it to any attached publisher.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database insert fails.
     pub fn append(&self, event: NewEventLedgerEntry) -> Result<i64> {
         let id = self.db.insert_event_ledger(&event)?;
 

@@ -116,6 +116,13 @@ impl fmt::Display for RestoreApplyError {
 
 impl std::error::Error for RestoreApplyError {}
 
+/// Restore a project to the state recorded in the given snapshot.
+///
+/// # Errors
+///
+/// Returns an error if the snapshot or required blobs cannot be found, if the
+/// pre-restore snapshot fails, or if any file operation (write, rename, delete)
+/// fails during the restore.
 pub fn restore_project(
     uhoh_dir: &Path,
     database: &Database,
@@ -130,6 +137,12 @@ pub fn restore_project(
     restore_project_with_runtime(&runtime, project, request)
 }
 
+/// Write a symlink at `full_path` pointing to the target encoded in `content`.
+///
+/// # Errors
+///
+/// Returns an error if the symlink (or fallback regular file on Windows) cannot be
+/// created at `full_path`.
 pub fn restore_symlink_target(content: &[u8], full_path: &Path) -> Result<()> {
     if full_path.symlink_metadata().is_ok() {
         let _ = std::fs::remove_file(full_path);

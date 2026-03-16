@@ -12,6 +12,11 @@ use anyhow::Result;
 use crate::cli::{Commands, LedgerAction};
 use crate::db;
 
+/// Dispatches a CLI command to the appropriate handler.
+///
+/// # Errors
+///
+/// Returns an error if the dispatched command handler fails.
 pub async fn dispatch(uhoh: &Path, database: db::Database, command: Commands) -> Result<()> {
     match command {
         Commands::Add { path } => project::add(uhoh, &database, path)?,

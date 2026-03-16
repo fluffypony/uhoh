@@ -7,7 +7,7 @@ use std::path::Path;
 /// If this is still a placeholder, Ed25519 verification will silently fail and the
 /// updater falls back to DNS-only verification.
 ///
-/// NOTE: The verify_ed25519_signature function pre-hashes the binary with BLAKE3
+/// NOTE: The `verify_ed25519_signature` function pre-hashes the binary with BLAKE3
 /// before passing the digest to Ed25519 verify. This means standard tools (openssl,
 /// ssh-keygen) cannot generate compatible signatures — use the project's custom
 /// signing script. This coupling is intentional for performance (avoids loading

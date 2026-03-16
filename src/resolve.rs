@@ -18,6 +18,12 @@ pub enum ResolveError {
 ///
 /// This variant avoids implicit current-directory behavior so server handlers can
 /// supply their own default path context.
+///
+/// # Errors
+///
+/// Returns [`ResolveError::Internal`] if the database cannot be queried or a path
+/// cannot be canonicalized. Returns [`ResolveError::NotFound`] if no tracked project
+/// matches the target, and [`ResolveError::Ambiguous`] if multiple projects match.
 pub fn resolve_project(
     database: &Database,
     target: Option<&str>,
@@ -107,6 +113,11 @@ pub fn resolve_project(
 }
 
 /// Reject absolute and parent-traversal paths.
+///
+/// # Errors
+///
+/// Returns an error if `relative_path` is absolute, contains a `..` component, or
+/// canonicalizes to a location outside `project_path`.
 pub fn validate_path_within_project(project_path: &Path, relative_path: &str) -> Result<()> {
     let rel = Path::new(relative_path);
     if rel.is_absolute() {

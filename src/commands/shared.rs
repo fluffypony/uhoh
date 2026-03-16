@@ -25,6 +25,11 @@ pub fn is_daemon_running(uhoh: &Path) -> bool {
     }
 }
 
+/// Starts the daemon in the background if it is not already running.
+///
+/// # Errors
+///
+/// Returns an error if spawning the detached daemon process fails.
 pub fn maybe_start_daemon(uhoh: &Path) -> Result<()> {
     if !is_daemon_running(uhoh) {
         tracing::info!("Daemon not running, starting automatically...");
@@ -33,6 +38,11 @@ pub fn maybe_start_daemon(uhoh: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Resolves a project path, falling back to the current directory if none is given.
+///
+/// # Errors
+///
+/// Returns an error if the given path or the current directory cannot be canonicalized.
 pub fn resolve_project_path(path: Option<String>) -> Result<PathBuf> {
     match path {
         Some(path) => {
@@ -43,6 +53,12 @@ pub fn resolve_project_path(path: Option<String>) -> Result<PathBuf> {
     }
 }
 
+/// Resolves the target project from a path, hash prefix, or the current directory.
+///
+/// # Errors
+///
+/// Returns an error if the path cannot be canonicalized, the database query fails,
+/// or no registered project matches the given target.
 pub fn resolve_target_project(
     database: &db::Database,
     target: Option<&str>,
@@ -69,6 +85,12 @@ pub fn resolve_target_project(
     }
 }
 
+/// Prompts the user to confirm deletion of tracked files before a restore.
+///
+/// # Errors
+///
+/// Returns an error if stdin is not an interactive terminal (non-interactive mode bails
+/// to avoid unattended data loss), or if flushing stdout or reading a line from stdin fails.
 pub fn confirm_restore_delete(count: usize) -> Result<bool> {
     use std::io::{self, IsTerminal, Write};
 

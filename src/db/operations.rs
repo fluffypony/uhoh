@@ -6,6 +6,11 @@ use super::{
 };
 
 impl Database {
+    /// Create a new operation record and return its row ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn create_operation(&self, project_hash: &str, label: &str) -> Result<i64> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -16,6 +21,11 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Close an operation, recording its end time and snapshot range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn finish_operation(
         &self,
         op_id: i64,
@@ -33,6 +43,10 @@ impl Database {
     }
 
     /// Set the first snapshot id of an operation (typically at operation start)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn set_operation_first_snapshot(&self, op_id: i64, first_snapshot_id: u64) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -43,6 +57,10 @@ impl Database {
     }
 
     /// Update the last snapshot id of an operation without closing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn update_operation_last_snapshot(&self, op_id: i64, last_snapshot_id: u64) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -52,7 +70,11 @@ impl Database {
         Ok(())
     }
 
-    /// Set the last snapshot id and close an operation (preserves first_snapshot_id)
+    /// Set the last snapshot id and close an operation (preserves `first_snapshot_id`)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn close_operation_with_last(&self, op_id: i64, last_snapshot_id: u64) -> Result<()> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -63,6 +85,11 @@ impl Database {
         Ok(())
     }
 
+    /// Get the most recently started open operation for a project, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn get_active_operation(&self, project_hash: &str) -> Result<Option<ActiveOperationRow>> {
         let conn = self.conn()?;
         conn.query_row(
@@ -80,6 +107,11 @@ impl Database {
         .context("Failed to query active operation")
     }
 
+    /// List the most recent operations for a project (up to 50), newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn list_operations(&self, project_hash: &str) -> Result<Vec<OperationListRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -103,6 +135,11 @@ impl Database {
         Ok(entries)
     }
 
+    /// Get the most recently completed operation for a project, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn get_latest_completed_operation(
         &self,
         project_hash: &str,

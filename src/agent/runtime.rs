@@ -551,7 +551,7 @@ mod tests {
             SubsystemHealth::HealthyWithAudit(source) => {
                 assert!(matches!(source, AuditSource::None));
             }
-            other => panic!("expected HealthyWithAudit(None), got {:?}", other),
+            other => panic!("expected HealthyWithAudit(None), got {other:?}"),
         }
     }
 
@@ -563,7 +563,7 @@ mod tests {
             SubsystemHealth::HealthyWithAudit(source) => {
                 assert!(matches!(source, AuditSource::Fanotify));
             }
-            other => panic!("expected HealthyWithAudit(Fanotify), got {:?}", other),
+            other => panic!("expected HealthyWithAudit(Fanotify), got {other:?}"),
         }
     }
 
@@ -573,7 +573,7 @@ mod tests {
         sub.fatal_error = Some("test failure".to_string());
         match sub.health_check() {
             SubsystemHealth::Failed(msg) => assert_eq!(msg, "test failure"),
-            other => panic!("expected Failed, got {:?}", other),
+            other => panic!("expected Failed, got {other:?}"),
         }
     }
 
@@ -585,7 +585,7 @@ mod tests {
             SubsystemHealth::DegradedWithAudit { message, .. } => {
                 assert_eq!(message, "degraded");
             }
-            other => panic!("expected DegradedWithAudit, got {:?}", other),
+            other => panic!("expected DegradedWithAudit, got {other:?}"),
         }
     }
 
@@ -597,7 +597,7 @@ mod tests {
             SubsystemHealth::DegradedWithAudit { message, .. } => {
                 assert!(message.contains("failures"));
             }
-            other => panic!("expected DegradedWithAudit, got {:?}", other),
+            other => panic!("expected DegradedWithAudit, got {other:?}"),
         }
     }
 

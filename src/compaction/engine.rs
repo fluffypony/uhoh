@@ -5,7 +5,12 @@ use crate::config::CompactionConfig;
 use crate::db::{Database, SnapshotRow, SnapshotTrigger};
 
 /// Run compaction on a project's snapshots.
-/// Uses bucket-based deduplication with O(1) bucket membership check via HashSet.
+/// Uses bucket-based deduplication with O(1) bucket membership check via `HashSet`.
+///
+/// # Errors
+///
+/// Returns an error if the database cannot list snapshots, look up predecessor
+/// snapshots, or delete dominated snapshot records.
 pub fn compact_project(
     database: &Database,
     project_hash: &str,

@@ -17,12 +17,24 @@ use super::shared::{
     confirm_restore_delete, maybe_start_daemon, resolve_project_path, resolve_target_project,
 };
 
+/// Registers a project directory with uhoh, starting the daemon if needed.
+///
+/// # Errors
+///
+/// Returns an error if the daemon cannot be started, the path cannot be resolved,
+/// or project registration fails.
 pub fn add(uhoh: &Path, database: &db::Database, path: Option<String>) -> Result<()> {
     maybe_start_daemon(uhoh)?;
     let project_path = resolve_project_path(path)?;
     register_project(uhoh, database, project_path)
 }
 
+/// Prints project status if the current directory is registered, otherwise registers it.
+///
+/// # Errors
+///
+/// Returns an error if the current directory cannot be resolved, a database query fails,
+/// the daemon cannot be started, or project registration fails.
 pub fn default_action(uhoh: &Path, database: &db::Database) -> Result<()> {
     let cwd = dunce::canonicalize(std::env::current_dir()?)?;
 
@@ -122,6 +134,12 @@ fn print_project_status(database: &db::Database, project_hash: &str) -> Result<(
     Ok(())
 }
 
+/// Unregisters a project and removes its marker file.
+///
+/// # Errors
+///
+/// Returns an error if the target path cannot be resolved, the hash prefix is ambiguous,
+/// no matching project is found, or the database removal fails.
 pub fn remove(database: &db::Database, target: Option<String>) -> Result<()> {
     let project = match target {
         Some(ref target) => {
@@ -170,6 +188,11 @@ pub fn remove(database: &db::Database, target: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Lists all registered projects and their snapshot counts.
+///
+/// # Errors
+///
+/// Returns an error if listing projects or querying snapshot counts from the database fails.
 pub fn list(database: &db::Database) -> Result<()> {
     let projects = database.list_projects()?;
     if projects.is_empty() {
@@ -192,6 +215,11 @@ pub fn list(database: &db::Database) -> Result<()> {
     Ok(())
 }
 
+/// Lists all snapshots for the target project, including their files.
+///
+/// # Errors
+///
+/// Returns an error if the target project cannot be resolved, or if any database query fails.
 pub fn snapshots(database: &db::Database, target: Option<String>) -> Result<()> {
     let project = resolve_target_project(database, target.as_deref())?;
     let snapshots = database.list_snapshots(&project.hash)?;
@@ -225,6 +253,12 @@ pub fn snapshots(database: &db::Database, target: Option<String>) -> Result<()> 
     Ok(())
 }
 
+/// Creates a manual snapshot of the current project.
+///
+/// # Errors
+///
+/// Returns an error if the daemon cannot be started, the current directory is not a
+/// registered project, the config cannot be loaded, or the snapshot fails.
 pub fn commit(
     uhoh: &Path,
     database: &db::Database,
@@ -258,6 +292,12 @@ pub fn commit(
     Ok(())
 }
 
+/// Restores the project to the state of the given snapshot ID.
+///
+/// # Errors
+///
+/// Returns an error if the target project cannot be resolved, the config cannot be loaded,
+/// the user declines the confirmation prompt, or the restore operation fails.
 pub fn restore_snapshot(
     uhoh: &Path,
     database: &db::Database,
@@ -305,6 +345,11 @@ pub fn restore_snapshot(
     Ok(())
 }
 
+/// Restores a snapshot into a git stash entry instead of touching the working tree.
+///
+/// # Errors
+///
+/// Returns an error if the target project cannot be resolved or the git stash operation fails.
 pub fn gitstash(
     uhoh: &Path,
     database: &db::Database,
@@ -315,6 +360,11 @@ pub fn gitstash(
     git::cmd_gitstash(uhoh, database, &project, id)
 }
 
+/// Prints a diff between two snapshots, or between a snapshot and the working tree.
+///
+/// # Errors
+///
+/// Returns an error if the current directory is not a registered project or the diff fails.
 pub fn diff(
     uhoh: &Path,
     database: &db::Database,
@@ -328,6 +378,12 @@ pub fn diff(
     diff_view::cmd_diff(uhoh, database, &project, id1.as_deref(), id2.as_deref())
 }
 
+/// Prints the contents of a file as it existed in the given snapshot.
+///
+/// # Errors
+///
+/// Returns an error if the current directory is not a registered project or reading the
+/// file from the snapshot store fails.
 pub fn cat(uhoh: &Path, database: &db::Database, path: &str, id: &str) -> Result<()> {
     let project_path = dunce::canonicalize(std::env::current_dir()?)?;
     let project = database
@@ -336,6 +392,11 @@ pub fn cat(uhoh: &Path, database: &db::Database, path: &str, id: &str) -> Result
     diff_view::cmd_cat(uhoh, database, &project, path, id)
 }
 
+/// Prints the snapshot history for a specific file path in the current project.
+///
+/// # Errors
+///
+/// Returns an error if the current directory is not a registered project or the log query fails.
 pub fn log(database: &db::Database, path: &str) -> Result<()> {
     let project_path = dunce::canonicalize(std::env::current_dir()?)?;
     let project = database
@@ -344,6 +405,12 @@ pub fn log(database: &db::Database, path: &str) -> Result<()> {
     diff_view::cmd_log(database, &project, path)
 }
 
+/// Attaches a named label to the most recent snapshot of the current project.
+///
+/// # Errors
+///
+/// Returns an error if the current directory is not a registered project or the mark
+/// operation fails.
 pub fn mark(database: &db::Database, label: &str) -> Result<()> {
     let project_path = dunce::canonicalize(std::env::current_dir()?)?;
     let project = database
@@ -352,11 +419,21 @@ pub fn mark(database: &db::Database, label: &str) -> Result<()> {
     operations::cmd_mark(database, &project, label)
 }
 
+/// Reverts the project to the snapshot before the last AI-initiated operation.
+///
+/// # Errors
+///
+/// Returns an error if the target project cannot be resolved or the undo operation fails.
 pub fn undo(uhoh: &Path, database: &db::Database, target: Option<String>) -> Result<()> {
     let project = resolve_target_project(database, target.as_deref())?;
     operations::cmd_undo(uhoh, database, &project)
 }
 
+/// Lists recorded AI operations and their associated snapshots for the target project.
+///
+/// # Errors
+///
+/// Returns an error if the target project cannot be resolved or the database query fails.
 pub fn operations(database: &db::Database, target: Option<String>) -> Result<()> {
     let project = resolve_target_project(database, target.as_deref())?;
     crate::commands::operations::cmd_list_operations(database, &project)

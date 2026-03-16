@@ -7,8 +7,8 @@ use std::path::Path;
 #[cfg(test)]
 use crate::cas::StorageMethod;
 
-/// Thread-safe SQLite database wrapper.
-/// SQLite with WAL mode handles concurrent readers and serialized writers.
+/// Thread-safe `SQLite` database wrapper.
+/// `SQLite` with WAL mode handles concurrent readers and serialized writers.
 pub struct Database {
     pool: Pool<SqliteConnectionManager>,
 }
@@ -94,6 +94,11 @@ fn checked_usize_u64(value: usize, field: &'static str) -> Result<u64> {
 }
 
 impl Database {
+    /// Open or create the database at the given path, running migrations on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection pool cannot be built or migrations fail.
     pub fn open(path: &Path) -> Result<Self> {
         let manager = SqliteConnectionManager::file(path);
         let pool = Pool::builder()
@@ -121,7 +126,11 @@ impl Database {
     }
 
     /// Create a consistent backup of the database to the given path.
-    /// Uses SQLite online backup API under the hood.
+    /// Uses `SQLite` online backup API under the hood.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if acquiring a connection, opening the destination file, or the backup operation fails.
     pub fn backup_to(&self, path: &std::path::Path) -> Result<()> {
         let src = self.conn()?;
         let mut dest = rusqlite::Connection::open(path)?;

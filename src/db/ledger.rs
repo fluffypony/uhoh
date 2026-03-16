@@ -154,6 +154,10 @@ pub fn compute_event_chain_hash_with_id_raw(
 
 impl Database {
     /// Remove event ledger entries older than `ttl_days` to prevent unbounded growth.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn prune_event_ledger_ttl(&self, ttl_days: i64) -> Result<u64> {
         let conn = self.conn()?;
         let cutoff = chrono::Utc::now() - chrono::Duration::days(ttl_days);
@@ -173,6 +177,11 @@ impl Database {
         Ok(affected)
     }
 
+    /// Insert a single event into the ledger within its own transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation or transaction commit fails.
     pub fn insert_event_ledger(&self, event: &NewEventLedgerEntry) -> Result<i64> {
         let mut conn = self.conn()?;
         let ts = chrono::Utc::now().to_rfc3339();
@@ -212,6 +221,11 @@ impl Database {
         Ok(actual_id)
     }
 
+    /// Insert multiple events into the ledger in a single transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation or transaction commit fails.
     pub fn insert_event_ledger_batch(&self, events: &[NewEventLedgerEntry]) -> Result<usize> {
         if events.is_empty() {
             return Ok(0);
@@ -254,6 +268,11 @@ impl Database {
         Ok(events.len())
     }
 
+    /// Verify the integrity of the event ledger chain, returning the count and any broken entry IDs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn verify_event_ledger_chain(&self) -> Result<(usize, Vec<i64>)> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -304,6 +323,11 @@ impl Database {
         Ok((count, broken))
     }
 
+    /// Fetch recent event ledger entries matching the given filters, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn event_ledger_recent(
         &self,
         filters: LedgerRecentFilters<'_>,
@@ -326,6 +350,11 @@ impl Database {
         Ok(out)
     }
 
+    /// Fetch a single event ledger entry by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn event_ledger_get(&self, id: i64) -> Result<Option<EventLedgerEntry>> {
         let conn = self.conn()?;
         conn.query_row(
@@ -339,6 +368,11 @@ impl Database {
         .context("Failed to fetch ledger event")
     }
 
+    /// Walk the causal chain backwards from the given event ID, up to a depth limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any database lookup along the chain fails.
     pub fn event_ledger_trace(&self, id: i64) -> Result<EventLedgerTraceResult> {
         let mut chain = Vec::new();
         let mut current = Some(id);
@@ -363,6 +397,11 @@ impl Database {
         })
     }
 
+    /// Mark a single event ledger entry as resolved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub fn event_ledger_mark_resolved(&self, id: i64) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -372,9 +411,13 @@ impl Database {
         Ok(())
     }
 
-    /// Return the event ID and any descendants linked via causal_parent.
+    /// Return the event ID and any descendants linked via `causal_parent`.
     /// Uses a recursive CTE with a hard depth/row guard to avoid runaway recursion
     /// on malformed graphs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails or the descendant count exceeds the limit.
     pub fn event_ledger_descendant_ids(&self, root_id: i64) -> Result<Vec<i64>> {
         let limit = 10_000i64;
         let conn = self.conn()?;
@@ -416,6 +459,11 @@ impl Database {
         Ok(out)
     }
 
+    /// Mark an event and all its causal descendants as resolved in a single operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails or the descendant count exceeds the limit.
     pub fn event_ledger_mark_resolved_cascade(&self, root_id: i64) -> Result<usize> {
         let limit = 10_000i64;
         let conn = self.conn()?;
@@ -454,6 +502,11 @@ impl Database {
         Ok(changed)
     }
 
+    /// Mark causal descendants of an event as resolved, restricted to a specific session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails or the descendant count exceeds the limit.
     pub fn event_ledger_mark_resolved_cascade_with_session(
         &self,
         root_id: i64,
@@ -710,7 +763,7 @@ mod tests {
 
         let (verified, broken) = db.verify_event_ledger_chain().unwrap();
         assert_eq!(verified, 5);
-        assert!(broken.is_empty(), "chain should be intact: {:?}", broken);
+        assert!(broken.is_empty(), "chain should be intact: {broken:?}");
     }
 
     #[test]

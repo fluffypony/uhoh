@@ -6,7 +6,7 @@ use std::path::Path;
 #[non_exhaustive]
 pub struct Config {
     #[serde(default)]
-    /// Watch configuration. Hot-reload applies to debounce_quiet_secs only; other fields require daemon restart.
+    /// Watch configuration. Hot-reload applies to `debounce_quiet_secs` only; other fields require daemon restart.
     pub watch: WatchConfig,
 
     #[serde(default)]
@@ -22,7 +22,7 @@ pub struct Config {
     pub ai: AiConfig,
 
     #[serde(default)]
-    /// Update configuration. Hot-reload applies to check_interval_hours; other fields require restart.
+    /// Update configuration. Hot-reload applies to `check_interval_hours`; other fields require restart.
     pub update: UpdateConfig,
 
     #[serde(default)]
@@ -725,6 +725,12 @@ impl Default for AgentConfig {
 }
 
 impl Config {
+    /// Load configuration from `path`, returning a default config if the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, the TOML cannot be parsed, or the
+    /// parsed values fail validation.
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Config::default());
@@ -738,6 +744,12 @@ impl Config {
         Ok(config)
     }
 
+    /// Load an existing config or write a default one if none exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the existing config cannot be read or parsed, or if writing
+    /// the default config file fails.
     pub fn load_or_initialize(path: &Path) -> Result<Self> {
         if path.exists() {
             return Self::load(path);
@@ -748,6 +760,11 @@ impl Config {
         Ok(config)
     }
 
+    /// Serialize `config` to TOML and write it to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if TOML serialization fails or the file cannot be written.
     pub fn write_default(path: &Path, config: &Self) -> Result<()> {
         let content = toml::to_string_pretty(config)?;
         std::fs::write(path, content)
