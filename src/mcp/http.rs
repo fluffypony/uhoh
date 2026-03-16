@@ -29,6 +29,21 @@ pub async fn delete_not_supported() -> impl IntoResponse {
     )
 }
 
+pub async fn handle_http_request(
+    State(state): State<McpHttpState>,
+    _headers: axum::http::HeaderMap,
+    Json(request): Json<JsonRpcRequest>,
+) -> axum::response::Response {
+    // Host and Origin validation is handled by server middleware.
+
+    match super::handle_json_rpc_request(state.application.clone(), request).await {
+        super::McpTransportResponse::Notification => StatusCode::ACCEPTED.into_response(),
+        super::McpTransportResponse::Response(response) => {
+            (StatusCode::OK, Json(response)).into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,20 +60,5 @@ mod tests {
     async fn delete_not_supported_returns_method_not_allowed() {
         let response = delete_not_supported().await.into_response();
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-    }
-}
-
-pub async fn handle_http_request(
-    State(state): State<McpHttpState>,
-    _headers: axum::http::HeaderMap,
-    Json(request): Json<JsonRpcRequest>,
-) -> axum::response::Response {
-    // Host and Origin validation is handled by server middleware.
-
-    match super::handle_json_rpc_request(state.application.clone(), request).await {
-        super::McpTransportResponse::Notification => StatusCode::ACCEPTED.into_response(),
-        super::McpTransportResponse::Response(response) => {
-            (StatusCode::OK, Json(response)).into_response()
-        }
     }
 }

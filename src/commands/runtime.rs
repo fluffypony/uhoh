@@ -609,9 +609,9 @@ mod tests {
 
     #[test]
     fn parse_toml_value_float() {
-        let v = parse_toml_value("3.14");
+        let v = parse_toml_value("2.72");
         let f = v.as_float().unwrap();
-        assert!((f - 3.14).abs() < 0.001);
+        assert!((f - 2.72).abs() < 0.001);
     }
 
     #[test]

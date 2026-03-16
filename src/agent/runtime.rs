@@ -433,6 +433,90 @@ impl Default for AgentSubsystem {
     }
 }
 
+#[async_trait]
+impl Subsystem for AgentSubsystem {
+    fn name(&self) -> &str {
+        "agent"
+    }
+
+    async fn run(&mut self, shutdown: CancellationToken, ctx: SubsystemContext) -> Result<()> {
+        if !ctx.config.agent.enabled {
+            tracing::info!("agent monitor disabled by config");
+            shutdown.cancelled().await;
+            return Ok(());
+        }
+
+        let mut last_agent_names = Vec::new();
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                () = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                    self.tick(&ctx, &mut last_agent_names).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        if let Some(token) = self.proxy_shutdown.take() {
+            token.cancel();
+        }
+        if let Some(task) = self.proxy_task.take() {
+            let _ = task.await;
+        }
+        if let Some(task) = self.intercept_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = self.fanotify_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        Ok(())
+    }
+
+    fn health_check(&self) -> SubsystemHealth {
+        if let Some(message) = &self.fatal_error {
+            return SubsystemHealth::Failed(message.clone());
+        }
+        #[cfg(all(target_os = "linux", feature = "audit-trail"))]
+        if let Some(message) = &self.fanotify_disabled_reason {
+            return SubsystemHealth::DegradedWithAudit {
+                message: message.clone(),
+                source: AuditSource::None,
+            };
+        }
+        if let Some(message) = &self.runtime_warning {
+            return SubsystemHealth::DegradedWithAudit {
+                message: message.clone(),
+                source: if self.fanotify_started {
+                    AuditSource::Fanotify
+                } else {
+                    AuditSource::None
+                },
+            };
+        }
+        if self.healthy {
+            if self.fanotify_started {
+                SubsystemHealth::HealthyWithAudit(AuditSource::Fanotify)
+            } else {
+                SubsystemHealth::HealthyWithAudit(AuditSource::None)
+            }
+        } else {
+            SubsystemHealth::DegradedWithAudit {
+                message: "agent monitor reported failures".to_string(),
+                source: if self.fanotify_started {
+                    AuditSource::Fanotify
+                } else {
+                    AuditSource::None
+                },
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,89 +646,5 @@ mod tests {
         let mut sub = AgentSubsystem::new();
         sub.proxy_failures = 20;
         assert_eq!(sub.proxy_failures, 20);
-    }
-}
-
-#[async_trait]
-impl Subsystem for AgentSubsystem {
-    fn name(&self) -> &str {
-        "agent"
-    }
-
-    async fn run(&mut self, shutdown: CancellationToken, ctx: SubsystemContext) -> Result<()> {
-        if !ctx.config.agent.enabled {
-            tracing::info!("agent monitor disabled by config");
-            shutdown.cancelled().await;
-            return Ok(());
-        }
-
-        let mut last_agent_names = Vec::new();
-        loop {
-            tokio::select! {
-                () = shutdown.cancelled() => break,
-                () = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-                    self.tick(&ctx, &mut last_agent_names).await?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn shutdown(&mut self) -> Result<()> {
-        if let Some(token) = self.proxy_shutdown.take() {
-            token.cancel();
-        }
-        if let Some(task) = self.proxy_task.take() {
-            let _ = task.await;
-        }
-        if let Some(task) = self.intercept_task.take() {
-            task.abort();
-            let _ = task.await;
-        }
-        if let Some(task) = self.fanotify_task.take() {
-            task.abort();
-            let _ = task.await;
-        }
-        Ok(())
-    }
-
-    fn health_check(&self) -> SubsystemHealth {
-        if let Some(message) = &self.fatal_error {
-            return SubsystemHealth::Failed(message.clone());
-        }
-        #[cfg(all(target_os = "linux", feature = "audit-trail"))]
-        if let Some(message) = &self.fanotify_disabled_reason {
-            return SubsystemHealth::DegradedWithAudit {
-                message: message.clone(),
-                source: AuditSource::None,
-            };
-        }
-        if let Some(message) = &self.runtime_warning {
-            return SubsystemHealth::DegradedWithAudit {
-                message: message.clone(),
-                source: if self.fanotify_started {
-                    AuditSource::Fanotify
-                } else {
-                    AuditSource::None
-                },
-            };
-        }
-        if self.healthy {
-            if self.fanotify_started {
-                SubsystemHealth::HealthyWithAudit(AuditSource::Fanotify)
-            } else {
-                SubsystemHealth::HealthyWithAudit(AuditSource::None)
-            }
-        } else {
-            SubsystemHealth::DegradedWithAudit {
-                message: "agent monitor reported failures".to_string(),
-                source: if self.fanotify_started {
-                    AuditSource::Fanotify
-                } else {
-                    AuditSource::None
-                },
-            }
-        }
     }
 }

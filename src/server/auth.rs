@@ -102,6 +102,25 @@ fn token_matches(provided: &str, expected: &str) -> bool {
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
+pub async fn host_validation_middleware(
+    State(transport_policy): State<TransportSecurityPolicy>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !transport_policy.validate_host(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "Invalid Host header"
+            })),
+        )
+            .into_response();
+    }
+
+    next.run(request).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,23 +200,4 @@ mod tests {
         let content = fs::read_to_string(tmp.path().join("server.port")).unwrap();
         assert_eq!(content, "9090");
     }
-}
-
-pub async fn host_validation_middleware(
-    State(transport_policy): State<TransportSecurityPolicy>,
-    headers: HeaderMap,
-    request: Request,
-    next: Next,
-) -> Response {
-    if !transport_policy.validate_host(&headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({
-                "error": "Invalid Host header"
-            })),
-        )
-            .into_response();
-    }
-
-    next.run(request).await
 }

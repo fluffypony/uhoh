@@ -146,6 +146,75 @@ async fn async_tail_one_file(
     Ok(new_offset)
 }
 
+async fn process_jsonl_event(
+    ctx: &AgentContext,
+    agent: &AgentEntry,
+    event: &serde_json::Value,
+) -> Result<()> {
+    let tool = event
+        .get("tool")
+        .or_else(|| event.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown-tool");
+    let target_path = event
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string);
+    let session_id = event
+        .get("session_id")
+        .or_else(|| event.get("session"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let mut pre_state_ref = None;
+    if let Some(path) = target_path.as_deref() {
+        let p = Path::new(path);
+        if p.exists() {
+            match tokio::fs::read(p).await {
+                Ok(bytes) => match crate::cas::store_blob(&ctx.uhoh_dir.join("blobs"), &bytes) {
+                    Ok((hash, _)) => {
+                        pre_state_ref = Some(hash);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "failed to store pre-state blob for {}: {}",
+                            p.display(),
+                            err
+                        );
+                    }
+                },
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::debug!("pre-state source disappeared before read: {}", p.display());
+                }
+                Err(err) => {
+                    tracing::warn!("failed to read pre-state source {}: {}", p.display(), err);
+                }
+            }
+        }
+    }
+
+    let mut ledger_event = new_event(
+        LedgerSource::Agent,
+        LedgerEventType::SessionToolCall,
+        LedgerSeverity::Info,
+    );
+    ledger_event.agent_name = Some(agent.name.clone());
+    ledger_event.path = target_path;
+    ledger_event.pre_state_ref = pre_state_ref;
+    ledger_event.detail = Some(
+        serde_json::json!({
+            "tool": tool,
+            "session_id": session_id,
+            "raw": event,
+        })
+        .to_string(),
+    );
+    if let Err(err) = ctx.event_ledger.append(ledger_event) {
+        tracing::error!("failed to append session_tool_call event: {err}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,73 +283,4 @@ mod tests {
         let loaded = load_offsets(tmp.path()).unwrap();
         assert!(loaded.is_empty());
     }
-}
-
-async fn process_jsonl_event(
-    ctx: &AgentContext,
-    agent: &AgentEntry,
-    event: &serde_json::Value,
-) -> Result<()> {
-    let tool = event
-        .get("tool")
-        .or_else(|| event.get("name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown-tool");
-    let target_path = event
-        .get("path")
-        .and_then(|v| v.as_str())
-        .map(std::string::ToString::to_string);
-    let session_id = event
-        .get("session_id")
-        .or_else(|| event.get("session"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let mut pre_state_ref = None;
-    if let Some(path) = target_path.as_deref() {
-        let p = Path::new(path);
-        if p.exists() {
-            match tokio::fs::read(p).await {
-                Ok(bytes) => match crate::cas::store_blob(&ctx.uhoh_dir.join("blobs"), &bytes) {
-                    Ok((hash, _)) => {
-                        pre_state_ref = Some(hash);
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            "failed to store pre-state blob for {}: {}",
-                            p.display(),
-                            err
-                        );
-                    }
-                },
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    tracing::debug!("pre-state source disappeared before read: {}", p.display());
-                }
-                Err(err) => {
-                    tracing::warn!("failed to read pre-state source {}: {}", p.display(), err);
-                }
-            }
-        }
-    }
-
-    let mut ledger_event = new_event(
-        LedgerSource::Agent,
-        LedgerEventType::SessionToolCall,
-        LedgerSeverity::Info,
-    );
-    ledger_event.agent_name = Some(agent.name.clone());
-    ledger_event.path = target_path;
-    ledger_event.pre_state_ref = pre_state_ref;
-    ledger_event.detail = Some(
-        serde_json::json!({
-            "tool": tool,
-            "session_id": session_id,
-            "raw": event,
-        })
-        .to_string(),
-    );
-    if let Err(err) = ctx.event_ledger.append(ledger_event) {
-        tracing::error!("failed to append session_tool_call event: {err}");
-    }
-    Ok(())
 }

@@ -19,6 +19,28 @@ pub enum AuditEvent {
     },
 }
 
+pub fn tick_audit(ctx: &AgentContext, agents: &[AgentEntry]) {
+    for agent in agents {
+        let session_id = format!("agent:{}", agent.name);
+        let mut event = new_event(LedgerSource::Agent, LedgerEventType::AuditTick, LedgerSeverity::Info);
+        event.agent_name = Some(agent.name.clone());
+        let payload = AuditEvent::Heartbeat {
+            agent: agent.name.clone(),
+            scope: ctx.config.agent.audit_scope,
+        };
+        event.detail = Some(
+            serde_json::json!({
+                "session_id": session_id,
+                "audit": payload,
+            })
+            .to_string(),
+        );
+        if let Err(err) = ctx.event_ledger.append(event) {
+            tracing::error!("failed to append audit_tick event: {err}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,28 +86,6 @@ mod tests {
                 assert_eq!(pid, 1234);
             }
             _ => panic!("Expected FanotifyPreImage"),
-        }
-    }
-}
-
-pub fn tick_audit(ctx: &AgentContext, agents: &[AgentEntry]) {
-    for agent in agents {
-        let session_id = format!("agent:{}", agent.name);
-        let mut event = new_event(LedgerSource::Agent, LedgerEventType::AuditTick, LedgerSeverity::Info);
-        event.agent_name = Some(agent.name.clone());
-        let payload = AuditEvent::Heartbeat {
-            agent: agent.name.clone(),
-            scope: ctx.config.agent.audit_scope,
-        };
-        event.detail = Some(
-            serde_json::json!({
-                "session_id": session_id,
-                "audit": payload,
-            })
-            .to_string(),
-        );
-        if let Err(err) = ctx.event_ledger.append(event) {
-            tracing::error!("failed to append audit_tick event: {err}");
         }
     }
 }

@@ -113,7 +113,7 @@ pub fn handle_agent_action(uhoh_dir: &Path, database: &Database, action: &AgentA
             }
         }
         AgentAction::Deny => {
-            if proxy::deny_pending_actions(uhoh_dir)? > 0 {
+            if proxy::deny_pending_actions(uhoh_dir) > 0 {
                 println!("Denied pending agent action(s)");
             } else {
                 println!("No pending agent actions found to deny");

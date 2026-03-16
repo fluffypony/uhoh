@@ -151,6 +151,71 @@ impl NotificationPipeline {
     }
 }
 
+async fn send_desktop_notification(title: &str, message: &str) -> std::io::Result<()> {
+    let is_critical = title.contains("EMERGENCY");
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = if is_critical {
+            format!(
+                "display notification \"{}\" with title \"{}\" sound name \"Sosumi\"",
+                message.replace('"', "\\\""),
+                title.replace('"', "\\\"")
+            )
+        } else {
+            format!(
+                "display notification \"{}\" with title \"{}\"",
+                message.replace('"', "\\\""),
+                title.replace('"', "\\\"")
+            )
+        };
+        tokio::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .status()
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut cmd = tokio::process::Command::new("notify-send");
+        if is_critical {
+            cmd.arg("--urgency=critical");
+        }
+        cmd.arg(title).arg(message).status().await.map(|_| ())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let script = format!(
+            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; \
+             [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null; \
+             $template = '<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>'; \
+             $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; $xml.LoadXml($template); \
+             $toast = [Windows.UI.Notifications.ToastNotification]::new($xml); \
+             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('uhoh').Show($toast)",
+            title.replace('"', "'"),
+            message.replace('"', "'")
+        );
+        tokio::process::Command::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-Command")
+            .arg(script)
+            .status()
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (title, message);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,70 +337,5 @@ mod tests {
         let pipeline = NotificationPipeline::new(cfg);
         // Should construct without panic
         let _ = pipeline;
-    }
-}
-
-async fn send_desktop_notification(title: &str, message: &str) -> std::io::Result<()> {
-    let is_critical = title.contains("EMERGENCY");
-
-    #[cfg(target_os = "macos")]
-    {
-        let script = if is_critical {
-            format!(
-                "display notification \"{}\" with title \"{}\" sound name \"Sosumi\"",
-                message.replace('"', "\\\""),
-                title.replace('"', "\\\"")
-            )
-        } else {
-            format!(
-                "display notification \"{}\" with title \"{}\"",
-                message.replace('"', "\\\""),
-                title.replace('"', "\\\"")
-            )
-        };
-        tokio::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .status()
-            .await
-            .map(|_| ())
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let mut cmd = tokio::process::Command::new("notify-send");
-        if is_critical {
-            cmd.arg("--urgency=critical");
-        }
-        cmd.arg(title).arg(message).status().await.map(|_| ())
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let script = format!(
-            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; \
-             [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null; \
-             $template = '<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>'; \
-             $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; $xml.LoadXml($template); \
-             $toast = [Windows.UI.Notifications.ToastNotification]::new($xml); \
-             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('uhoh').Show($toast)",
-            title.replace('"', "'"),
-            message.replace('"', "'")
-        );
-        tokio::process::Command::new("powershell")
-            .arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-Command")
-            .arg(script)
-            .status()
-            .await
-            .map(|_| ())
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        let _ = (title, message);
-        Ok(())
     }
 }

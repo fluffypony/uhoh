@@ -385,8 +385,7 @@ mod tests {
 
     #[test]
     fn resolve_venv_path_absolute() {
-        let mut cfg = MlxConfig::default();
-        cfg.venv_path = "/absolute/path/to/venv".to_string();
+        let cfg = MlxConfig { venv_path: "/absolute/path/to/venv".to_string(), ..MlxConfig::default() };
         let uhoh_dir = std::path::Path::new("/home/user/.uhoh");
         let result = resolve_venv_path(&cfg, uhoh_dir);
         assert_eq!(result, PathBuf::from("/absolute/path/to/venv"));
@@ -394,8 +393,7 @@ mod tests {
 
     #[test]
     fn resolve_venv_path_relative() {
-        let mut cfg = MlxConfig::default();
-        cfg.venv_path = "custom/venv".to_string();
+        let cfg = MlxConfig { venv_path: "custom/venv".to_string(), ..MlxConfig::default() };
         let uhoh_dir = std::path::Path::new("/home/user/.uhoh");
         let result = resolve_venv_path(&cfg, uhoh_dir);
         assert_eq!(result, PathBuf::from("/home/user/.uhoh/custom/venv"));
@@ -403,8 +401,7 @@ mod tests {
 
     #[test]
     fn resolve_venv_path_empty_uses_default_fallback() {
-        let mut cfg = MlxConfig::default();
-        cfg.venv_path = "  ".to_string();
+        let cfg = MlxConfig { venv_path: "  ".to_string(), ..MlxConfig::default() };
         let uhoh_dir = std::path::Path::new("/home/user/.uhoh");
         let result = resolve_venv_path(&cfg, uhoh_dir);
         assert_eq!(result, PathBuf::from("/home/user/.uhoh/venv/mlx"));
@@ -412,8 +409,7 @@ mod tests {
 
     #[test]
     fn resolve_venv_path_tilde_expansion() {
-        let mut cfg = MlxConfig::default();
-        cfg.venv_path = "~/my-venv".to_string();
+        let cfg = MlxConfig { venv_path: "~/my-venv".to_string(), ..MlxConfig::default() };
         let uhoh_dir = std::path::Path::new("/home/user/.uhoh");
         let result = resolve_venv_path(&cfg, uhoh_dir);
         if let Some(home) = dirs::home_dir() {
@@ -425,23 +421,20 @@ mod tests {
 
     #[test]
     fn configured_venv_path_whitespace_only() {
-        let mut cfg = MlxConfig::default();
-        cfg.venv_path = "   ".to_string();
+        let cfg = MlxConfig { venv_path: "   ".to_string(), ..MlxConfig::default() };
         assert!(configured_venv_path(&cfg).is_none());
     }
 
     #[test]
     fn configured_venv_path_absolute() {
-        let mut cfg = MlxConfig::default();
-        cfg.venv_path = "/opt/mlx/venv".to_string();
+        let cfg = MlxConfig { venv_path: "/opt/mlx/venv".to_string(), ..MlxConfig::default() };
         let result = configured_venv_path(&cfg).unwrap();
         assert_eq!(result, PathBuf::from("/opt/mlx/venv"));
     }
 
     #[test]
     fn configured_venv_path_tilde() {
-        let mut cfg = MlxConfig::default();
-        cfg.venv_path = "~/venvs/mlx".to_string();
+        let cfg = MlxConfig { venv_path: "~/venvs/mlx".to_string(), ..MlxConfig::default() };
         let result = configured_venv_path(&cfg);
         if dirs::home_dir().is_some() {
             let path = result.unwrap();

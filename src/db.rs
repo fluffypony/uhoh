@@ -369,9 +369,8 @@ mod tests {
         ];
         for s in known {
             let parsed = LedgerEventType::parse(s);
-            assert_ne!(
-                matches!(parsed, LedgerEventType::Other(_)),
-                true,
+            assert!(
+                !matches!(parsed, LedgerEventType::Other(_)),
                 "'{s}' should parse to a known variant"
             );
             assert_eq!(parsed.as_str(), s);

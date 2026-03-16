@@ -244,6 +244,37 @@ fn extract_sslmode(connection_ref: &str) -> Option<&'static str> {
     None
 }
 
+fn connection_requires_tls(connection_ref: &str) -> bool {
+    if let Ok(url) = url::Url::parse(connection_ref) {
+        if matches!(url.scheme(), "postgres" | "postgresql") {
+            for (key, value) in url.query_pairs() {
+                if key.eq_ignore_ascii_case("sslmode") {
+                    let mode = value.to_ascii_lowercase();
+                    if matches!(mode.as_str(), "require" | "verify-ca" | "verify-full") {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    for part in connection_ref.split_whitespace() {
+        if let Some((key, value)) = part.split_once('=') {
+            if key.eq_ignore_ascii_case("sslmode") {
+                let mode = value
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_ascii_lowercase();
+                if matches!(mode.as_str(), "require" | "verify-ca" | "verify-full") {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,35 +356,4 @@ mod tests {
     fn connection_requires_tls_dsn_format() {
         assert!(connection_requires_tls("host=localhost sslmode=require"));
     }
-}
-
-fn connection_requires_tls(connection_ref: &str) -> bool {
-    if let Ok(url) = url::Url::parse(connection_ref) {
-        if matches!(url.scheme(), "postgres" | "postgresql") {
-            for (key, value) in url.query_pairs() {
-                if key.eq_ignore_ascii_case("sslmode") {
-                    let mode = value.to_ascii_lowercase();
-                    if matches!(mode.as_str(), "require" | "verify-ca" | "verify-full") {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
-    for part in connection_ref.split_whitespace() {
-        if let Some((key, value)) = part.split_once('=') {
-            if key.eq_ignore_ascii_case("sslmode") {
-                let mode = value
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_ascii_lowercase();
-                if matches!(mode.as_str(), "require" | "verify-ca" | "verify-full") {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
 }

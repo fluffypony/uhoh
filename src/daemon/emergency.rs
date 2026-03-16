@@ -317,6 +317,31 @@ fn parse_emergency_message(msg: &str) -> (usize, u64, f64) {
     parse_emergency_message_opt(msg).unwrap_or((0, 0, 0.0))
 }
 
+fn parse_emergency_message_opt(msg: &str) -> Option<(usize, u64, f64)> {
+    let after = msg
+        .find("delete")
+        .and_then(|index| {
+            msg[index..]
+                .find(|c: char| c.is_ascii_digit())
+                .map(|offset| index + offset)
+        })
+        .unwrap_or_else(|| msg.find(|c: char| c.is_ascii_digit()).unwrap_or(msg.len()));
+    let rest = &msg[after..];
+    let slash = rest.find('/')?;
+    let deleted: usize = rest[..slash].trim().parse().ok()?;
+    let after_slash = &rest[slash + 1..];
+    let end = after_slash
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_slash.len());
+    let baseline: u64 = after_slash[..end].trim().parse().ok()?;
+    let ratio = if baseline > 0 {
+        deleted as f64 / baseline as f64
+    } else {
+        0.0
+    };
+    Some((deleted, baseline, ratio))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,29 +409,4 @@ mod tests {
     fn post_restore_grace_secs_constant() {
         assert_eq!(POST_RESTORE_GRACE_SECS, 10);
     }
-}
-
-fn parse_emergency_message_opt(msg: &str) -> Option<(usize, u64, f64)> {
-    let after = msg
-        .find("delete")
-        .and_then(|index| {
-            msg[index..]
-                .find(|c: char| c.is_ascii_digit())
-                .map(|offset| index + offset)
-        })
-        .unwrap_or_else(|| msg.find(|c: char| c.is_ascii_digit()).unwrap_or(msg.len()));
-    let rest = &msg[after..];
-    let slash = rest.find('/')?;
-    let deleted: usize = rest[..slash].trim().parse().ok()?;
-    let after_slash = &rest[slash + 1..];
-    let end = after_slash
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(after_slash.len());
-    let baseline: u64 = after_slash[..end].trim().parse().ok()?;
-    let ratio = if baseline > 0 {
-        deleted as f64 / baseline as f64
-    } else {
-        0.0
-    };
-    Some((deleted, baseline, ratio))
 }

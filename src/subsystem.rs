@@ -198,6 +198,20 @@ impl SubsystemManager {
     }
 }
 
+fn start_runner_task(
+    runner: &mut SubsystemRunner,
+    shutdown: CancellationToken,
+    ctx: SubsystemContext,
+) {
+    let subsystem = runner.subsystem.clone();
+    let name = runner.name.clone();
+    runner.task = Some(tokio::spawn(async move {
+        tracing::info!("Starting subsystem: {}", name);
+        let mut guard = subsystem.lock().await;
+        guard.run(shutdown, ctx).await
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,18 +258,4 @@ mod tests {
         assert!(format!("{healthy_audit:?}").contains("Fanotify"));
         assert!(format!("{degraded_audit:?}").contains("issues"));
     }
-}
-
-fn start_runner_task(
-    runner: &mut SubsystemRunner,
-    shutdown: CancellationToken,
-    ctx: SubsystemContext,
-) {
-    let subsystem = runner.subsystem.clone();
-    let name = runner.name.clone();
-    runner.task = Some(tokio::spawn(async move {
-        tracing::info!("Starting subsystem: {}", name);
-        let mut guard = subsystem.lock().await;
-        guard.run(shutdown, ctx).await
-    }));
 }

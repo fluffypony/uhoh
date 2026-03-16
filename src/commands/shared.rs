@@ -69,6 +69,26 @@ pub fn resolve_target_project(
     }
 }
 
+pub fn confirm_restore_delete(count: usize) -> Result<bool> {
+    use std::io::{self, IsTerminal, Write};
+
+    if !io::stdin().is_terminal() {
+        anyhow::bail!(
+            "Refusing to delete {count} files without confirmation. Use --force or run in an interactive terminal."
+        );
+    }
+
+    eprintln!(
+        "⚠ This will delete {count} tracked files. Use --force to skip this prompt."
+    );
+    eprint!("Continue? [y/N] ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().eq_ignore_ascii_case("y"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,24 +143,4 @@ mod tests {
         let result = resolve_project_path(Some("/nonexistent/path/that/does/not/exist".to_string()));
         assert!(result.is_err());
     }
-}
-
-pub fn confirm_restore_delete(count: usize) -> Result<bool> {
-    use std::io::{self, IsTerminal, Write};
-
-    if !io::stdin().is_terminal() {
-        anyhow::bail!(
-            "Refusing to delete {count} files without confirmation. Use --force or run in an interactive terminal."
-        );
-    }
-
-    eprintln!(
-        "⚠ This will delete {count} tracked files. Use --force to skip this prompt."
-    );
-    eprint!("Continue? [y/N] ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim().eq_ignore_ascii_case("y"))
 }

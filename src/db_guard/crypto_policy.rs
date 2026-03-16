@@ -76,6 +76,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn constants_are_reasonable() {
         assert!(ARGON2_MEMORY_KIB >= 1024, "Memory should be at least 1 MiB");
         assert!(ARGON2_TIME_COST >= 1);

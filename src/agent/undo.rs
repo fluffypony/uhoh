@@ -112,6 +112,33 @@ fn revert_event(uhoh_dir: &Path, database: &Database, event: &EventLedgerEntry) 
     Ok(())
 }
 
+pub fn resolve_event(
+    database: &Database,
+    _event_ledger: &EventLedger,
+    uhoh_dir: &Path,
+    event_id: i64,
+) -> Result<()> {
+    if database.event_ledger_get(event_id)?.is_some() {
+        let descendant_ids = database.event_ledger_descendant_ids(event_id)?;
+        let mut ordered = Vec::with_capacity(descendant_ids.len());
+        for id in descendant_ids {
+            if let Some(entry) = database.event_ledger_get(id)? {
+                ordered.push(entry);
+            } else {
+                tracing::warn!("Event ledger entry {id} not found during undo resolve");
+            }
+        }
+        ordered.sort_by(|a, b| b.id.cmp(&a.id));
+        for ev in ordered {
+            revert_event(uhoh_dir, database, &ev)?;
+        }
+    }
+
+    // Keep ledger status consistent with the revert set: root + causal descendants.
+    database.event_ledger_mark_resolved_cascade(event_id)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,31 +205,4 @@ mod tests {
 
         assert!(check_no_symlink_parents(tmp.path(), &target).is_ok());
     }
-}
-
-pub fn resolve_event(
-    database: &Database,
-    _event_ledger: &EventLedger,
-    uhoh_dir: &Path,
-    event_id: i64,
-) -> Result<()> {
-    if database.event_ledger_get(event_id)?.is_some() {
-        let descendant_ids = database.event_ledger_descendant_ids(event_id)?;
-        let mut ordered = Vec::with_capacity(descendant_ids.len());
-        for id in descendant_ids {
-            if let Some(entry) = database.event_ledger_get(id)? {
-                ordered.push(entry);
-            } else {
-                tracing::warn!("Event ledger entry {id} not found during undo resolve");
-            }
-        }
-        ordered.sort_by(|a, b| b.id.cmp(&a.id));
-        for ev in ordered {
-            revert_event(uhoh_dir, database, &ev)?;
-        }
-    }
-
-    // Keep ledger status consistent with the revert set: root + causal descendants.
-    database.event_ledger_mark_resolved_cascade(event_id)?;
-    Ok(())
 }

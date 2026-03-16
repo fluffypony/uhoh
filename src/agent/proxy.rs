@@ -163,8 +163,7 @@ async fn handle_connection_async(
             if json
                 .get("method")
                 .and_then(|v| v.as_str())
-                .map(|m| m == "tools/call")
-                .unwrap_or(false)
+                .is_some_and(|m| m == "tools/call")
             {
                 match intercept_tool_call(&json, &uhoh_dir, &ledger, &config).await? {
                     InterceptResult::Forward => {}
@@ -324,7 +323,7 @@ async fn intercept_tool_call(
                         LedgerEventType::DangerousActionTimeout,
                         LedgerSeverity::Warn,
                     );
-                    timeout_event.path = path.clone();
+                    timeout_event.path.clone_from(&path);
                     timeout_event.detail = Some(
                         serde_json::json!({
                             "approval_id": approval_id,
@@ -350,7 +349,7 @@ async fn intercept_tool_call(
                         LedgerEventType::DangerousActionDenied,
                         LedgerSeverity::Warn,
                     );
-                    block_event.path = path.clone();
+                    block_event.path.clone_from(&path);
                     block_event.detail = Some(
                         serde_json::json!({
                             "approval_id": approval_id,
@@ -496,7 +495,7 @@ pub fn approve_pending_actions(uhoh_dir: &Path, strict: bool) -> Result<usize> {
     Ok(approved_count)
 }
 
-pub fn deny_pending_actions(uhoh_dir: &Path) -> Result<usize> {
+pub fn deny_pending_actions(uhoh_dir: &Path) -> usize {
     let runtime = runtime_dir(uhoh_dir);
     let mut denied_count = 0;
     if let Ok(entries) = std::fs::read_dir(&runtime) {
@@ -507,7 +506,7 @@ pub fn deny_pending_actions(uhoh_dir: &Path) -> Result<usize> {
             }
         }
     }
-    Ok(denied_count)
+    denied_count
 }
 
 fn write_pending_approval(
