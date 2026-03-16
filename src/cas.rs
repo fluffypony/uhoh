@@ -112,6 +112,10 @@ pub fn store_blob_with_level(
 
 /// Reads a symlink target at `abs_path`, stores the target bytes in CAS,
 /// and returns `(hash, target_byte_count, bytes_written_to_disk)`.
+///
+/// # Errors
+///
+/// Returns an error if the symlink cannot be read or the blob cannot be stored.
 pub fn store_symlink_target(blob_root: &Path, abs_path: &Path) -> Result<(String, u64, u64)> {
     let target = std::fs::read_link(abs_path)
         .with_context(|| format!("Failed to read symlink: {}", abs_path.display()))?;

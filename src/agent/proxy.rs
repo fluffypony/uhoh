@@ -215,6 +215,70 @@ enum ApprovalDecision {
     TimedOut,
 }
 
+fn handle_approval_decision(
+    approval: ApprovalDecision,
+    ledger: &crate::event_ledger::EventLedger,
+    path: &Option<String>,
+    approval_id: &str,
+    tool: &str,
+    config: &crate::config::Config,
+    call: &serde_json::Value,
+) -> Option<InterceptResult> {
+    match approval {
+        ApprovalDecision::Approved => None,
+        ApprovalDecision::TimedOut => {
+            let mut timeout_event = new_event(
+                LedgerSource::Agent,
+                LedgerEventType::DangerousActionTimeout,
+                LedgerSeverity::Warn,
+            );
+            timeout_event.path.clone_from(path);
+            timeout_event.detail = Some(
+                serde_json::json!({
+                    "approval_id": approval_id,
+                    "tool": tool,
+                    "action": "auto_resumed",
+                    "timeout_seconds": config.agent.pause_timeout_seconds,
+                })
+                .to_string(),
+            );
+            if let Err(err) = ledger.append(timeout_event) {
+                tracing::error!("failed to append timeout event: {err}");
+            }
+            tracing::warn!(
+                "Dangerous tool call '{}' auto-resumed after {} second timeout",
+                tool,
+                config.agent.pause_timeout_seconds
+            );
+            None
+        }
+        ApprovalDecision::Denied => {
+            let mut block_event = new_event(
+                LedgerSource::Agent,
+                LedgerEventType::DangerousActionDenied,
+                LedgerSeverity::Warn,
+            );
+            block_event.path.clone_from(path);
+            block_event.detail = Some(
+                serde_json::json!({
+                    "approval_id": approval_id,
+                    "tool": tool,
+                    "action": "blocked",
+                })
+                .to_string(),
+            );
+            if let Err(err) = ledger.append(block_event) {
+                tracing::error!("failed to append denied event: {err}");
+            }
+            let call_id = call.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            Some(InterceptResult::Block {
+                id: call_id,
+                reason: format!("Dangerous tool call '{tool}' was explicitly denied"),
+            })
+        }
+    }
+}
+
 async fn intercept_tool_call(
     call: &serde_json::Value,
     uhoh_dir: &Path,
@@ -309,62 +373,10 @@ async fn intercept_tool_call(
                 ledger,
             )
             .await?;
-            match approval {
-                ApprovalDecision::Approved => {
-                    // Approved — fall through to proceed with the call
-                }
-                ApprovalDecision::TimedOut => {
-                    // Timeout: auto-resume the action (matching documented behavior)
-                    // and log a timeout event for audit purposes.
-                    let mut timeout_event = new_event(
-                        LedgerSource::Agent,
-                        LedgerEventType::DangerousActionTimeout,
-                        LedgerSeverity::Warn,
-                    );
-                    timeout_event.path.clone_from(&path);
-                    timeout_event.detail = Some(
-                        serde_json::json!({
-                            "approval_id": approval_id,
-                            "tool": tool,
-                            "action": "auto_resumed",
-                            "timeout_seconds": config.agent.pause_timeout_seconds,
-                        })
-                        .to_string(),
-                    );
-                    if let Err(err) = ledger.append(timeout_event) {
-                        tracing::error!("failed to append timeout event: {err}");
-                    }
-                    tracing::warn!(
-                        "Dangerous tool call '{}' auto-resumed after {} second timeout",
-                        tool,
-                        config.agent.pause_timeout_seconds
-                    );
-                    // Fall through to proceed with the call
-                }
-                ApprovalDecision::Denied => {
-                    let mut block_event = new_event(
-                        LedgerSource::Agent,
-                        LedgerEventType::DangerousActionDenied,
-                        LedgerSeverity::Warn,
-                    );
-                    block_event.path.clone_from(&path);
-                    block_event.detail = Some(
-                        serde_json::json!({
-                            "approval_id": approval_id,
-                            "tool": tool,
-                            "action": "blocked",
-                        })
-                        .to_string(),
-                    );
-                    if let Err(err) = ledger.append(block_event) {
-                        tracing::error!("failed to append denied event: {err}");
-                    }
-                    let call_id = call.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                    return Ok(InterceptResult::Block {
-                        id: call_id,
-                        reason: format!("Dangerous tool call '{tool}' was explicitly denied"),
-                    });
-                }
+            if let Some(block) = handle_approval_decision(
+                approval, ledger, &path, &approval_id, tool, config, call,
+            ) {
+                return Ok(block);
             }
         }
     }
@@ -736,8 +748,7 @@ fn write_approved_response(runtime: &Path, stem: &str, payload: &[u8]) -> Result
     let path = runtime.join(format!("{stem}{APPROVAL_RESPONSE_FILE_SUFFIX}"));
     if path
         .symlink_metadata()
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false)
+        .is_ok_and(|meta| meta.file_type().is_symlink())
     {
         anyhow::bail!("Refusing to write approval response through symlink");
     }
