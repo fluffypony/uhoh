@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use super::ApiState;
 use crate::project_service::RestoreProjectError;
-use crate::resolve;
+use crate::resolve::{self, ResolveError};
 
 #[derive(Deserialize)]
 #[non_exhaustive]
@@ -132,6 +132,16 @@ impl From<RestoreProjectError> for ApiError {
             RestoreProjectError::Conflict(message) => ApiError::conflict(message),
             RestoreProjectError::InvalidInput(message) => ApiError::invalid_input(message),
             RestoreProjectError::Internal(err) => ApiError::internal(err),
+        }
+    }
+}
+
+impl From<ResolveError> for ApiError {
+    fn from(err: ResolveError) -> Self {
+        match err {
+            ResolveError::NotFound(message) => ApiError::not_found(message),
+            ResolveError::Ambiguous(message) => ApiError::invalid_input(message),
+            ResolveError::Internal(err) => ApiError::internal(err),
         }
     }
 }
@@ -484,7 +494,7 @@ pub(crate) async fn get_file_content(
     let uhoh_dir = state.runtime.uhoh_dir_buf();
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Vec<u8>> {
         let project =
-            resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::not_found)?;
+            resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::from)?;
         let clean_path = file_path.trim_start_matches('/').replace('\\', "/");
         resolve::validate_path_within_project(
             std::path::Path::new(&project.current_path),
@@ -539,7 +549,7 @@ pub(crate) async fn create_snapshot(
 
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let project =
-            resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::not_found)?;
+            resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::from)?;
         let result = crate::project_service::create_project_snapshot(
             &uhoh_dir,
             &db,
@@ -613,7 +623,7 @@ pub(crate) async fn restore_snapshot(
 
     let result = tokio::task::spawn_blocking(move || -> ApiResult<Value> {
         let project =
-            resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::not_found)?;
+            resolve::resolve_project(&db, Some(&hash), None).map_err(ApiError::from)?;
         let snapshot = db
             .find_snapshot_by_base58(&hash, &snap_id)?
             .ok_or_else(|| ApiError::not_found("Snapshot not found"))?;

@@ -3,6 +3,17 @@ use std::path::Path;
 
 use crate::db::{Database, ProjectEntry};
 
+/// Typed error for project resolution failures.
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveError {
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Ambiguous(String),
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
 /// Resolve a project from an explicit path/hash target.
 ///
 /// This variant avoids implicit current-directory behavior so server handlers can
@@ -11,10 +22,12 @@ pub fn resolve_project(
     database: &Database,
     target: Option<&str>,
     default_path: Option<&Path>,
-) -> Result<ProjectEntry> {
+) -> Result<ProjectEntry, ResolveError> {
     let projects = database.list_projects()?;
     if projects.is_empty() {
-        bail!("No tracked projects. Run 'uhoh add' to register one.");
+        return Err(ResolveError::NotFound(
+            "No tracked projects. Run 'uhoh add' to register one.".to_owned(),
+        ));
     }
 
     if let Some(target) = target {
@@ -37,7 +50,9 @@ pub fn resolve_project(
             if let Some(project) = best {
                 return Ok(project.clone());
             }
-            bail!("Path '{canonical_s}' is not within a tracked project");
+            return Err(ResolveError::NotFound(format!(
+                "Path '{canonical_s}' is not within a tracked project"
+            )));
         }
 
         let matching: Vec<_> = projects
@@ -45,13 +60,19 @@ pub fn resolve_project(
             .filter(|p| p.hash.starts_with(target))
             .collect();
         match matching.len() {
-            0 => bail!("No project found matching '{target}'"),
+            0 => {
+                return Err(ResolveError::NotFound(format!(
+                    "No project found matching '{target}'"
+                )))
+            }
             1 => return Ok(matching[0].clone()),
-            _ => bail!(
-                "Ambiguous hash prefix '{}': matches {} projects",
-                target,
-                matching.len()
-            ),
+            _ => {
+                return Err(ResolveError::Ambiguous(format!(
+                    "Ambiguous hash prefix '{}': matches {} projects",
+                    target,
+                    matching.len()
+                )))
+            }
         }
     }
 
@@ -75,14 +96,14 @@ pub fn resolve_project(
         return Ok(projects[0].clone());
     }
 
-    bail!(
+    Err(ResolveError::Ambiguous(format!(
         "Multiple projects tracked, specify a path or hash prefix:\n{}",
         projects
             .iter()
             .map(|p| format!("  {} -> {}", &p.hash[..8.min(p.hash.len())], p.current_path))
             .collect::<Vec<_>>()
             .join("\n")
-    )
+    )))
 }
 
 /// Reject absolute and parent-traversal paths.

@@ -73,6 +73,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Error handling
 anyhow = "1.0"
+thiserror = "1.0"
 
 # Binary self-replacement
 self-replace = "1.5"

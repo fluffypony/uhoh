@@ -8,7 +8,7 @@ use crate::db::{LedgerEventType, LedgerSeverity, LedgerSource};
 use crate::event_ledger::{new_event, EventLedger};
 use crate::events::publish_event;
 use crate::project_service::RestoreProjectError;
-use crate::resolve;
+use crate::resolve::{self, ResolveError};
 use crate::runtime_bundle::RuntimeBundle;
 
 use super::protocol::JsonRpcResponse;
@@ -346,7 +346,7 @@ fn tool_restore_snapshot(
 
     if let Some(tp) = args.target_path.as_deref() {
         resolve::validate_path_within_project(Path::new(&project.current_path), tp)
-            .map_err(|e| McpToolError::invalid_params(e.to_string()))?;
+            .map_err(|e: anyhow::Error| McpToolError::invalid_params(e.to_string()))?;
     }
 
     let outcome = crate::project_service::restore_project_snapshot(
@@ -406,16 +406,11 @@ fn parse_tool_args<T: DeserializeOwned>(value: Value) -> Result<T, McpToolError>
         .map_err(|err| McpToolError::invalid_params(format!("Invalid arguments: {err}")))
 }
 
-fn classify_lookup_error(err: anyhow::Error) -> McpToolError {
-    let lower = err.to_string().to_ascii_lowercase();
-    if lower.contains("not found")
-        || lower.contains("not within a tracked project")
-        || lower.contains("no tracked projects")
-        || lower.contains("no project found")
-    {
-        McpToolError::not_found(err.to_string())
-    } else {
-        McpToolError::internal(err.to_string())
+fn classify_lookup_error(err: ResolveError) -> McpToolError {
+    match err {
+        ResolveError::NotFound(msg) => McpToolError::not_found(msg),
+        ResolveError::Ambiguous(msg) => McpToolError::invalid_params(msg),
+        ResolveError::Internal(err) => McpToolError::internal(err.to_string()),
     }
 }
 
@@ -544,37 +539,40 @@ mod tests {
 
     #[test]
     fn classify_no_project_found() {
-        let err = anyhow::anyhow!("No project found matching 'abc'");
+        let err = ResolveError::NotFound("No project found matching 'abc'".to_owned());
         let mcp_err = classify_lookup_error(err);
         assert_eq!(mcp_err.code, -32004);
     }
 
     #[test]
     fn classify_not_within_tracked_project() {
-        let err = anyhow::anyhow!("Path '/tmp' is not within a tracked project");
+        let err = ResolveError::NotFound("Path '/tmp' is not within a tracked project".to_owned());
         let mcp_err = classify_lookup_error(err);
         assert_eq!(mcp_err.code, -32004);
     }
 
     #[test]
     fn classify_no_tracked_projects() {
-        let err = anyhow::anyhow!("No tracked projects. Run 'uhoh add' to register one.");
+        let err = ResolveError::NotFound(
+            "No tracked projects. Run 'uhoh add' to register one.".to_owned(),
+        );
         let mcp_err = classify_lookup_error(err);
         assert_eq!(mcp_err.code, -32004);
     }
 
     #[test]
     fn classify_generic_error_as_internal() {
-        let err = anyhow::anyhow!("Database connection failed");
+        let err = ResolveError::Internal(anyhow::anyhow!("Database connection failed"));
         let mcp_err = classify_lookup_error(err);
         assert_eq!(mcp_err.code, -32000);
     }
 
     #[test]
-    fn classify_ambiguous_hash_as_internal() {
-        let err = anyhow::anyhow!("Ambiguous hash prefix 'abc': matches 3 projects");
+    fn classify_ambiguous_hash_as_invalid_params() {
+        let err =
+            ResolveError::Ambiguous("Ambiguous hash prefix 'abc': matches 3 projects".to_owned());
         let mcp_err = classify_lookup_error(err);
-        assert_eq!(mcp_err.code, -32000);
+        assert_eq!(mcp_err.code, -32602);
     }
 
     #[test]
