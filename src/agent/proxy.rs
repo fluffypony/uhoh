@@ -218,7 +218,7 @@ enum ApprovalDecision {
 fn handle_approval_decision(
     approval: ApprovalDecision,
     ledger: &crate::event_ledger::EventLedger,
-    path: &Option<String>,
+    path: Option<&String>,
     approval_id: &str,
     tool: &str,
     config: &crate::config::Config,
@@ -232,7 +232,7 @@ fn handle_approval_decision(
                 LedgerEventType::DangerousActionTimeout,
                 LedgerSeverity::Warn,
             );
-            timeout_event.path.clone_from(path);
+            timeout_event.path = path.cloned();
             timeout_event.detail = Some(
                 serde_json::json!({
                     "approval_id": approval_id,
@@ -258,7 +258,7 @@ fn handle_approval_decision(
                 LedgerEventType::DangerousActionDenied,
                 LedgerSeverity::Warn,
             );
-            block_event.path.clone_from(path);
+            block_event.path = path.cloned();
             block_event.detail = Some(
                 serde_json::json!({
                     "approval_id": approval_id,
@@ -374,7 +374,7 @@ async fn intercept_tool_call(
             )
             .await?;
             if let Some(block) = handle_approval_decision(
-                approval, ledger, &path, &approval_id, tool, config, call,
+                approval, ledger, path.as_ref(), &approval_id, tool, config, call,
             ) {
                 return Ok(block);
             }

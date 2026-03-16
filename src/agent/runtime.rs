@@ -141,8 +141,7 @@ impl AgentSubsystem {
     ) -> Option<String> {
         if !task
             .as_ref()
-            .map(tokio::task::JoinHandle::is_finished)
-            .unwrap_or(false)
+            .is_some_and(tokio::task::JoinHandle::is_finished)
         {
             return None;
         }

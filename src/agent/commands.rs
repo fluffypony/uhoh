@@ -185,6 +185,7 @@ tool_call_format = "jsonl"
             let profile_dir = uhoh_dir.join("agents");
             std::fs::create_dir_all(&profile_dir)?;
             let default_profile = profile_dir.join("generic.toml");
+            #[allow(clippy::if_not_else)] // "not exists" is clearer than inverting the branches
             if !default_profile.exists() {
                 std::fs::write(
                     &default_profile,
@@ -213,8 +214,7 @@ fn session_matches_event(entry: &db::EventLedgerEntry, session_id: &str) -> bool
         .detail
         .as_deref()
         .and_then(extract_session_id)
-        .map(|value| value == session_id)
-        .unwrap_or(false)
+        .is_some_and(|value| value == session_id)
 }
 
 fn extract_session_id(detail: &str) -> Option<String> {
