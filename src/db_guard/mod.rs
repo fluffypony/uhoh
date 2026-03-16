@@ -156,7 +156,7 @@ impl Default for DbGuardSubsystem {
 
 #[async_trait]
 impl Subsystem for DbGuardSubsystem {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "db_guard"
     }
 

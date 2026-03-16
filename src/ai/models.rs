@@ -33,14 +33,11 @@ pub fn select_model_with_sys(
         config.models.clone()
     };
     let owned_sys;
-    let sys = match existing_sys {
-        Some(s) => s,
-        None => {
-            owned_sys = System::new_with_specifics(
-                RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
-            );
-            &owned_sys
-        }
+    let sys = if let Some(s) = existing_sys { s } else {
+        owned_sys = System::new_with_specifics(
+            RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
+        );
+        &owned_sys
     };
     // Use MB precision to avoid truncation (B33)
     let total_ram_mb = sys.total_memory() / (1024 * 1024);

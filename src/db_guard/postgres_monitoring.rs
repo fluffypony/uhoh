@@ -129,7 +129,7 @@ pub fn drop_monitoring_infrastructure(
         if tables.is_empty() {
             client
                 .batch_execute(
-                    r#"
+                    r"
                     DO $$
                     DECLARE rec RECORD;
                     BEGIN
@@ -162,7 +162,7 @@ pub fn drop_monitoring_infrastructure(
                             );
                         END LOOP;
                     END $$;
-                    "#,
+                    ",
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;

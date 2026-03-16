@@ -167,8 +167,7 @@ impl AgentSubsystem {
         let intercept_finished = self
             .intercept_task
             .as_ref()
-            .map(tokio::task::JoinHandle::is_finished)
-            .unwrap_or(false);
+            .is_some_and(tokio::task::JoinHandle::is_finished);
         if let Some(message) =
             Self::poll_result_task(&mut self.intercept_task, "session tailer").await
         {
@@ -434,7 +433,7 @@ impl Default for AgentSubsystem {
 
 #[async_trait]
 impl Subsystem for AgentSubsystem {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "agent"
     }
 

@@ -23,7 +23,7 @@ struct TestSubsystem {
 
 #[async_trait::async_trait]
 impl Subsystem for TestSubsystem {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "test"
     }
 

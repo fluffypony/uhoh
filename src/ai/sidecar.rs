@@ -199,16 +199,13 @@ fn spawn_sidecar_process(
     let mut last_err: Option<anyhow::Error> = None;
     let mut out: Option<(Child, u16)> = None;
     for _ in 0..5 {
-        let ephemeral_port = match std::net::TcpListener::bind("127.0.0.1:0") {
-            Ok(listener) => {
-                let port = listener.local_addr().map(|addr| addr.port()).unwrap_or(0);
-                drop(listener);
-                port
-            }
-            Err(_) => {
-                last_err = Some(anyhow::anyhow!("Failed to bind ephemeral port"));
-                continue;
-            }
+        let ephemeral_port = if let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") {
+            let port = listener.local_addr().map(|addr| addr.port()).unwrap_or(0);
+            drop(listener);
+            port
+        } else {
+            last_err = Some(anyhow::anyhow!("Failed to bind ephemeral port"));
+            continue;
         };
         if ephemeral_port == 0 {
             last_err = Some(anyhow::anyhow!("OS returned port 0"));

@@ -63,25 +63,22 @@ pub fn resolve_target_project(
     database: &db::Database,
     target: Option<&str>,
 ) -> Result<db::ProjectEntry> {
-    match target {
-        Some(target) => {
-            let as_path = PathBuf::from(target);
-            if as_path.exists() {
-                let canonical = dunce::canonicalize(&as_path)?;
-                return database
-                    .find_project_by_path(&canonical)?
-                    .context("Not a registered uhoh project");
-            }
-            database
-                .find_project_by_hash_prefix(target)?
-                .context("No project matching that identifier")
+    if let Some(target) = target {
+        let as_path = PathBuf::from(target);
+        if as_path.exists() {
+            let canonical = dunce::canonicalize(&as_path)?;
+            return database
+                .find_project_by_path(&canonical)?
+                .context("Not a registered uhoh project");
         }
-        None => {
-            let cwd = dunce::canonicalize(std::env::current_dir()?)?;
-            database
-                .find_project_by_path(&cwd)?
-                .context("Not a registered uhoh project. Run `uhoh add` first.")
-        }
+        database
+            .find_project_by_hash_prefix(target)?
+            .context("No project matching that identifier")
+    } else {
+        let cwd = dunce::canonicalize(std::env::current_dir()?)?;
+        database
+            .find_project_by_path(&cwd)?
+            .context("Not a registered uhoh project. Run `uhoh add` first.")
     }
 }
 

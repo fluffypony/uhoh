@@ -141,36 +141,33 @@ fn print_project_status(database: &db::Database, project_hash: &str) -> Result<(
 /// Returns an error if the target path cannot be resolved, the hash prefix is ambiguous,
 /// no matching project is found, or the database removal fails.
 pub fn remove(database: &db::Database, target: Option<String>) -> Result<()> {
-    let project = match target {
-        Some(ref target) => {
-            let path = Path::new(target);
-            if path.exists() || path.is_absolute() {
-                let canonical = dunce::canonicalize(target)?;
-                database.find_project_by_path(&canonical)?
-            } else {
-                let projects = database.list_projects()?;
-                let matches: Vec<_> = projects
-                    .iter()
-                    .filter(|project| project.hash.starts_with(target.as_str()))
-                    .collect();
-                match matches.len() {
-                    0 => {
-                        let canonical = dunce::canonicalize(target)?;
-                        database.find_project_by_path(&canonical)?
-                    }
-                    1 => Some(matches[0].clone()),
-                    _ => anyhow::bail!(
-                        "Ambiguous hash prefix '{}': matches {} projects",
-                        target,
-                        matches.len()
-                    ),
+    let project = if let Some(ref target) = target {
+        let path = Path::new(target);
+        if path.exists() || path.is_absolute() {
+            let canonical = dunce::canonicalize(target)?;
+            database.find_project_by_path(&canonical)?
+        } else {
+            let projects = database.list_projects()?;
+            let matches: Vec<_> = projects
+                .iter()
+                .filter(|project| project.hash.starts_with(target.as_str()))
+                .collect();
+            match matches.len() {
+                0 => {
+                    let canonical = dunce::canonicalize(target)?;
+                    database.find_project_by_path(&canonical)?
                 }
+                1 => Some(matches[0].clone()),
+                _ => anyhow::bail!(
+                    "Ambiguous hash prefix '{}': matches {} projects",
+                    target,
+                    matches.len()
+                ),
             }
         }
-        None => {
-            let cwd = dunce::canonicalize(std::env::current_dir()?)?;
-            database.find_project_by_path(&cwd)?
-        }
+    } else {
+        let cwd = dunce::canonicalize(std::env::current_dir()?)?;
+        database.find_project_by_path(&cwd)?
     }
     .context("Project not found")?;
 

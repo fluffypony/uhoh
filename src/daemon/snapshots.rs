@@ -214,9 +214,8 @@ pub(super) fn handle_watch_event(
         return;
     }
 
-    let path = match event {
-        WatchEvent::FileChanged(path) | WatchEvent::FileDeleted(path) => path,
-        _ => unreachable!("handled by early returns above"),
+    let (WatchEvent::FileChanged(path) | WatchEvent::FileDeleted(path)) = event else {
+        unreachable!("handled by early returns above")
     };
     let is_delete = matches!(event, WatchEvent::FileDeleted(_));
 

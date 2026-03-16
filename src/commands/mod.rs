@@ -24,7 +24,7 @@ pub async fn dispatch(uhoh: &Path, database: db::Database, command: Commands) ->
         Commands::List => project::list(&database)?,
         Commands::Snapshots { target } => project::snapshots(&database, target)?,
         Commands::Commit { message, trigger } => {
-            project::commit(uhoh, &database, message, trigger)?
+            project::commit(uhoh, &database, message, trigger)?;
         }
         Commands::Restore {
             id,

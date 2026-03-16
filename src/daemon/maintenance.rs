@@ -313,7 +313,7 @@ impl DaemonMaintenanceSubsystem {
 
 #[async_trait::async_trait]
 impl Subsystem for DaemonMaintenanceSubsystem {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "daemon_maintenance"
     }
 
