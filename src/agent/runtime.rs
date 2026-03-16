@@ -182,8 +182,7 @@ impl AgentSubsystem {
         let proxy_finished = self
             .proxy_task
             .as_ref()
-            .map(tokio::task::JoinHandle::is_finished)
-            .unwrap_or(false);
+            .is_some_and(tokio::task::JoinHandle::is_finished);
         if let Some(message) = Self::poll_result_task(&mut self.proxy_task, "mcp proxy").await {
             self.record_background_failure(message);
         }
@@ -201,8 +200,7 @@ impl AgentSubsystem {
         if !self
             .fanotify_task
             .as_ref()
-            .map(tokio::task::JoinHandle::is_finished)
-            .unwrap_or(false)
+            .is_some_and(tokio::task::JoinHandle::is_finished)
         {
             return;
         }

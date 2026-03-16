@@ -290,14 +290,16 @@ pub fn install_hook(project_path: &Path) -> Result<()> {
         candidates
             .iter()
             .find(|p| p.exists())
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| {
-                crate::platform::uhoh_dir()
-                    .join("bin")
-                    .join(&bin_name)
-                    .to_string_lossy()
-                    .to_string()
-            })
+            .map_or_else(
+                || {
+                    crate::platform::uhoh_dir()
+                        .join("bin")
+                        .join(&bin_name)
+                        .to_string_lossy()
+                        .to_string()
+                },
+                |p| p.to_string_lossy().to_string(),
+            )
     };
 
     let uhoh_hook_content = format!(

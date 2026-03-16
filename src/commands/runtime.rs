@@ -583,8 +583,7 @@ async fn run_doctor(
     println!("\nBinary integrity check:");
     let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("uhoh"));
     let local_hash = std::fs::read(&exe_path)
-        .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
-        .unwrap_or_else(|_| String::from("unknown"));
+        .map_or_else(|_| String::from("unknown"), |bytes| blake3::hash(&bytes).to_hex().to_string());
     let version = env!("CARGO_PKG_VERSION");
     let asset_name = format!("uhoh-{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     let dns = crate::update::dns_verify_hash(version, &asset_name)

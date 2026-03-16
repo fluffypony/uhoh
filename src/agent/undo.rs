@@ -50,8 +50,7 @@ fn revert_event(uhoh_dir: &Path, database: &Database, event: &EventLedgerEntry) 
         event
             .project_hash
             .as_ref()
-            .map(|ph| &p.hash == ph)
-            .unwrap_or(true)
+            .map_or(true, |ph| &p.hash == ph)
     }) {
         let project_root = Path::new(&project.current_path);
         let check_path = target.parent().unwrap_or(target);

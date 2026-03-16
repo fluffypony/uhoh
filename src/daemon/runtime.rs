@@ -60,6 +60,7 @@ pub(super) async fn run_foreground(uhoh_dir: &Path, database: Arc<Database>) -> 
 
     #[cfg(not(windows))]
     let _pid_lock_file = {
+        use std::io::Write as _;
         let mut pid_file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -71,7 +72,6 @@ pub(super) async fn run_foreground(uhoh_dir: &Path, database: Arc<Database>) -> 
                 .try_lock_exclusive()
                 .context("Another uhoh daemon is already running (PID file locked)")?;
         }
-        use std::io::Write as _;
         let _ = pid_file.set_len(0);
         let start_ticks =
             crate::platform::read_process_start_ticks(std::process::id()).unwrap_or(0);

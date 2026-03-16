@@ -180,8 +180,7 @@ impl SidecarManager {
                 let guard = manager.lock_state();
                 guard
                     .as_ref()
-                    .map(|sidecar| sidecar.last_used.elapsed().as_secs() >= idle_secs)
-                    .unwrap_or(false)
+                    .is_some_and(|sidecar| sidecar.last_used.elapsed().as_secs() >= idle_secs)
             };
             if should_shutdown {
                 manager.shutdown();

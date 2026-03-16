@@ -14,8 +14,7 @@ pub fn cmd_mark(database: &Database, project: &ProjectEntry, label: &str) -> Res
         let latest = database
             .list_snapshots(&project.hash)?
             .first()
-            .map(|s| s.snapshot_id)
-            .unwrap_or(0);
+            .map_or(0, |s| s.snapshot_id);
         database.close_operation_with_last(op.id, latest)?;
         tracing::info!("Closed previous active operation at {}", {
             encoding::id_to_base58(latest)
@@ -27,8 +26,7 @@ pub fn cmd_mark(database: &Database, project: &ProjectEntry, label: &str) -> Res
     let current = database
         .list_snapshots(&project.hash)?
         .first()
-        .map(|s| s.snapshot_id)
-        .unwrap_or(0);
+        .map_or(0, |s| s.snapshot_id);
     database.set_operation_first_snapshot(op_id, current)?;
 
     println!(
@@ -46,8 +44,7 @@ pub fn cmd_undo(uhoh_dir: &Path, database: &Database, project: &ProjectEntry) ->
         let latest = database
             .list_snapshots(&project.hash)?
             .first()
-            .map(|s| s.snapshot_id)
-            .unwrap_or(0);
+            .map_or(0, |s| s.snapshot_id);
         database.close_operation_with_last(op.id, latest)?;
         tracing::info!(
             "Closed active operation: {} at {}",

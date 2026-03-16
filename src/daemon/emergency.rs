@@ -33,8 +33,7 @@ pub(super) fn evaluate_emergency_for_project(
 
     let in_grace_period = state
         .restore_completed_at
-        .map(|completed_at| completed_at.elapsed() < Duration::from_secs(POST_RESTORE_GRACE_SECS))
-        .unwrap_or(false);
+        .is_some_and(|completed_at| completed_at.elapsed() < Duration::from_secs(POST_RESTORE_GRACE_SECS));
     if in_grace_period {
         state.deleted_paths.clear();
         state.cumulative_deletes = 0;

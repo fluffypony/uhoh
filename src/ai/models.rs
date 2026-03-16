@@ -1,7 +1,7 @@
 use crate::config::{AiConfig, ModelTierConfig};
 use anyhow::Result;
 use std::io::IsTerminal;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 
@@ -85,10 +85,7 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
         .truncate(false)
         .open(&tmp)?;
     // Seek to end for resume
-    {
-        use std::io::Seek;
-        out.seek(std::io::SeekFrom::End(0))?;
-    }
+    out.seek(std::io::SeekFrom::End(0))?;
     // Show a progress bar if total known
     let is_tty = std::io::stderr().is_terminal();
     let pb = if is_tty {
@@ -120,7 +117,6 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
             );
             pos = 0;
             out.set_len(0)?;
-            use std::io::Seek;
             out.seek(std::io::SeekFrom::Start(0))?;
             continue;
         }
@@ -137,7 +133,6 @@ pub fn ensure_model_downloaded(uhoh_dir: &Path, model: &ModelTierConfig) -> Resu
             );
             pos = 0;
             out.set_len(0)?;
-            use std::io::Seek;
             out.seek(std::io::SeekFrom::Start(0))?;
             continue;
         }

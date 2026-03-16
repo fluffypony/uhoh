@@ -955,7 +955,9 @@ fn enforce_storage_limit(
     project_hash: &str,
     settings: &SnapshotSettings,
 ) -> Result<()> {
-    #[allow(clippy::cast_precision_loss)] // acceptable precision loss for storage limit calculations
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    // Precision loss acceptable for storage limit calculations; result is always non-negative
+    // since storage_limit_fraction is configured positive, and truncation is intentional (floor).
     let max_blob_size = std::cmp::max(
         (project_size as f64 * settings.storage.storage_limit_fraction) as u64,
         settings.storage.storage_min_bytes,
@@ -976,6 +978,7 @@ fn enforce_storage_limit(
     );
 
     // Delete oldest unpinned snapshots until under limit (approximate freed space)
+    #[allow(clippy::cast_possible_wrap)] // emergency_expire_hours is always a small config value, never near i64::MAX
     let emergency_retention =
         chrono::Duration::hours(settings.compaction.emergency_expire_hours as i64);
     let now = chrono::Utc::now();
@@ -1111,6 +1114,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_sign_loss)] // ms is a known positive literal in this test
     fn millis_to_mtime_large_positive() {
         // Year ~2070
         let ms: i64 = 3_155_760_000_000;

@@ -22,6 +22,7 @@ pub fn compact_project(
     snapshots.sort_by(|a, b| b.snapshot_id.cmp(&a.snapshot_id));
     let now = Utc::now();
     let mut freed_bytes = 0u64;
+    #[allow(clippy::cast_possible_wrap)] // emergency_expire_hours is a small config value, never near i64::MAX
     let emergency_retention = Duration::hours(config.emergency_expire_hours as i64);
 
     // Track occupied buckets for O(1) dominance checking
@@ -78,6 +79,7 @@ pub fn compact_project(
         }
 
         // Keep everything within keep_all_minutes
+        #[allow(clippy::cast_possible_wrap)] // keep_all_minutes is a small config value, never near i64::MAX
         if age < Duration::minutes(config.keep_all_minutes as i64) {
             buckets.register(snapshot);
             continue;
