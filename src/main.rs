@@ -10,8 +10,7 @@ use uhoh::platform;
 
 fn uhoh_dir() -> PathBuf {
     std::env::var_os("UHOH_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(uhoh::uhoh_dir)
+        .map_or_else(uhoh::uhoh_dir, PathBuf::from)
 }
 
 fn ensure_uhoh_dir() -> Result<PathBuf> {

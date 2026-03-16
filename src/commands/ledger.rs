@@ -64,10 +64,10 @@ pub fn blame(database: &db::Database, path: &str) -> Result<()> {
 pub fn timeline(
     database: &db::Database,
     source: Option<LedgerSource>,
-    since: Option<String>,
+    since: Option<&str>,
 ) -> Result<()> {
     let normalized_source = source;
-    let since_cutoff = since.as_deref().map(parse_since_cutoff).transpose()?;
+    let since_cutoff = since.map(parse_since_cutoff).transpose()?;
     let since_rfc3339 = since_cutoff.map(|cutoff| cutoff.to_rfc3339());
 
     let mut events = database.event_ledger_recent(

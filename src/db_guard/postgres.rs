@@ -64,15 +64,15 @@ fn build_postgres_task_runtime() -> Result<tokio::runtime::Runtime> {
 fn emit_recovery_event(
     ctx: &DbGuardContext,
     guard_name: &str,
-    event_type: LedgerEventType,
-    detail: serde_json::Value,
+    event_type: &LedgerEventType,
+    detail: &serde_json::Value,
     artifact: &recovery::ArtifactInfo,
 ) {
     let mut event = new_event(LedgerSource::DbGuard, event_type.clone(), LedgerSeverity::Critical);
     event.guard_name = Some(guard_name.to_string());
     event.detail = Some(detail.to_string());
     event.pre_state_ref = Some(artifact.blake3.clone());
-    if let Err(err) = ctx.event_ledger.append(event) {
+    if let Err(err) = ctx.event_ledger.append(&event) {
         tracing::error!("failed to append {event_type} event: {err}");
     }
 }
@@ -91,7 +91,7 @@ fn emit_degraded_event(ctx: &DbGuardContext, guard_name: &str, step: &str, err: 
         })
         .to_string(),
     );
-    if let Err(append_err) = ctx.event_ledger.append(event) {
+    if let Err(append_err) = ctx.event_ledger.append(&event) {
         tracing::error!("failed to append postgres_optional_step_degraded event: {append_err}");
     }
 }
@@ -146,8 +146,7 @@ fn ensure_postgres_baseline(
         .as_deref()
         .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
         .map(|ts| chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc)))
-        .map(|elapsed| elapsed.to_std().unwrap_or_default() >= baseline_interval)
-        .unwrap_or(true);
+        .map_or(true, |elapsed| elapsed.to_std().unwrap_or_default() >= baseline_interval);
 
     if !needs_baseline {
         return Ok(());
@@ -185,7 +184,7 @@ fn ensure_postgres_baseline(
     );
     event.guard_name = Some(guard.name.clone());
     event.detail = Some(format!("artifact={}, blake3={}", info.path, info.blake3));
-    if let Err(err) = ctx.event_ledger.append(event) {
+    if let Err(err) = ctx.event_ledger.append(&event) {
         tracing::error!("failed to append postgres_baseline event: {err}");
     }
     Ok(())
@@ -219,12 +218,14 @@ fn run_delete_counter_checks(
             None
         }
     };
+    #[allow(clippy::cast_precision_loss)] // precision loss acceptable for ratio display/comparison
     let pct = if total_rows.unwrap_or(0) > 0 {
         deleted_rows as f64 / total_rows.unwrap_or(0) as f64
     } else {
         0.0
     };
 
+    #[allow(clippy::cast_possible_wrap)] // mass_delete_row_threshold is a small config value, never near i64::MAX
     if deleted_rows >= ctx.config.db_guard.mass_delete_row_threshold as i64 {
         write_recovery_artifact(
             ctx,
@@ -324,8 +325,8 @@ fn write_recovery_artifact(
     emit_recovery_event(
         ctx,
         &guard.name,
-        recovery_event_type,
-        event_detail,
+        &recovery_event_type,
+        &event_detail,
         &artifact,
     );
     Ok(())
@@ -348,7 +349,7 @@ fn emit_postgres_tick_event(
     } else {
         format!("mode={}, dsn_ref={}", guard.mode, connection.scrubbed_ref())
     });
-    if let Err(err) = ctx.event_ledger.append(event) {
+    if let Err(err) = ctx.event_ledger.append(&event) {
         tracing::error!("failed to append postgres_tick event: {err}");
     }
 }
@@ -400,7 +401,7 @@ fn reconcile_wildcard_delete_triggers(
             })
             .to_string(),
         );
-        if let Err(err) = ctx.event_ledger.append(event) {
+        if let Err(err) = ctx.event_ledger.append(&event) {
             tracing::error!("failed to append postgres_wildcard_trigger_reconciled event: {err}");
         }
     }
@@ -649,7 +650,7 @@ fn poll_total_row_count(
             .await
             .map_err(|e| anyhow::anyhow!(credentials::scrub_error_message(&e.to_string())))?;
 
-        let total = rows.first().map(|r| r.get::<_, i64>(0)).unwrap_or(0).max(0);
+        let total = rows.first().map_or(0, |r| r.get::<_, i64>(0)).max(0);
         Ok(total)
     })
 }

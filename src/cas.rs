@@ -784,6 +784,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn read_blob_corruption_detected() {
+        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let blob_root = tmp.path().join("blobs");
         std::fs::create_dir_all(&blob_root).unwrap();
@@ -794,7 +795,6 @@ mod tests {
         let blob_path = blob_root.join(&hash[..2]).join(&hash);
 
         // Make writable so we can tamper
-        use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&blob_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::write(&blob_path, b"TAMPERED").unwrap();
 
@@ -994,7 +994,7 @@ mod tests {
         std::fs::write(&fresh, "fresh").unwrap();
 
         // Very long max_age — nothing is stale
-        cleanup_stale_temp_files(&blob_root, std::time::Duration::from_secs(999999));
+        cleanup_stale_temp_files(&blob_root, std::time::Duration::from_secs(999_999));
 
         assert!(fresh.exists());
     }

@@ -84,6 +84,7 @@ struct RestoreMarkerGuard {
 
 impl RestoreMarkerGuard {
     fn install(uhoh_dir: &Path, project_hash: &str) -> Result<Self> {
+        use std::io::Write;
         let path = uhoh_dir.join(RESTORE_IN_PROGRESS_FILE);
         let pid = std::process::id();
         let start_ticks = crate::platform::read_process_start_ticks(pid).unwrap_or(0);
@@ -107,7 +108,6 @@ impl RestoreMarkerGuard {
                 });
             }
         };
-        use std::io::Write;
         file.write_all(payload.as_bytes()).with_context(|| {
             format!(
                 "Failed to create restore marker (another restore may be in progress): {}",
@@ -152,12 +152,11 @@ pub fn restore_project_with_runtime(
 }
 
 pub fn restore_marker_active(uhoh_dir: &Path) -> bool {
+    const MAX_MARKER_AGE_SECS: u64 = 3600;
     let marker_path = uhoh_dir.join(RESTORE_IN_PROGRESS_FILE);
     if !marker_path.exists() {
         return false;
     }
-
-    const MAX_MARKER_AGE_SECS: u64 = 3600;
     if let Ok(meta) = std::fs::metadata(&marker_path) {
         if let Ok(modified) = meta.modified() {
             if modified

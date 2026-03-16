@@ -38,7 +38,7 @@ pub fn tick_mysql_guard(
             );
             event.guard_name = Some(guard.name.clone());
             event.detail = Some(format!("poll_error={e}"));
-            if let Err(err) = ctx.event_ledger.append(event) {
+            if let Err(err) = ctx.event_ledger.append(&event) {
                 tracing::error!("failed to append mysql_poll_failed event: {err}");
             }
             return Err(e);
@@ -52,8 +52,7 @@ pub fn tick_mysql_guard(
         if prev_hash != &schema_hash {
             let (event_type, severity) = if state
                 .last_table_count
-                .map(|previous| snapshot.table_count < previous)
-                .unwrap_or(false)
+                .is_some_and(|previous| snapshot.table_count < previous)
             {
                 (LedgerEventType::DropTable, LedgerSeverity::Critical)
             } else {
@@ -74,7 +73,7 @@ pub fn tick_mysql_guard(
                 })
                 .to_string(),
             );
-            if let Err(err) = ctx.event_ledger.append(event) {
+            if let Err(err) = ctx.event_ledger.append(&event) {
                 tracing::error!("failed to append mysql schema change event: {err}");
             }
         }
@@ -82,11 +81,13 @@ pub fn tick_mysql_guard(
 
     if let Some(prev_rows) = state.last_row_total {
         let deleted = prev_rows.saturating_sub(snapshot.row_total);
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for ratio display/comparison
         let pct = if prev_rows > 0 {
             deleted as f64 / prev_rows as f64
         } else {
             0.0
         };
+        #[allow(clippy::cast_possible_wrap)] // mass_delete_row_threshold is a small config value, never near i64::MAX
         if deleted >= ctx.config.db_guard.mass_delete_row_threshold as i64
             || pct >= ctx.config.db_guard.mass_delete_pct_threshold
         {
@@ -105,7 +106,7 @@ pub fn tick_mysql_guard(
                 })
                 .to_string(),
             );
-            if let Err(err) = ctx.event_ledger.append(event) {
+            if let Err(err) = ctx.event_ledger.append(&event) {
                 tracing::error!("failed to append mysql mass_delete event: {err}");
             }
         }
@@ -125,7 +126,7 @@ pub fn tick_mysql_guard(
         })
         .to_string(),
     );
-    if let Err(err) = ctx.event_ledger.append(heartbeat) {
+    if let Err(err) = ctx.event_ledger.append(&heartbeat) {
         tracing::error!("failed to append mysql_tick event: {err}");
     }
     Ok(())
@@ -161,8 +162,8 @@ fn poll_schema_snapshot(
     let mut cmd = Command::new("mysql");
 
     if let Some(password) = &effective_password {
-        let mut tmp = NamedTempFile::new().context("Failed creating MySQL defaults file")?;
         use std::io::Write as _;
+        let mut tmp = NamedTempFile::new().context("Failed creating MySQL defaults file")?;
         writeln!(tmp, "[client]")?;
         writeln!(tmp, "password={password}")?;
         #[cfg(unix)]

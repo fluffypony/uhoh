@@ -282,6 +282,27 @@ pub(crate) fn apply_restore(
     project: &ProjectEntry,
     request: RestoreRequest<'_>,
 ) -> Result<RestoreOutcome> {
+    fn remove_empty_dirs(root: &Path, base: &Path) {
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for e in entries.flatten() {
+                let p = e.path();
+                // Use symlink_metadata to avoid following symlinks
+                if let Ok(meta) = std::fs::symlink_metadata(&p) {
+                    if meta.is_dir() && !meta.file_type().is_symlink() {
+                        remove_empty_dirs(&p, base);
+                    }
+                }
+            }
+        }
+        if root != base
+            && std::fs::read_dir(root)
+                .map(|mut it| it.next().is_none())
+                .unwrap_or(false)
+        {
+            let _ = std::fs::remove_dir(root);
+        }
+    }
+
     let RestoreRequest {
         snapshot_id: id_str,
         target_path,
@@ -575,26 +596,6 @@ pub(crate) fn apply_restore(
         let _ = std::fs::remove_dir_all(&restore_tmp);
         cleanup_staging = None;
 
-        fn remove_empty_dirs(root: &Path, base: &Path) {
-            if let Ok(entries) = std::fs::read_dir(root) {
-                for e in entries.flatten() {
-                    let p = e.path();
-                    // Use symlink_metadata to avoid following symlinks
-                    if let Ok(meta) = std::fs::symlink_metadata(&p) {
-                        if meta.is_dir() && !meta.file_type().is_symlink() {
-                            remove_empty_dirs(&p, base);
-                        }
-                    }
-                }
-            }
-            if root != base
-                && std::fs::read_dir(root)
-                    .map(|mut it| it.next().is_none())
-                    .unwrap_or(false)
-            {
-                let _ = std::fs::remove_dir(root);
-            }
-        }
         remove_empty_dirs(project_path, project_path);
 
         Ok(RestoreOutcome {

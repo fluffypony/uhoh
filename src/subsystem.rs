@@ -140,8 +140,7 @@ impl SubsystemManager {
             let finished = runner
                 .task
                 .as_ref()
-                .map(tokio::task::JoinHandle::is_finished)
-                .unwrap_or(true); // None means task is gone (dead) — treat as finished
+                .map_or(true, tokio::task::JoinHandle::is_finished); // None means task is gone (dead) — treat as finished
             if !finished {
                 continue;
             }

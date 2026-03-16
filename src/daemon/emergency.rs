@@ -228,7 +228,7 @@ pub(super) fn emit_emergency_delete_detected(event: EmergencyDeleteEvent<'_>) {
     let mut ledger_event = new_event(LedgerSource::Fs, LedgerEventType::EmergencyDeleteDetected, severity);
     ledger_event.project_hash = Some(project_hash.to_string());
     ledger_event.detail = Some(detail.to_string());
-    if let Err(err) = event_ledger.append(ledger_event) {
+    if let Err(err) = event_ledger.append(&ledger_event) {
         tracing::error!("failed to append emergency_delete_detected event: {err}");
     }
 
@@ -283,16 +283,18 @@ pub(super) fn handle_dynamic_emergency_upgrade(
 
     let deleted_count = database
         .get_snapshot_deleted_files(row.rowid)
-        .map(|files| files.len())
-        .unwrap_or_else(|err| {
-            tracing::warn!(
-                project = %state.hash,
-                rowid = row.rowid,
-                "Failed to load deleted files for dynamic upgrade, falling back to message parse: {err}"
-            );
-            let (deleted, _, _) = parse_emergency_message(&row.message);
-            deleted
-        });
+        .map_or_else(
+            |err| {
+                tracing::warn!(
+                    project = %state.hash,
+                    rowid = row.rowid,
+                    "Failed to load deleted files for dynamic upgrade, falling back to message parse: {err}"
+                );
+                let (deleted, _, _) = parse_emergency_message(&row.message);
+                deleted
+            },
+            |files| files.len(),
+        );
     let baseline_from_predecessor = predecessor.as_ref().map(|snapshot| snapshot.file_count);
     let baseline_from_row = row.file_count.saturating_add(deleted_count as u64);
     let baseline_count = baseline_from_predecessor.unwrap_or(baseline_from_row);
@@ -333,6 +335,7 @@ fn parse_emergency_message_opt(msg: &str) -> Option<(usize, u64, f64)> {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(after_slash.len());
     let baseline: u64 = after_slash[..end].trim().parse().ok()?;
+    #[allow(clippy::cast_precision_loss)] // precision loss acceptable for ratio display/comparison
     let ratio = if baseline > 0 {
         deleted as f64 / baseline as f64
     } else {

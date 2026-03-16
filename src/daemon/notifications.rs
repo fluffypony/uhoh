@@ -21,7 +21,7 @@ impl NotificationPipeline {
         }
     }
 
-    pub fn spawn(&self, event_tx: broadcast::Sender<ServerEvent>) {
+    pub fn spawn(&self, event_tx: &broadcast::Sender<ServerEvent>) {
         let mut rx = event_tx.subscribe();
         let me = self.clone();
         tokio::spawn(async move {

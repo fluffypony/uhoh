@@ -93,7 +93,7 @@ impl DbGuardSubsystem {
                 event.guard_name = Some(guard.name.clone());
                 event.detail =
                     Some(format!("engine={}, mode={}", guard.engine, guard.mode));
-                if let Err(err) = ctx.event_ledger.append(event) {
+                if let Err(err) = ctx.event_ledger.append(&event) {
                     tracing::error!("failed to append guard_started event: {err}");
                 }
             }
@@ -255,7 +255,7 @@ impl DbGuardSubsystem {
                     "engine={}, configured_mode={}, effective_mode={}",
                     guard.engine, guard.mode, effective_mode
                 ));
-                if let Err(err) = ctx.event_ledger.append(event) {
+                if let Err(err) = ctx.event_ledger.append(&event) {
                     tracing::error!("failed to append guard_mode_normalized event: {err}");
                 }
             }
@@ -307,7 +307,7 @@ impl DbGuardSubsystem {
         );
         event.guard_name = Some(guard.name.clone());
         event.detail = Some(err.to_string());
-        if let Err(append_err) = ctx.event_ledger.append(event) {
+        if let Err(append_err) = ctx.event_ledger.append(&event) {
             tracing::error!("failed to append guard_tick_failed event: {append_err}");
         }
     }

@@ -197,6 +197,7 @@ pub async fn status(uhoh: &Path, database: &db::Database) -> Result<()> {
         .sum();
     println!("Snapshots: {total}");
     match database.blob_bytes() {
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for display-only MB conversion
         Ok(size) => println!("Blob storage: {:.1} MB", size as f64 / 1_048_576.0),
         Err(e) => println!("Blob storage: unavailable ({e})"),
     }

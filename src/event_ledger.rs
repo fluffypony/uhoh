@@ -34,12 +34,12 @@ impl EventLedger {
     /// # Errors
     ///
     /// Returns an error if the database insert fails.
-    pub fn append(&self, event: NewEventLedgerEntry) -> Result<i64> {
-        let id = self.db.insert_event_ledger(&event)?;
+    pub fn append(&self, event: &NewEventLedgerEntry) -> Result<i64> {
+        let id = self.db.insert_event_ledger(event)?;
 
         // Bridge: map persisted event to ServerEvent and broadcast
         if let Some(ref tx) = self.event_publisher {
-            publish_ledger_event(tx, &event);
+            publish_ledger_event(tx, event);
         }
 
         Ok(id)
@@ -144,7 +144,7 @@ mod tests {
 
         // Append an event
         let event = new_event(LedgerSource::Fs, LedgerEventType::EmergencyDeleteDetected, LedgerSeverity::Critical);
-        let id = ledger.append(event).unwrap();
+        let id = ledger.append(&event).unwrap();
         assert!(id > 0);
     }
 
@@ -157,7 +157,7 @@ mod tests {
         let ledger = EventLedger::new(db.clone()).with_event_publisher(tx);
 
         let event = new_event(LedgerSource::Agent, LedgerEventType::ToolCall, LedgerSeverity::Info);
-        let id = ledger.append(event).unwrap();
+        let id = ledger.append(&event).unwrap();
         assert!(id > 0);
     }
 }

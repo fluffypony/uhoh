@@ -64,8 +64,7 @@ pub fn tick_sqlite_guard(
         .as_deref()
         .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
         .map(|ts| chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc)))
-        .map(|elapsed| elapsed.to_std().unwrap_or_default() >= baseline_interval)
-        .unwrap_or(true);
+        .map_or(true, |elapsed| elapsed.to_std().unwrap_or_default() >= baseline_interval);
     if needs_baseline {
         let info = recovery::write_sqlite_baseline(
             &ctx.uhoh_dir,
@@ -97,12 +96,12 @@ pub fn tick_sqlite_guard(
             })
             .to_string(),
         );
-        if let Err(err) = ctx.event_ledger.append(baseline_event) {
+        if let Err(err) = ctx.event_ledger.append(&baseline_event) {
             tracing::error!("failed to append sqlite_baseline event: {err}");
         }
     }
 
-    if let Err(err) = ctx.event_ledger.append(event) {
+    if let Err(err) = ctx.event_ledger.append(&event) {
         tracing::error!("failed to append sqlite guard event: {err}");
     }
     Ok(())

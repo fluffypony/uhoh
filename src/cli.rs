@@ -192,7 +192,7 @@ pub enum LedgerAction {
     Verify,
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum)]
 pub enum HookAction {
     Install,
     Remove,

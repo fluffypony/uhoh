@@ -82,11 +82,9 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "Found {} orphaned blobs ({:.1} MB)",
-        orphaned.len(),
-        total_size as f64 / 1_048_576.0
-    );
+    #[allow(clippy::cast_precision_loss)] // precision loss acceptable for display-only MB conversion
+    let total_mb = total_size as f64 / 1_048_576.0;
+    println!("Found {} orphaned blobs ({:.1} MB)", orphaned.len(), total_mb);
 
     let bar = ProgressBar::new(orphaned.len() as u64);
     bar.set_style(
@@ -112,16 +110,13 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
         std::fs::remove_file(path)
             .with_context(|| format!("Failed to delete: {}", path.display()))?;
         // Decrement cached blob bytes counter if available
+        #[allow(clippy::cast_possible_wrap)] // sz is a file size from metadata, always within i64 range
         let _ = database.add_blob_bytes(-(sz as i64));
         bar.inc(1);
     }
     bar.finish_and_clear();
 
-    println!(
-        "Removed {} orphaned blobs ({:.1} MB freed)",
-        orphaned.len(),
-        total_size as f64 / 1_048_576.0
-    );
+    println!("Removed {} orphaned blobs ({:.1} MB freed)", orphaned.len(), total_mb);
 
     // Clean up empty prefix directories
     for prefix_entry in std::fs::read_dir(&blob_root)? {

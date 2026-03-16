@@ -8,7 +8,7 @@ use super::{
 };
 
 #[non_exhaustive]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct LedgerRecentFilters<'a> {
     pub source: Option<LedgerSource>,
     pub guard_name: Option<&'a str>,
@@ -334,6 +334,7 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<EventLedgerEntry>> {
         let conn = self.conn()?;
+        #[allow(clippy::cast_possible_wrap)] // limit is a query limit, never large enough to wrap i64
         let (sql, param_values) = build_recent_query(
             filters,
             limit as i64,

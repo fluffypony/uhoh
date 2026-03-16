@@ -155,6 +155,7 @@ impl Database {
                  ORDER BY rank
                  LIMIT ?3",
             )?;
+            #[allow(clippy::cast_possible_wrap)] // limit is a query limit, never large enough to wrap i64
             let rows = stmt.query_map(params![fts_query, project_hash, limit as i64], map_search_result_row)?;
             for row in rows {
                 out.push(row?);
@@ -169,6 +170,7 @@ impl Database {
                  ORDER BY rank
                  LIMIT ?2",
             )?;
+            #[allow(clippy::cast_possible_wrap)] // limit is a query limit, never large enough to wrap i64
             let rows = stmt.query_map(params![fts_query, limit as i64], map_search_result_row)?;
             for row in rows {
                 out.push(row?);

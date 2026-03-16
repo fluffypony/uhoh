@@ -111,7 +111,7 @@ fn event_ledger_trace_and_resolve_roundtrip() {
     let (_tmp, db) = temp_db();
     let ledger = EventLedger::new(db.clone());
 
-    let _ = ledger.append(event(
+    let _ = ledger.append(&event(
         LedgerSource::Agent,
         "tool_call",
         Some("src/lib.rs"),
@@ -123,7 +123,7 @@ fn event_ledger_trace_and_resolve_roundtrip() {
         .first()
         .map(|e| e.id)
         .unwrap();
-    let _ = ledger.append(event(
+    let _ = ledger.append(&event(
         LedgerSource::Fs,
         "file_write",
         Some("src/lib.rs"),
@@ -315,7 +315,7 @@ fn event_ledger_append_falls_back_to_direct_insert_when_flusher_not_started() {
     let ledger = EventLedger::new(db.clone());
 
     let event_id = ledger
-        .append(event(
+        .append(&event(
             LedgerSource::Agent,
             "pre_notify",
             Some("src/lib.rs"),

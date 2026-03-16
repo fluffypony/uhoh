@@ -60,9 +60,6 @@ pub fn remove_service() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn install_launchagent() -> Result<()> {
-    let exe = std::env::current_exe()?;
-    let uhoh = uhoh_dir();
-
     // Use proper XML escaping for paths
     fn xml_escape(s: &str) -> String {
         s.replace('&', "&amp;")
@@ -71,6 +68,9 @@ fn install_launchagent() -> Result<()> {
             .replace('"', "&quot;")
             .replace('\'', "&apos;")
     }
+
+    let exe = std::env::current_exe()?;
+    let uhoh = uhoh_dir();
 
     let exe_escaped = xml_escape(&exe.to_string_lossy());
     let log_escaped = xml_escape(&uhoh.join("daemon.log").to_string_lossy());

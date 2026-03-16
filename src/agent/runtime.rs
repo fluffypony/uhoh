@@ -105,7 +105,7 @@ impl AgentSubsystem {
             );
             event.agent_name = Some(agent.name.clone());
             event.detail = Some(format!("profile={}", agent.profile_path));
-            if let Err(err) = ctx.event_ledger.append(event) {
+            if let Err(err) = ctx.event_ledger.append(&event) {
                 tracing::error!("failed to append agent_registered event: {err}");
             }
         }
@@ -121,10 +121,10 @@ impl AgentSubsystem {
         }
     }
 
-    fn record_background_failure(&mut self, message: String) {
+    fn record_background_failure(&mut self, message: &str) {
         self.background_failures.fetch_add(1, Ordering::Relaxed);
         self.healthy = false;
-        self.fatal_error = Some(message.clone());
+        self.fatal_error = Some(message.to_string());
         tracing::error!("{message}");
     }
 
@@ -171,7 +171,7 @@ impl AgentSubsystem {
         if let Some(message) =
             Self::poll_result_task(&mut self.intercept_task, "session tailer").await
         {
-            self.record_background_failure(message);
+            self.record_background_failure(&message);
         }
         if intercept_finished {
             self.intercept_started = false;
@@ -184,7 +184,7 @@ impl AgentSubsystem {
             .as_ref()
             .is_some_and(tokio::task::JoinHandle::is_finished);
         if let Some(message) = Self::poll_result_task(&mut self.proxy_task, "mcp proxy").await {
-            self.record_background_failure(message);
+            self.record_background_failure(&message);
         }
         if proxy_finished {
             self.proxy_shutdown = None;
@@ -211,7 +211,7 @@ impl AgentSubsystem {
             #[cfg(all(target_os = "linux", feature = "audit-trail"))]
             self.handle_fanotify_failure(ctx, message);
             #[cfg(not(all(target_os = "linux", feature = "audit-trail")))]
-            self.record_background_failure(message);
+            self.record_background_failure(&message);
         }
         self.fanotify_started = false;
     }
@@ -380,7 +380,7 @@ impl AgentSubsystem {
             LedgerSeverity::Warn,
         );
         event.detail = Some(message.clone());
-        if let Err(err) = ctx.event_ledger.append(event) {
+        if let Err(err) = ctx.event_ledger.append(&event) {
             tracing::error!("failed to append fanotify_monitor_degraded event: {err}");
         }
 
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn record_background_failure_sets_state() {
         let mut sub = AgentSubsystem::new();
-        sub.record_background_failure("boom".to_string());
+        sub.record_background_failure("boom");
         assert!(!sub.healthy);
         assert_eq!(sub.fatal_error.as_deref(), Some("boom"));
         assert_eq!(sub.background_failures.load(Ordering::Relaxed), 1);

@@ -159,7 +159,7 @@ impl ForegroundDaemonRuntime {
         )
         .await;
 
-        NotificationPipeline::new(config.notifications.clone()).spawn(server_event_tx.clone());
+        NotificationPipeline::new(config.notifications.clone()).spawn(&server_event_tx);
         let server_handle = start_server(
             &config,
             &database,
@@ -559,7 +559,7 @@ async fn run_tick_maintenance(ctx: TickMaintenanceCtx<'_>) -> TickOutcome {
                 LedgerSeverity::Warn,
             );
             event.detail = Some(format!("path={}, error={}", config_path.display(), err));
-            if let Err(append_err) = event_ledger.append(event) {
+            if let Err(append_err) = event_ledger.append(&event) {
                 tracing::error!("failed to append config_reload_failed event: {append_err}");
             }
         }
@@ -635,7 +635,7 @@ fn cleanup_stale_restore_staging_dirs(projects: &[ProjectEntry]) {
                 {
                     continue;
                 }
-                if entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false) {
+                if entry.file_type().is_ok_and(|ft| ft.is_symlink()) {
                     continue;
                 }
                 if let Ok(meta) = entry.metadata() {
@@ -643,8 +643,7 @@ fn cleanup_stale_restore_staging_dirs(projects: &[ProjectEntry]) {
                         .modified()
                         .ok()
                         .and_then(|modified| modified.elapsed().ok())
-                        .map(|age| age > Duration::from_secs(3600))
-                        .unwrap_or(false);
+                        .is_some_and(|age| age > Duration::from_secs(3600));
                     if stale {
                         let _ = std::fs::remove_dir_all(entry.path());
                     }

@@ -133,6 +133,7 @@ pub struct SearchResult {
 }
 
 #[non_exhaustive]
+#[derive(Clone, Copy)]
 pub struct CreateSnapshotRow<'a> {
     pub project_hash: &'a str,
     pub snapshot_id: u64,

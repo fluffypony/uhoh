@@ -35,7 +35,7 @@ pub fn tick_audit(ctx: &AgentContext, agents: &[AgentEntry]) {
             })
             .to_string(),
         );
-        if let Err(err) = ctx.event_ledger.append(event) {
+        if let Err(err) = ctx.event_ledger.append(&event) {
             tracing::error!("failed to append audit_tick event: {err}");
         }
     }

@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn test_base58_boundary_values() {
         // Byte boundary values
-        for id in [255u64, 256, 65535, 65536, 16777215, 16777216] {
+        for id in [255u64, 256, 65_535, 65_536, 16_777_215, 16_777_216] {
             let encoded = id_to_base58(id);
             assert_eq!(base58_to_id(&encoded), Some(id), "Failed for id={id}");
         }

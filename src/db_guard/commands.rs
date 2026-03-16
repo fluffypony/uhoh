@@ -184,8 +184,7 @@ fn add_db_guard(
     mode: db::DbGuardMode,
 ) -> Result<()> {
     let guard_name = name
-        .map(str::to_string)
-        .unwrap_or_else(|| super::derive_guard_name_from_dsn(dsn));
+        .map_or_else(|| super::derive_guard_name_from_dsn(dsn), str::to_string);
     let engine = super::detect_engine(dsn).context("Unsupported DSN format")?;
     validate_engine_prerequisites(engine)?;
 
@@ -527,8 +526,7 @@ fn table_name_matches(candidate: &str, table: &str) -> bool {
     normalized_candidate
         .rsplit('.')
         .next()
-        .map(|value| value.trim_matches('"') == normalized_table)
-        .unwrap_or(false)
+        .is_some_and(|value| value.trim_matches('"') == normalized_table)
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

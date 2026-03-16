@@ -26,7 +26,7 @@ use super::shared::{
 pub fn add(uhoh: &Path, database: &db::Database, path: Option<String>) -> Result<()> {
     maybe_start_daemon(uhoh)?;
     let project_path = resolve_project_path(path)?;
-    register_project(uhoh, database, project_path)
+    register_project(uhoh, database, &project_path)
 }
 
 /// Prints project status if the current directory is registered, otherwise registers it.
@@ -44,15 +44,15 @@ pub fn default_action(uhoh: &Path, database: &db::Database) -> Result<()> {
     }
 
     maybe_start_daemon(uhoh)?;
-    register_project(uhoh, database, cwd)
+    register_project(uhoh, database, &cwd)
 }
 
 fn register_project(
     uhoh: &Path,
     database: &db::Database,
-    project_path: std::path::PathBuf,
+    project_path: &std::path::Path,
 ) -> Result<()> {
-    if uhoh.starts_with(&project_path) {
+    if uhoh.starts_with(project_path) {
         anyhow::bail!(
             "Refusing to watch parent directory '{}' because it contains {}",
             project_path.display(),
@@ -60,9 +60,9 @@ fn register_project(
         );
     }
 
-    if let Some(existing_hash) = marker::read_marker(&project_path)? {
+    if let Some(existing_hash) = marker::read_marker(project_path)? {
         if let Some(existing) = database.get_project(&existing_hash)? {
-            let canonical = dunce::canonicalize(&project_path)?;
+            let canonical = dunce::canonicalize(project_path)?;
             if existing.current_path != canonical.to_string_lossy().as_ref() {
                 database.update_project_path(&existing_hash, &canonical.to_string_lossy())?;
                 println!("Updated project path: {}", canonical.display());
@@ -82,8 +82,8 @@ fn register_project(
         eprintln!("⚠ Warning: Not a git repo. Add `.uhoh` to your ignore file.");
     }
 
-    let project_hash = marker::create_marker(&project_path)?;
-    let canonical = dunce::canonicalize(&project_path)?;
+    let project_hash = marker::create_marker(project_path)?;
+    let canonical = dunce::canonicalize(project_path)?;
     database.add_project(&project_hash, &canonical.to_string_lossy())?;
     println!("Registered: {}", canonical.display());
 
@@ -140,8 +140,8 @@ fn print_project_status(database: &db::Database, project_hash: &str) -> Result<(
 ///
 /// Returns an error if the target path cannot be resolved, the hash prefix is ambiguous,
 /// no matching project is found, or the database removal fails.
-pub fn remove(database: &db::Database, target: Option<String>) -> Result<()> {
-    let project = if let Some(ref target) = target {
+pub fn remove(database: &db::Database, target: Option<&str>) -> Result<()> {
+    let project = if let Some(target) = target {
         let path = Path::new(target);
         if path.exists() || path.is_absolute() {
             let canonical = dunce::canonicalize(target)?;
@@ -150,7 +150,7 @@ pub fn remove(database: &db::Database, target: Option<String>) -> Result<()> {
             let projects = database.list_projects()?;
             let matches: Vec<_> = projects
                 .iter()
-                .filter(|project| project.hash.starts_with(target.as_str()))
+                .filter(|project| project.hash.starts_with(target))
                 .collect();
             match matches.len() {
                 0 => {
@@ -217,8 +217,8 @@ pub fn list(database: &db::Database) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if the target project cannot be resolved, or if any database query fails.
-pub fn snapshots(database: &db::Database, target: Option<String>) -> Result<()> {
-    let project = resolve_target_project(database, target.as_deref())?;
+pub fn snapshots(database: &db::Database, target: Option<&str>) -> Result<()> {
+    let project = resolve_target_project(database, target)?;
     let snapshots = database.list_snapshots(&project.hash)?;
     if snapshots.is_empty() {
         println!("No snapshots.");
@@ -259,8 +259,8 @@ pub fn snapshots(database: &db::Database, target: Option<String>) -> Result<()> 
 pub fn commit(
     uhoh: &Path,
     database: &db::Database,
-    message: Option<String>,
-    trigger: Option<String>,
+    message: Option<&str>,
+    trigger: Option<&str>,
 ) -> Result<()> {
     maybe_start_daemon(uhoh)?;
     let project_path = dunce::canonicalize(std::env::current_dir()?)?;
@@ -268,7 +268,6 @@ pub fn commit(
         .find_project_by_path(&project_path)?
         .context("Not registered")?;
     let trigger = trigger
-        .as_deref()
         .and_then(db::SnapshotTrigger::parse)
         .unwrap_or(db::SnapshotTrigger::Manual);
     let cfg = config::Config::load(&uhoh.join("config.toml"))?;
@@ -281,7 +280,7 @@ pub fn commit(
             project_hash: &project.hash,
             project_path: &project_path,
             trigger,
-            message: message.as_deref(),
+            message,
             changed_paths: None,
         },
     )?;
@@ -299,11 +298,11 @@ pub fn restore_snapshot(
     uhoh: &Path,
     database: &db::Database,
     id: &str,
-    target: Option<String>,
+    target: Option<&str>,
     dry_run: bool,
     force: bool,
 ) -> Result<()> {
-    let project = resolve_target_project(database, target.as_deref())?;
+    let project = resolve_target_project(database, target)?;
     let cfg = config::Config::load(&uhoh.join("config.toml"))?;
     let snapshot_runtime = snapshot::SnapshotRuntime::from_config(&cfg);
     let pre_restore_message = format!("Before restore to {id}");
@@ -351,9 +350,9 @@ pub fn gitstash(
     uhoh: &Path,
     database: &db::Database,
     id: &str,
-    target: Option<String>,
+    target: Option<&str>,
 ) -> Result<()> {
-    let project = resolve_target_project(database, target.as_deref())?;
+    let project = resolve_target_project(database, target)?;
     git::cmd_gitstash(uhoh, database, &project, id)
 }
 
@@ -365,14 +364,14 @@ pub fn gitstash(
 pub fn diff(
     uhoh: &Path,
     database: &db::Database,
-    id1: Option<String>,
-    id2: Option<String>,
+    id1: Option<&str>,
+    id2: Option<&str>,
 ) -> Result<()> {
     let project_path = dunce::canonicalize(std::env::current_dir()?)?;
     let project = database
         .find_project_by_path(&project_path)?
         .context("Not registered")?;
-    diff_view::cmd_diff(uhoh, database, &project, id1.as_deref(), id2.as_deref())
+    diff_view::cmd_diff(uhoh, database, &project, id1, id2)
 }
 
 /// Prints the contents of a file as it existed in the given snapshot.
@@ -421,8 +420,8 @@ pub fn mark(database: &db::Database, label: &str) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if the target project cannot be resolved or the undo operation fails.
-pub fn undo(uhoh: &Path, database: &db::Database, target: Option<String>) -> Result<()> {
-    let project = resolve_target_project(database, target.as_deref())?;
+pub fn undo(uhoh: &Path, database: &db::Database, target: Option<&str>) -> Result<()> {
+    let project = resolve_target_project(database, target)?;
     operations::cmd_undo(uhoh, database, &project)
 }
 
@@ -431,7 +430,7 @@ pub fn undo(uhoh: &Path, database: &db::Database, target: Option<String>) -> Res
 /// # Errors
 ///
 /// Returns an error if the target project cannot be resolved or the database query fails.
-pub fn operations(database: &db::Database, target: Option<String>) -> Result<()> {
-    let project = resolve_target_project(database, target.as_deref())?;
+pub fn operations(database: &db::Database, target: Option<&str>) -> Result<()> {
+    let project = resolve_target_project(database, target)?;
     crate::commands::operations::cmd_list_operations(database, &project)
 }

@@ -20,20 +20,24 @@ use crate::db;
 pub async fn dispatch(uhoh: &Path, database: db::Database, command: Commands) -> Result<()> {
     match command {
         Commands::Add { path } => project::add(uhoh, &database, path)?,
-        Commands::Remove { target } => project::remove(&database, target)?,
+        Commands::Remove { target } => project::remove(&database, target.as_deref())?,
         Commands::List => project::list(&database)?,
-        Commands::Snapshots { target } => project::snapshots(&database, target)?,
+        Commands::Snapshots { target } => project::snapshots(&database, target.as_deref())?,
         Commands::Commit { message, trigger } => {
-            project::commit(uhoh, &database, message, trigger)?;
+            project::commit(uhoh, &database, message.as_deref(), trigger.as_deref())?;
         }
         Commands::Restore {
             id,
             target,
             dry_run,
             force,
-        } => project::restore_snapshot(uhoh, &database, &id, target, dry_run, force)?,
-        Commands::Gitstash { id, target } => project::gitstash(uhoh, &database, &id, target)?,
-        Commands::Diff { id1, id2 } => project::diff(uhoh, &database, id1, id2)?,
+        } => project::restore_snapshot(uhoh, &database, &id, target.as_deref(), dry_run, force)?,
+        Commands::Gitstash { id, target } => {
+            project::gitstash(uhoh, &database, &id, target.as_deref())?;
+        }
+        Commands::Diff { id1, id2 } => {
+            project::diff(uhoh, &database, id1.as_deref(), id2.as_deref())?;
+        }
         Commands::Cat { path, id } => project::cat(uhoh, &database, &path, &id)?,
         Commands::Log { path } => project::log(&database, &path)?,
         Commands::Mcp => crate::mcp::run_stdio_server(uhoh)?,
@@ -51,15 +55,21 @@ pub async fn dispatch(uhoh: &Path, database: db::Database, command: Commands) ->
         } => runtime::doctor(uhoh, database, fix, restore_latest, verify_install).await?,
         Commands::Status => runtime::status(uhoh, &database).await?,
         Commands::Mark { label } => project::mark(&database, &label)?,
-        Commands::Undo { target } => project::undo(uhoh, &database, target)?,
-        Commands::Operations { target } => project::operations(&database, target)?,
+        Commands::Undo { target } => project::undo(uhoh, &database, target.as_deref())?,
+        Commands::Operations { target } => project::operations(&database, target.as_deref())?,
         Commands::ServiceInstall => runtime::install_service()?,
         Commands::ServiceRemove => runtime::remove_service()?,
-        Commands::Db { action } => crate::db_guard::handle_db_guard_action(uhoh, &database, &action)?,
-        Commands::Agent { action } => crate::agent::handle_agent_action(uhoh, &database, &action)?,
+        Commands::Db { action } => {
+            crate::db_guard::handle_db_guard_action(uhoh, &database, &action)?;
+        }
+        Commands::Agent { action } => {
+            crate::agent::handle_agent_action(uhoh, &database, &action)?;
+        }
         Commands::Trace { event_id } => ledger::trace(&database, event_id)?,
         Commands::Blame { path } => ledger::blame(&database, &path)?,
-        Commands::Timeline { source, since } => ledger::timeline(&database, source, since)?,
+        Commands::Timeline { source, since } => {
+            ledger::timeline(&database, source, since.as_deref())?;
+        }
         Commands::Ledger { action } => match action {
             LedgerAction::Verify => ledger::verify(&database)?,
         },

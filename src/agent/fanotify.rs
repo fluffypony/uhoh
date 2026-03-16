@@ -117,7 +117,7 @@ impl PendingAuditBatch {
             LedgerSeverity::Warn,
         );
         overflow.detail = Some(format!("dropped={}", self.dropped));
-        if let Err(err) = ctx.event_ledger.append(overflow) {
+        if let Err(err) = ctx.event_ledger.append(&overflow) {
             tracing::error!("failed to append fanotify overflow event: {err}");
         }
         self.dropped = 0;
@@ -278,7 +278,7 @@ fn emit_monitor_started(ctx: &AgentContext, monitor_roots: &[PathBuf]) {
             .collect::<Vec<_>>()
             .join(",")
     ));
-    if let Err(err) = ctx.event_ledger.append(event) {
+    if let Err(err) = ctx.event_ledger.append(&event) {
         tracing::error!("failed to append fanotify_monitor_started event: {err}");
     }
 }
@@ -527,7 +527,7 @@ fn flush_batch(ledger: &EventLedger, batch: &mut VecDeque<PendingAudit>) -> Resu
             })
             .to_string(),
         );
-        if let Err(err) = ledger.append(event) {
+        if let Err(err) = ledger.append(&event) {
             tracing::error!("failed to append fanotify_preimage event: {err}");
         }
     }

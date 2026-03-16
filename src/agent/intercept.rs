@@ -209,7 +209,7 @@ async fn process_jsonl_event(
         })
         .to_string(),
     );
-    if let Err(err) = ctx.event_ledger.append(ledger_event) {
+    if let Err(err) = ctx.event_ledger.append(&ledger_event) {
         tracing::error!("failed to append session_tool_call event: {err}");
     }
     Ok(())

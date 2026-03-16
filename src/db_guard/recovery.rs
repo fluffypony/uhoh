@@ -194,9 +194,9 @@ fn postgres_schema_dump(
         .arg("--no-privileges")
         .arg(connection.connect_dsn());
     if let Some(password) = &creds.password {
+        use std::io::Write as _;
         let parsed = parse_postgres_connection_ref(connection.connect_dsn())?;
         let mut file = NamedTempFile::new().context("Failed creating temporary pgpass file")?;
-        use std::io::Write as _;
         writeln!(
             file,
             "{}:{}:{}:{}:{}",
@@ -278,11 +278,12 @@ fn enforce_max_payload_size(payload: &[u8], max_mb: u64, label: &str) -> Result<
         anyhow::bail!("{label} maximum size must be greater than 0");
     }
     if payload.len() as u64 > max_bytes {
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for display-only MiB conversion
+        let payload_mib = payload.len() as f64 / 1_048_576.0;
+        #[allow(clippy::cast_precision_loss)] // precision loss acceptable for display-only MiB conversion
+        let limit_mib = max_bytes as f64 / 1_048_576.0;
         anyhow::bail!(
-            "{} payload ({:.2} MiB) exceeds configured limit ({:.2} MiB)",
-            label,
-            payload.len() as f64 / 1_048_576.0,
-            max_bytes as f64 / 1_048_576.0
+            "{label} payload ({payload_mib:.2} MiB) exceeds configured limit ({limit_mib:.2} MiB)"
         );
     }
     Ok(())

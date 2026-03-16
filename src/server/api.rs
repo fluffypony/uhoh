@@ -80,6 +80,7 @@ struct ApiError {
 }
 
 impl ApiError {
+    #[allow(clippy::needless_pass_by_value)]
     fn invalid_input(message: impl ToString) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -88,6 +89,7 @@ impl ApiError {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn not_found(message: impl ToString) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -96,6 +98,7 @@ impl ApiError {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn conflict(message: impl ToString) -> Self {
         Self {
             status: StatusCode::CONFLICT,
@@ -104,6 +107,7 @@ impl ApiError {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn internal(message: impl ToString) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

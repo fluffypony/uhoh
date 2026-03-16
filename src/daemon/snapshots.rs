@@ -794,6 +794,7 @@ fn handle_created_snapshot(
                     snapshot_id: crate::encoding::id_to_base58(snapshot_id),
                     timestamp: row.timestamp,
                     trigger: row.trigger,
+                    #[allow(clippy::cast_possible_truncation)] // file_count fits in usize on all supported 64-bit targets
                     file_count: row.file_count as usize,
                     message: if row.message.is_empty() {
                         None

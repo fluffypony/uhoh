@@ -28,6 +28,7 @@ pub enum EmergencyEvaluation {
 }
 
 #[non_exhaustive]
+#[derive(Clone, Copy)]
 pub struct EmergencyEvalInput<'a> {
     pub deleted_paths_hint_count: usize,
     pub cached_baseline_count: Option<u64>,
@@ -53,6 +54,7 @@ pub fn exceeds_threshold(
     if deleted_count < min_files {
         return false;
     }
+    #[allow(clippy::cast_precision_loss)] // precision loss acceptable for ratio threshold comparison
     let ratio = deleted_count as f64 / baseline_count as f64;
     ratio >= threshold
 }
@@ -61,7 +63,8 @@ pub fn deletion_ratio(deleted_count: usize, baseline_count: u64) -> f64 {
     if baseline_count == 0 {
         return 0.0;
     }
-    deleted_count as f64 / baseline_count as f64
+    #[allow(clippy::cast_precision_loss)] // precision loss acceptable for ratio display/comparison
+    { deleted_count as f64 / baseline_count as f64 }
 }
 
 pub fn expand_directory_deletion(

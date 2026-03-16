@@ -244,8 +244,8 @@ pub fn store_encrypted_credential(connection_ref: &str, cred: &CredentialMateria
 
     let tmp = path.with_extension("enc.tmp");
     {
-        let mut f = std::fs::File::create(&tmp)?;
         use std::io::Write as _;
+        let mut f = std::fs::File::create(&tmp)?;
         f.write_all(&encoded)?;
         f.sync_all()?;
     }
@@ -418,15 +418,18 @@ fn encrypt_credentials_map(
         out.extend_from_slice(&super::crypto_policy::ARGON2_TIME_COST.to_be_bytes());
         out.extend_from_slice(&super::crypto_policy::ARGON2_PARALLELISM.to_be_bytes());
     }
+    #[allow(clippy::cast_possible_truncation)] // entry count is validated to fit in u32 by protocol design
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
     for entry in entries {
         let key_bytes = entry.key.as_bytes();
         if key_bytes.len() > u16::MAX as usize {
             anyhow::bail!("Credential key is too long");
         }
+        #[allow(clippy::cast_possible_truncation)] // length checked against u16::MAX above
         out.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
         out.extend_from_slice(key_bytes);
         out.extend_from_slice(&entry.nonce);
+        #[allow(clippy::cast_possible_truncation)] // ciphertext length fits in u32 by protocol design
         out.extend_from_slice(&(entry.ciphertext.len() as u32).to_be_bytes());
         out.extend_from_slice(&entry.ciphertext);
     }
@@ -624,8 +627,7 @@ fn resolve_pgpass(connection_ref: &str) -> Result<Option<CredentialMaterial>> {
         let db_ok = fields[2] == "*" || fields[2] == dbname;
         let user_ok = user
             .as_deref()
-            .map(|u| fields[3] == "*" || fields[3] == u)
-            .unwrap_or(fields[3] == "*");
+            .map_or(fields[3] == "*", |u| fields[3] == "*" || fields[3] == u);
         if host_ok && port_ok && db_ok && user_ok {
             return Ok(Some(CredentialMaterial {
                 username: if fields[3] == "*" {
@@ -672,8 +674,7 @@ pub fn scrub_error_message(msg: &str) -> String {
             let idx = search_from + rel_idx;
             let end = out[idx..]
                 .find(char::is_whitespace)
-                .map(|v| idx + v)
-                .unwrap_or(out.len());
+                .map_or(out.len(), |v| idx + v);
             let dsn = out[idx..end].to_string();
             let scrubbed = scrub_dsn(&dsn);
             out.replace_range(idx..end, &scrubbed);

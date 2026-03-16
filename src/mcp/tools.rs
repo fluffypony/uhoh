@@ -237,9 +237,9 @@ pub fn dispatch_mcp_tool_call(
     args: Value,
 ) -> Result<Value, McpToolError> {
     match tool_name {
-        McpToolName::CreateSnapshot => tool_create_snapshot(context, parse_tool_args(args)?),
-        McpToolName::ListSnapshots => tool_list_snapshots(context, parse_tool_args(args)?),
-        McpToolName::RestoreSnapshot => tool_restore_snapshot(context, parse_tool_args(args)?),
+        McpToolName::CreateSnapshot => { let a = parse_tool_args(args)?; tool_create_snapshot(context, &a) },
+        McpToolName::ListSnapshots => { let a = parse_tool_args(args)?; tool_list_snapshots(context, &a) },
+        McpToolName::RestoreSnapshot => { let a = parse_tool_args(args)?; tool_restore_snapshot(context, &a) },
         McpToolName::PreNotify => handle_pre_notify_tool_call(context, parse_tool_args(args)?),
     }
 }
@@ -266,7 +266,7 @@ pub fn mcp_tool_call_response(
 
 fn tool_create_snapshot(
     context: &RuntimeBundle,
-    args: CreateSnapshotArgs,
+    args: &CreateSnapshotArgs,
 ) -> Result<Value, McpToolError> {
     let database = context.database();
     let project = resolve::resolve_project(database.as_ref(), args.project.selection(), None)
@@ -298,7 +298,7 @@ fn tool_create_snapshot(
 
 fn tool_list_snapshots(
     context: &RuntimeBundle,
-    args: ListSnapshotsArgs,
+    args: &ListSnapshotsArgs,
 ) -> Result<Value, McpToolError> {
     let database = context.database();
     let project = resolve::resolve_project(database.as_ref(), args.project.selection(), None)
@@ -332,7 +332,7 @@ fn tool_list_snapshots(
 
 fn tool_restore_snapshot(
     context: &RuntimeBundle,
-    args: RestoreSnapshotArgs,
+    args: &RestoreSnapshotArgs,
 ) -> Result<Value, McpToolError> {
     if !args.dry_run && !args.confirm {
         return Err(McpToolError::invalid_params(
@@ -392,7 +392,7 @@ fn handle_pre_notify_tool_call(
         EventLedger::new(database)
     };
     let event_id = ledger
-        .append(event)
+        .append(&event)
         .map_err(|e| McpToolError::internal(e.to_string()))?;
 
     Ok(json!({

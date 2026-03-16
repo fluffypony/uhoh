@@ -92,6 +92,7 @@ pub fn compact_project(
             continue;
         }
 
+        #[allow(clippy::cast_possible_wrap)] // keep_*_days are small config values, never near i64::MAX
         let dominated = if age < Duration::days(config.keep_5min_days as i64) {
             let bucket = ts.timestamp().div_euclid(300);
             !buckets.five_min.insert(bucket)
@@ -99,10 +100,10 @@ pub fn compact_project(
             let bucket = ts.timestamp().div_euclid(3600);
             !buckets.hourly.insert(bucket)
         } else if age < Duration::days(config.keep_daily_days as i64) {
-            let bucket = ts.timestamp().div_euclid(86400);
+            let bucket = ts.timestamp().div_euclid(86_400);
             !buckets.daily.insert(bucket)
         } else if config.keep_weekly_beyond {
-            let bucket = ts.timestamp().div_euclid(604800);
+            let bucket = ts.timestamp().div_euclid(604_800);
             !buckets.weekly.insert(bucket)
         } else {
             true // No weekly retention: drop everything older
@@ -133,8 +134,8 @@ impl CompactionBuckets {
             .unwrap_or_else(|| Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap());
         self.five_min.insert(ts.timestamp().div_euclid(300));
         self.hourly.insert(ts.timestamp().div_euclid(3600));
-        self.daily.insert(ts.timestamp().div_euclid(86400));
-        self.weekly.insert(ts.timestamp().div_euclid(604800));
+        self.daily.insert(ts.timestamp().div_euclid(86_400));
+        self.weekly.insert(ts.timestamp().div_euclid(604_800));
     }
 }
 
@@ -221,8 +222,8 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2024, 6, 15, 12, 30, 0).unwrap().timestamp();
         assert!(buckets.five_min.contains(&ts.div_euclid(300)));
         assert!(buckets.hourly.contains(&ts.div_euclid(3600)));
-        assert!(buckets.daily.contains(&ts.div_euclid(86400)));
-        assert!(buckets.weekly.contains(&ts.div_euclid(604800)));
+        assert!(buckets.daily.contains(&ts.div_euclid(86_400)));
+        assert!(buckets.weekly.contains(&ts.div_euclid(604_800)));
     }
 
     #[test]

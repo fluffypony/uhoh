@@ -117,6 +117,7 @@ fn test_symlink_capture_stats_and_restore() {
 
 #[tokio::test]
 async fn test_http_range_resume() {
+    use std::io::{Seek, Write};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -213,7 +214,6 @@ async fn test_http_range_resume() {
         if pos > 0 && resp.status() == reqwest::StatusCode::OK {
             pos = 0;
             out.set_len(0).unwrap();
-            use std::io::Seek;
             out.seek(std::io::SeekFrom::Start(0)).unwrap();
         }
 
@@ -221,7 +221,6 @@ async fn test_http_range_resume() {
         if bytes.is_empty() {
             break;
         }
-        use std::io::Write;
         out.write_all(&bytes).unwrap();
         pos += bytes.len() as u64;
 
@@ -303,6 +302,7 @@ fn test_compaction_preserves_pinned() {
 
     let mut pin_rowid = None;
     for i in 0..8u64 {
+        #[allow(clippy::cast_possible_wrap)] // i is 0..8, always fits in i64
         let ts = chrono::Utc::now() - chrono::Duration::days((60 - (i as i64) * 5).max(1));
         let trigger = if i % 2 == 0 { uhoh::db::SnapshotTrigger::Manual } else { uhoh::db::SnapshotTrigger::Auto };
         let message = if i == 0 { "keep" } else { "" };

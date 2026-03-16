@@ -98,6 +98,7 @@ pub fn stop_daemon(uhoh_dir: &Path) -> Result<()> {
     // via is_uhoh_process_alive_with_start above; sending SIGTERM is a graceful
     // shutdown request and is safe even if the process exits between the check and
     // the signal (the signal is simply discarded by the kernel).
+    #[allow(clippy::cast_possible_wrap)] // PIDs on Linux/macOS are always < 2^31, so u32 → i32 is safe
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
     }

@@ -185,6 +185,11 @@ impl WatcherRuntime {
 }
 
 fn start_watching(paths: &[PathBuf], tx: mpsc::Sender<WatchEvent>) -> Result<RecommendedWatcher> {
+    // Helper: send event, return false if receiver dropped (daemon exiting)
+    fn send(tx: &mpsc::Sender<WatchEvent>, event: WatchEvent) -> bool {
+        send_watch_event(tx, event).is_ok()
+    }
+
     let (file_tx, file_rx) = std::sync::mpsc::channel();
 
     let mut watcher = RecommendedWatcher::new(
@@ -202,11 +207,6 @@ fn start_watching(paths: &[PathBuf], tx: mpsc::Sender<WatchEvent>) -> Result<Rec
                 Err(e) => tracing::warn!("Cannot watch {}: {}", path.display(), e),
             }
         }
-    }
-
-    // Helper: send event, return false if receiver dropped (daemon exiting)
-    fn send(tx: &mpsc::Sender<WatchEvent>, event: WatchEvent) -> bool {
-        send_watch_event(tx, event).is_ok()
     }
 
     // Spawn thread to forward events to async channel.

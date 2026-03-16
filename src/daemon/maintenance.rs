@@ -137,10 +137,9 @@ impl DaemonMaintenanceSubsystem {
             .await
             .unwrap_or(0);
             if freed > 100 * 1024 * 1024 {
-                tracing::info!(
-                    "Compaction estimated freed {:.1} MB; triggering GC",
-                    freed as f64 / 1_048_576.0
-                );
+                #[allow(clippy::cast_precision_loss)] // precision loss acceptable for display-only MB conversion
+                let freed_mb = freed as f64 / 1_048_576.0;
+                tracing::info!("Compaction estimated freed {:.1} MB; triggering GC", freed_mb);
                 let db_path_for_gc = gc_uhoh_dir.join("uhoh.db");
                 let gc_uhoh_dir_cl = gc_uhoh_dir.clone();
                 std::mem::drop(tokio::task::spawn_blocking(move || {
@@ -187,8 +186,7 @@ impl DaemonMaintenanceSubsystem {
             std::time::Duration::from_secs(settings.update.check_interval_hours * 3600);
         let do_backup = self
             .last_backup
-            .map(|t| t.elapsed() >= self.backup_interval)
-            .unwrap_or(true);
+            .map_or(true, |t| t.elapsed() >= self.backup_interval);
         if !do_backup {
             return None;
         }
@@ -246,8 +244,7 @@ impl DaemonMaintenanceSubsystem {
         }
         let should_check = self
             .last_sidecar_check
-            .map(|last| last.elapsed() >= self.sidecar_check_interval)
-            .unwrap_or(true);
+            .map_or(true, |last| last.elapsed() >= self.sidecar_check_interval);
         if !should_check {
             return;
         }
@@ -268,8 +265,7 @@ impl DaemonMaintenanceSubsystem {
             ) {
                 Ok(true) => {
                     let after = crate::ai::read_manifest(&sidecar_dir)
-                        .map(|m| m.version)
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .map_or_else(|| "unknown".to_string(), |m| m.version);
                     publish_event(
                         &event_tx,
                         ServerEvent::SidecarUpdated {

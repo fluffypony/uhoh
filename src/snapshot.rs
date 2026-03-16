@@ -25,6 +25,7 @@ pub struct CachedFileState {
 }
 
 #[non_exhaustive]
+#[derive(Clone, Copy)]
 pub struct CreateSnapshotRequest<'a> {
     pub project_hash: &'a str,
     pub project_path: &'a Path,

@@ -32,7 +32,7 @@ fn emit_proxy_event_to_ledger(
 ) {
     let mut event = new_event(LedgerSource::Agent, event_type, severity);
     event.detail = Some(detail);
-    if let Err(err) = ledger.append(event) {
+    if let Err(err) = ledger.append(&event) {
         tracing::error!("failed to append proxy event: {err}");
     }
 }
@@ -215,6 +215,7 @@ pub enum InterceptResult {
     },
 }
 
+#[derive(Clone, Copy)]
 enum ApprovalDecision {
     Approved,
     Denied,
@@ -248,7 +249,7 @@ fn handle_approval_decision(
                 })
                 .to_string(),
             );
-            if let Err(err) = ledger.append(timeout_event) {
+            if let Err(err) = ledger.append(&timeout_event) {
                 tracing::error!("failed to append timeout event: {err}");
             }
             tracing::warn!(
@@ -273,7 +274,7 @@ fn handle_approval_decision(
                 })
                 .to_string(),
             );
-            if let Err(err) = ledger.append(block_event) {
+            if let Err(err) = ledger.append(&block_event) {
                 tracing::error!("failed to append denied event: {err}");
             }
             let call_id = call.get("id").cloned().unwrap_or(serde_json::Value::Null);
@@ -353,7 +354,7 @@ async fn intercept_tool_call(
             })
             .to_string(),
         );
-        if let Err(err) = ledger.append(danger) {
+        if let Err(err) = ledger.append(&danger) {
             tracing::error!("failed to append dangerous_agent_action event: {err}");
         }
 
@@ -398,7 +399,7 @@ async fn intercept_tool_call(
         })
         .to_string(),
     );
-    if let Err(err) = ledger.append(event) {
+    if let Err(err) = ledger.append(&event) {
         tracing::error!("failed to append tool_call event: {err}");
     }
     Ok(InterceptResult::Forward)
@@ -591,7 +592,7 @@ async fn wait_for_approval(
                 })
                 .to_string(),
             );
-            if let Err(err) = ledger.append(event) {
+            if let Err(err) = ledger.append(&event) {
                 tracing::error!("failed to append dangerous_action_approved event: {err}");
             }
             let _ = std::fs::remove_file(&approved);

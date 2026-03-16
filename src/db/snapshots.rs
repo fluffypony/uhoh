@@ -9,6 +9,7 @@ use super::{
 };
 
 #[non_exhaustive]
+#[derive(Clone, Copy)]
 pub struct SnapshotInsert<'a> {
     pub project_hash: &'a str,
     pub snapshot_id: u64,
@@ -337,6 +338,7 @@ impl Database {
              ORDER BY s.timestamp DESC, s.snapshot_id DESC
              LIMIT ?2 OFFSET ?3",
         )?;
+        #[allow(clippy::cast_possible_wrap)] // limit and offset are query parameters, never large enough to wrap i64
         let rows = stmt.query_map(params![project_hash, limit as i64, offset as i64], |row| {
             let trigger_raw: String = row.get(3)?;
             Ok(SnapshotRow {
