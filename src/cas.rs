@@ -651,6 +651,7 @@ fn fsync_parent_dir(path: &Path) {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -342,6 +342,7 @@ fn parse_emergency_message_opt(msg: &str) -> Option<(usize, u64, f64)> {
     Some((deleted, baseline, ratio))
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

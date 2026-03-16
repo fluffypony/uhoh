@@ -178,6 +178,7 @@ fn build_summary_inputs(
     crate::ai::summary::prepare_summary_inputs(blob_root, ai_config, &changes)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

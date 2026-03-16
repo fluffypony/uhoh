@@ -821,6 +821,7 @@ fn requeue_snapshot_changes(state: &mut ProjectDaemonState, drained: Vec<PathBuf
     state.last_change_at = Some(now);
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

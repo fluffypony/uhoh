@@ -23,6 +23,7 @@ pub use proxy::{auth_handshake_line, ensure_proxy_token};
 pub use runtime::AgentSubsystem;
 pub use sandbox::sandbox_supported;
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

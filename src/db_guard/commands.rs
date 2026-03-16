@@ -531,6 +531,7 @@ fn table_name_matches(candidate: &str, table: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::{json_contains_table_name, table_name_matches};

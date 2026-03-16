@@ -41,6 +41,7 @@ fn map_ledger_event(event: &NewEventLedgerEntry) -> Option<ServerEvent> {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -319,6 +319,7 @@ fn resolve_mysql_env_credentials() -> Option<CredentialMaterial> {
     })
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

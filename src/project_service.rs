@@ -152,6 +152,7 @@ fn classify_restore_error(err: anyhow::Error) -> RestoreProjectError {
     RestoreProjectError::Internal(err)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

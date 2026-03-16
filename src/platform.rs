@@ -380,6 +380,7 @@ pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
     None
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

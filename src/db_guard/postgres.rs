@@ -902,6 +902,7 @@ where
     build_postgres_task_runtime()?.block_on(fut)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::{

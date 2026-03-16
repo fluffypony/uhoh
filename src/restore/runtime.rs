@@ -222,6 +222,7 @@ pub fn is_restore_active(coordinator: &RestoreCoordinator, uhoh_dir: &Path) -> b
     coordinator.in_progress.load(Ordering::SeqCst) || restore_marker_active(uhoh_dir)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

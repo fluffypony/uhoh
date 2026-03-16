@@ -116,6 +116,7 @@ fn normalize_sqlite_path(connection_ref: &str) -> String {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

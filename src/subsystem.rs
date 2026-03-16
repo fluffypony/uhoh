@@ -212,6 +212,7 @@ fn start_runner_task(
     }));
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

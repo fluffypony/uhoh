@@ -547,6 +547,7 @@ fn build_current_file_list_readonly(project_path: &Path) -> Result<Vec<crate::db
     Ok(entries)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

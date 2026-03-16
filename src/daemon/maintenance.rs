@@ -355,6 +355,7 @@ fn database_backup_to(database: &Database, path: &std::path::Path) -> anyhow::Re
     database.backup_to(path)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::DaemonMaintenanceSubsystem;

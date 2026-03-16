@@ -342,6 +342,7 @@ pub fn generate_summary_blocking(
     Ok(Some(summary.to_string()))
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::{prepare_summary_inputs, SummaryBlobRef, SummaryDiffEntry};

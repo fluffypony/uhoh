@@ -91,6 +91,7 @@ fn memory_available(min_gb: u64) -> bool {
     available_mb >= min_gb * 1024
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

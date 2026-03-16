@@ -216,6 +216,7 @@ async fn send_desktop_notification(title: &str, message: &str) -> std::io::Resul
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

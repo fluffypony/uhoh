@@ -873,6 +873,7 @@ pub fn ensure_proxy_token(uhoh_dir: &Path) -> Result<String> {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::{is_dangerous_tool_call, random_hex, read_approval_response, validate_auth_line};

@@ -334,6 +334,7 @@ pub fn detect_engine(dsn: &str) -> Option<DbGuardEngine> {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

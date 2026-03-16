@@ -89,6 +89,7 @@ pub fn confirm_restore_delete(count: usize) -> Result<bool> {
     Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

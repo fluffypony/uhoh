@@ -49,6 +49,7 @@ pub fn build_walker(project_path: &Path) -> ignore::Walk {
     builder.build()
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

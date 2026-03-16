@@ -440,6 +440,7 @@ fn run_git_output_impl(cwd: &Path, index_file: Option<&Path>, args: &[&str]) -> 
     Ok(String::from_utf8(output.stdout)?)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

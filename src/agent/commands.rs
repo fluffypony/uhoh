@@ -234,6 +234,7 @@ fn extract_detail_field(detail: &str, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -748,6 +748,7 @@ pub(crate) async fn get_timeline(
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -124,6 +124,7 @@ pub(crate) fn apply_landlock(_profile: &crate::agent::profiles::AgentProfile) ->
     Ok(())
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

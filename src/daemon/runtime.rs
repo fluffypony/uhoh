@@ -707,6 +707,7 @@ fn check_inotify_limit() {
 #[allow(dead_code)]
 fn check_inotify_limit() {}
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

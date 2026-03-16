@@ -186,6 +186,7 @@ pub fn severity_for_ratio(ratio: f64) -> crate::db::LedgerSeverity {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

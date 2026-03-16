@@ -121,6 +121,7 @@ pub async fn host_validation_middleware(
     next.run(request).await
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
