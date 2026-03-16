@@ -111,7 +111,7 @@ pub fn store_blob_with_level(
 }
 
 /// Reads a symlink target at `abs_path`, stores the target bytes in CAS,
-/// and returns (hash, target_byte_count, bytes_written_to_disk).
+/// and returns `(hash, target_byte_count, bytes_written_to_disk)`.
 pub fn store_symlink_target(blob_root: &Path, abs_path: &Path) -> Result<(String, u64, u64)> {
     let target = std::fs::read_link(abs_path)
         .with_context(|| format!("Failed to read symlink: {}", abs_path.display()))?;
@@ -160,7 +160,7 @@ impl BlobStorageParams {
 }
 
 /// Store a blob from a file path using single-pass streaming hash+write.
-/// Returns (hash, size, storage_method, bytes_on_disk).
+/// Returns `(hash, size, storage_method, bytes_on_disk)`.
 pub fn store_blob_from_file(
     blob_root: &Path,
     file_path: &Path,
@@ -174,7 +174,7 @@ pub fn store_blob_from_file(
         .with_context(|| format!("Cannot open: {}", file_path.display()))?;
     let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
     let mut hasher = blake3::Hasher::new();
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 64 * 1024];
     let mut first_chunk = Vec::new();
 
     let first_n = reader.read(&mut buf)?;
@@ -345,10 +345,10 @@ fn place_blob(
     }
 }
 
-/// Try to compress a temp blob and place it at blob_path.
-/// Returns Ok(Some((method, compressed_size))) if compressed blob was placed,
-/// Ok(None) if compression didn't help (caller should place uncompressed),
-/// Err on failure.
+/// Try to compress a temp blob and place it at `blob_path`.
+/// Returns `Ok(Some((method, compressed_size)))` if compressed blob was placed,
+/// `Ok(None)` if compression didn't help (caller should place uncompressed),
+/// `Err` on failure.
 #[allow(unused_variables)]
 fn try_compress_and_place(
     tmp_path: &Path,
@@ -585,8 +585,8 @@ pub fn blob_disk_usage(blob_path: &Path) -> u64 {
 }
 
 /// Clean up stale temp files in the blob store (from crashed processes).
-/// Scans both blobs/tmp/ and hash-prefix directories (blobs/ab/, etc.)
-/// for temp files older than the specified max_age.
+/// Scans both `blobs/tmp/` and hash-prefix directories (`blobs/ab/`, etc.)
+/// for temp files older than the specified `max_age`.
 pub fn cleanup_stale_temp_files(blob_root: &Path, max_age: std::time::Duration) {
     let now = std::time::SystemTime::now();
 

@@ -49,9 +49,7 @@ pub async fn run_proxy(ctx: AgentContext, shutdown: CancellationToken) -> Result
             Ok((stream, addr)) => {
                 let peer = stream
                     .peer_addr()
-                    .ok()
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
+                    .map_or_else(|_| "unknown".to_string(), |v| v.to_string());
                 emit_proxy_event(
                     &ctx,
                     LedgerEventType::McpProxyClientConnected,
@@ -122,7 +120,7 @@ async fn handle_connection_async(
                 .await
                 .context("MCP proxy auth timeout")??;
         if let Some(line) = auth_line {
-            authed = validate_auth_line(&line, &expected_token)?;
+            authed = validate_auth_line(&line, &expected_token);
         }
         if !authed {
             return Err(anyhow::anyhow!("MCP proxy authentication failed"));
@@ -594,23 +592,22 @@ async fn wait_for_approval(
     }
 }
 
-fn validate_auth_line(line: &str, expected_token: &str) -> Result<bool> {
+fn validate_auth_line(line: &str, expected_token: &str) -> bool {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
-        return Ok(false);
+        return false;
     };
-    if json
+    if !json
         .get("method")
         .and_then(|v| v.as_str())
-        .map(|m| m != "uhoh/auth")
-        .unwrap_or(true)
+        .is_some_and(|m| m == "uhoh/auth")
     {
-        return Ok(false);
+        return false;
     }
     let provided = json
         .pointer("/params/token")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    Ok(secure_eq(provided.as_bytes(), expected_token.as_bytes()))
+    secure_eq(provided.as_bytes(), expected_token.as_bytes())
 }
 
 fn read_approval_response(path: &Path) -> Result<Option<ApprovalResponse>> {
@@ -732,8 +729,7 @@ fn parse_pending_approval_file(path: &Path) -> Result<Option<PendingApprovalFile
 fn is_pending_approval_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|v| v.to_str())
-        .map(|v| v.ends_with(".pending.json"))
-        .unwrap_or(false)
+        .is_some_and(|v| v.ends_with(".pending.json"))
 }
 
 fn write_approved_response(runtime: &Path, stem: &str, payload: &[u8]) -> Result<()> {
@@ -907,11 +903,8 @@ mod tests {
             "params": { "token": expected_auth_value }
         })
         .to_string();
-        assert!(validate_auth_line(&handshake, &expected_auth_value).expect("valid handshake"));
-        assert!(
-            !validate_auth_line(&expected_auth_value, &expected_auth_value)
-                .expect("raw token should fail")
-        );
+        assert!(validate_auth_line(&handshake, &expected_auth_value));
+        assert!(!validate_auth_line(&expected_auth_value, &expected_auth_value));
     }
 
     #[cfg(unix)]
