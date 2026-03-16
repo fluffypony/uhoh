@@ -584,6 +584,7 @@ fn record_symlink_entry(
             );
             if bytes_written > 0 {
                 #[allow(clippy::cast_possible_wrap)] // blob sizes won't exceed i64::MAX
+                // Blob byte counter is a non-critical stats cache; drop the error rather than fail the snapshot.
                 let _ = ctx.database.add_blob_bytes(bytes_written as i64);
             }
         }
@@ -652,6 +653,7 @@ fn record_file_entry(
             );
             if bytes_written > 0 {
                 #[allow(clippy::cast_possible_wrap)] // blob sizes won't exceed i64::MAX
+                // Blob byte counter is a non-critical stats cache; drop the error rather than fail the snapshot.
                 let _ = ctx.database.add_blob_bytes(bytes_written as i64);
             }
         }
@@ -830,13 +832,22 @@ fn schedule_ai_summary(
     current_files: &[crate::db::SnapFileEntry],
     deleted_for_manifest: &[crate::db::DeletedFile],
 ) {
-    if !ai::should_run_ai(&ctx.runtime.settings().ai) {
+    if ai::should_run_ai(&ctx.runtime.settings().ai) {
+        schedule_ai_summary_inline(ctx, rowid, current_files, deleted_for_manifest);
+    } else {
+        // AI is not available right now; defer to the background queue for later processing.
         if let Err(e) = ctx.database.enqueue_ai_summary(rowid, ctx.project_hash) {
             tracing::warn!("Failed to enqueue AI summary: {e}");
         }
-        return;
     }
+}
 
+fn schedule_ai_summary_inline(
+    ctx: &PostCommitCtx<'_>,
+    rowid: i64,
+    current_files: &[crate::db::SnapFileEntry],
+    deleted_for_manifest: &[crate::db::DeletedFile],
+) {
     let uhoh_dir_cl = ctx.uhoh_dir.to_path_buf();
     let db_handle = ctx.database.clone_handle();
     let runtime = ctx.runtime.clone();

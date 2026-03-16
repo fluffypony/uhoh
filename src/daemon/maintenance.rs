@@ -79,6 +79,7 @@ impl DaemonMaintenanceSubsystem {
             }
         }
 
+        // Non-critical bookkeeping; log failures elsewhere.
         let _ = ctx.database.prune_ai_queue_ttl(7);
 
         self.run_ai_queue_tick(ctx, settings).await;
@@ -127,10 +128,9 @@ impl DaemonMaintenanceSubsystem {
             let freed = tokio::task::spawn_blocking(move || {
                 let mut freed = 0u64;
                 let project = &projects[idx % projects.len()];
-                if let Ok(f) =
-                    crate::compaction::compact_project(&database, &project.hash, &cfg)
-                {
-                    freed = freed.saturating_add(f);
+                match crate::compaction::compact_project(&database, &project.hash, &cfg) {
+                    Ok(f) => freed = freed.saturating_add(f),
+                    Err(err) => tracing::warn!("Compaction failed for project {}: {err}", &project.hash[..project.hash.len().min(12)]),
                 }
                 freed
             })
@@ -144,26 +144,31 @@ impl DaemonMaintenanceSubsystem {
                 let db_path_for_gc = gc_uhoh_dir.join("uhoh.db");
                 let gc_uhoh_dir_cl = gc_uhoh_dir.clone();
                 std::mem::drop(tokio::task::spawn_blocking(move || {
-                    if let Ok(db) = crate::db::Database::open(&db_path_for_gc) {
-                        if let Err(err) = crate::gc::run_gc(&gc_uhoh_dir_cl, &db) {
-                            tracing::warn!("GC run after compaction failed: {err}");
-                        }
-                        if vacuum_flag
-                            .compare_exchange(
-                                false,
-                                true,
-                                std::sync::atomic::Ordering::SeqCst,
-                                std::sync::atomic::Ordering::SeqCst,
-                            )
-                            .is_ok()
-                        {
-                            let vacuum_res = db.vacuum();
-                            vacuum_flag.store(false, std::sync::atomic::Ordering::SeqCst);
-                            if let Err(err) = vacuum_res {
-                                tracing::warn!("VACUUM failed: {}", err);
+                    match crate::db::Database::open(&db_path_for_gc) {
+                        Ok(db) => {
+                            if let Err(err) = crate::gc::run_gc(&gc_uhoh_dir_cl, &db) {
+                                tracing::warn!("GC run after compaction failed: {err}");
                             }
-                        } else {
-                            tracing::debug!("Skipping VACUUM: prior run still in-flight");
+                            if vacuum_flag
+                                .compare_exchange(
+                                    false,
+                                    true,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                )
+                                .is_ok()
+                            {
+                                let vacuum_res = db.vacuum();
+                                vacuum_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                                if let Err(err) = vacuum_res {
+                                    tracing::warn!("VACUUM failed: {}", err);
+                                }
+                            } else {
+                                tracing::debug!("Skipping VACUUM: prior run still in-flight");
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!("Failed to open DB for post-compaction GC: {err}");
                         }
                     }
                 }));

@@ -96,6 +96,7 @@ pub fn create_snapshot_tx(
         }
     }
 
+    // Denormalized file_count is a performance cache; failure is non-fatal (count falls back to a subquery).
     let _ = tx.execute(
         "UPDATE snapshots SET file_count = (
             SELECT COUNT(*) FROM snapshot_files WHERE snapshot_rowid = ?1
