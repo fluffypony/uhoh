@@ -49,7 +49,7 @@ const GUARD_TICK_INTERVAL_SECS: i64 = 30;
 pub struct DbGuardSubsystem {
     healthy: bool,
     last_failure: Option<String>,
-    sqlite_versions: HashMap<String, i64>,
+    sqlite_state: sqlite::SqliteGuardState,
     mysql_states: HashMap<String, mysql::MysqlGuardState>,
     postgres_runtime: Arc<postgres::PostgresGuardRuntime>,
     shutdown: Option<CancellationToken>,
@@ -60,7 +60,7 @@ impl DbGuardSubsystem {
         Self {
             healthy: true,
             last_failure: None,
-            sqlite_versions: HashMap::new(),
+            sqlite_state: sqlite::SqliteGuardState::default(),
             mysql_states: HashMap::new(),
             postgres_runtime: Arc::new(postgres::PostgresGuardRuntime::new()),
             shutdown: None,
@@ -102,7 +102,7 @@ impl DbGuardSubsystem {
 
         let ctx_cl = ctx.clone();
         let guards_cl = guards.clone();
-        let sqlite_versions = std::mem::take(&mut self.sqlite_versions);
+        let sqlite_state = std::mem::take(&mut self.sqlite_state);
         let mysql_states = std::mem::take(&mut self.mysql_states);
         let postgres_runtime = Arc::clone(&self.postgres_runtime);
         let shutdown = self.shutdown.clone();
@@ -110,7 +110,7 @@ impl DbGuardSubsystem {
             let mut worker = DbGuardSubsystem {
                 healthy: true,
                 last_failure: None,
-                sqlite_versions,
+                sqlite_state,
                 mysql_states,
                 postgres_runtime,
                 shutdown,
@@ -120,17 +120,17 @@ impl DbGuardSubsystem {
                 result,
                 worker.healthy,
                 worker.last_failure,
-                worker.sqlite_versions,
+                worker.sqlite_state,
                 worker.mysql_states,
             )
         })
         .await;
 
         match tick_result {
-            Ok((result, healthy, last_failure, sqlite_versions, mysql_states)) => {
+            Ok((result, healthy, last_failure, sqlite_state, mysql_states)) => {
                 self.healthy = healthy;
                 self.last_failure = last_failure;
-                self.sqlite_versions = sqlite_versions;
+                self.sqlite_state = sqlite_state;
                 self.mysql_states = mysql_states;
                 if let Err(err) = result {
                     self.healthy = false;
@@ -272,7 +272,7 @@ impl DbGuardSubsystem {
         tracing::trace!("db_guard tick via {} engine", guard.engine);
         match guard.engine {
             DbGuardEngine::Sqlite => {
-                sqlite::tick_sqlite_guard(ctx, guard, &mut self.sqlite_versions)
+                sqlite::tick_sqlite_guard(ctx, guard, &mut self.sqlite_state)
             }
             DbGuardEngine::Postgres => postgres::tick_postgres_guard(
                 &self.postgres_runtime,
@@ -485,7 +485,7 @@ mod tests {
         let sub = DbGuardSubsystem::default();
         assert!(sub.healthy);
         assert!(sub.last_failure.is_none());
-        assert!(sub.sqlite_versions.is_empty());
+        assert!(sub.sqlite_state.versions.is_empty());
         assert!(sub.mysql_states.is_empty());
         assert!(sub.shutdown.is_none());
     }

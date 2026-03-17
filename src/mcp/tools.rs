@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::db::{LedgerEventType, LedgerSeverity, LedgerSource};
-use crate::event_ledger::{new_event, EventLedger};
+use crate::event_ledger::new_event;
 use crate::events::publish_event;
 use crate::project_service::RestoreProjectError;
 use crate::resolve::{self, ResolveError};
@@ -385,12 +385,7 @@ fn handle_pre_notify_tool_call(
     event.path = args.path;
     event.detail = Some(format!("action={}", args.action));
 
-    let database = context.database();
-    let ledger = if let Some(tx) = context.event_tx() {
-        EventLedger::new(database.clone()).with_event_publisher(tx)
-    } else {
-        EventLedger::new(database)
-    };
+    let ledger = context.event_ledger();
     let event_id = ledger
         .append(&event)
         .map_err(|e| McpToolError::internal(e.to_string()))?;

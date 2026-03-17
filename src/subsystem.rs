@@ -164,6 +164,7 @@ impl SubsystemManager {
                 .restart_times
                 .retain(|t| now.duration_since(*t) <= self.restart_window);
             runner.restart_times.push(now);
+            #[allow(clippy::cast_possible_truncation)] // max_restarts is a small config value; usize >= 16 bits
             if runner.restart_times.len() > self.max_restarts as usize {
                 tracing::error!(
                     "Subsystem '{}' exceeded restart threshold ({} in {:?}), leaving disabled",

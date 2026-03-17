@@ -8,10 +8,16 @@ use super::recovery;
 use crate::event_ledger::new_event;
 use crate::subsystem::DbGuardContext;
 
+/// Per-guard version tracking for SQLite data_version polling.
+#[derive(Debug, Clone, Default)]
+pub struct SqliteGuardState {
+    pub versions: HashMap<String, i64>,
+}
+
 pub fn tick_sqlite_guard(
     ctx: &DbGuardContext,
     guard: &DbGuardEntry,
-    versions: &mut HashMap<String, i64>,
+    state: &mut SqliteGuardState,
 ) -> Result<()> {
     let path = normalize_sqlite_path(&guard.connection_ref);
 
@@ -27,8 +33,8 @@ pub fn tick_sqlite_guard(
     event.path = Some(path.clone());
     event.detail = Some(detail);
 
-    let prev_version = versions.get(&guard.name).copied();
-    versions.insert(guard.name.clone(), data_version);
+    let prev_version = state.versions.get(&guard.name).copied();
+    state.versions.insert(guard.name.clone(), data_version);
 
     if prev_version.is_some() && prev_version != Some(data_version) {
         event.event_type = crate::db::LedgerEventType::SqliteDataChanged;

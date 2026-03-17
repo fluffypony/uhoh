@@ -6,6 +6,7 @@ use tokio::sync::broadcast;
 use crate::ai::SidecarManager;
 use crate::config::Config;
 use crate::db::Database;
+use crate::event_ledger::EventLedger;
 use crate::events::ServerEvent;
 use crate::restore::{RestoreCoordinator, RestoreRuntime};
 use crate::snapshot::{SnapshotRuntime, SnapshotSettings};
@@ -77,6 +78,15 @@ impl RuntimeBundle {
 
     pub fn restore_runtime(&self) -> RestoreRuntime {
         self.0.restore_runtime.clone()
+    }
+
+    pub fn event_ledger(&self) -> EventLedger {
+        let ledger = EventLedger::new(self.0.database.clone());
+        if let Some(ref tx) = self.0.event_tx {
+            ledger.with_event_publisher(tx.clone())
+        } else {
+            ledger
+        }
     }
 
     pub fn snapshot_runtime(&self) -> SnapshotRuntime {

@@ -357,9 +357,8 @@ pub fn read_process_start_ticks(pid: u32) -> Option<u64> {
         use winapi::um::processthreadsapi::{GetProcessTimes, OpenProcess};
         use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
 
-        // Initialize FILETIME structs with safe zero-valued struct literals instead
-        // of mem::zeroed(). FILETIME contains only two u32 fields, so this is
-        // equivalent but requires no unsafe block for initialization.
+        // Initialize FILETIME structs with safe zero-valued struct literals.
+        // FILETIME contains only two u32 fields, so all-zeroes is valid.
         let mut creation = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
         let mut exit_time = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
         let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };

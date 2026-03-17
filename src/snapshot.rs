@@ -591,8 +591,10 @@ fn record_symlink_entry(
             );
             if bytes_written > 0 {
                 #[allow(clippy::cast_possible_wrap)] // blob sizes won't exceed i64::MAX
-                // Blob byte counter is a non-critical stats cache; drop the error rather than fail the snapshot.
-                let _ = ctx.database.add_blob_bytes(bytes_written as i64);
+                // Blob byte counter is a non-critical stats cache; log and drop the error rather than fail the snapshot.
+                if let Err(e) = ctx.database.add_blob_bytes(bytes_written as i64) {
+                    tracing::debug!("Non-critical: failed to update blob byte counter: {e}");
+                }
             }
         }
         Err(err) => {
@@ -660,8 +662,10 @@ fn record_file_entry(
             );
             if bytes_written > 0 {
                 #[allow(clippy::cast_possible_wrap)] // blob sizes won't exceed i64::MAX
-                // Blob byte counter is a non-critical stats cache; drop the error rather than fail the snapshot.
-                let _ = ctx.database.add_blob_bytes(bytes_written as i64);
+                // Blob byte counter is a non-critical stats cache; log and drop the error rather than fail the snapshot.
+                if let Err(e) = ctx.database.add_blob_bytes(bytes_written as i64) {
+                    tracing::debug!("Non-critical: failed to update blob byte counter: {e}");
+                }
             }
         }
         Err(err) => {
