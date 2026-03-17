@@ -124,3 +124,150 @@ pub fn cmd_list_operations(database: &Database, project: &ProjectEntry) -> Resul
     }
     Ok(())
 }
+
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn setup() -> (Database, ProjectEntry, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let db = Database::open(&tmp.path().join("test.db")).unwrap();
+        db.add_project("proj1", "/fake/project").unwrap();
+        let project = db.get_project("proj1").unwrap().unwrap();
+        (db, project, tmp)
+    }
+
+    // ── cmd_mark ──
+
+    #[test]
+    fn cmd_mark_creates_operation() {
+        let (db, project, _tmp) = setup();
+        cmd_mark(&db, &project, "first-op").unwrap();
+
+        let active = db.get_active_operation(&project.hash).unwrap();
+        assert!(active.is_some(), "should have an active operation");
+        assert_eq!(active.unwrap().label, "first-op");
+    }
+
+    #[test]
+    fn cmd_mark_closes_previous_active_operation() {
+        let (db, project, _tmp) = setup();
+        cmd_mark(&db, &project, "op-1").unwrap();
+        cmd_mark(&db, &project, "op-2").unwrap();
+
+        // op-1 should now be closed (completed)
+        let ops = db.list_operations(&project.hash).unwrap();
+        assert_eq!(ops.len(), 2);
+
+        // The active one should be op-2
+        let active = db.get_active_operation(&project.hash).unwrap().unwrap();
+        assert_eq!(active.label, "op-2");
+
+        // op-1 should be completed (ended_at is set)
+        let op1 = ops.iter().find(|o| o.label == "op-1").unwrap();
+        assert!(op1.ended_at.is_some(), "op-1 should be closed");
+    }
+
+    #[test]
+    fn cmd_mark_sets_first_snapshot_id() {
+        let (db, project, _tmp) = setup();
+        cmd_mark(&db, &project, "snap-test").unwrap();
+
+        // When there are no snapshots, first_snapshot_id should be set to 0
+        let ops = db.list_operations(&project.hash).unwrap();
+        assert_eq!(ops.len(), 1);
+        // first_snapshot_id should be set (0 maps to Some(0))
+        assert_eq!(ops[0].first_snapshot_id, Some(0));
+    }
+
+    #[test]
+    fn cmd_mark_multiple_successive_marks() {
+        let (db, project, _tmp) = setup();
+        cmd_mark(&db, &project, "a").unwrap();
+        cmd_mark(&db, &project, "b").unwrap();
+        cmd_mark(&db, &project, "c").unwrap();
+
+        let ops = db.list_operations(&project.hash).unwrap();
+        assert_eq!(ops.len(), 3);
+
+        // Only the latest should be active
+        let active_count = ops.iter().filter(|o| o.ended_at.is_none()).count();
+        assert_eq!(active_count, 1, "exactly one operation should be active");
+        assert_eq!(ops[0].label, "c"); // newest first
+    }
+
+    // ── cmd_list_operations ──
+
+    #[test]
+    fn cmd_list_operations_empty() {
+        let (db, project, _tmp) = setup();
+        // Should succeed without error when no operations exist
+        cmd_list_operations(&db, &project).unwrap();
+    }
+
+    #[test]
+    fn cmd_list_operations_with_data() {
+        let (db, project, _tmp) = setup();
+        cmd_mark(&db, &project, "deploy-v1").unwrap();
+        cmd_mark(&db, &project, "deploy-v2").unwrap();
+        // Should succeed without error
+        cmd_list_operations(&db, &project).unwrap();
+    }
+
+    #[test]
+    fn cmd_list_operations_shows_completed_and_active() {
+        let (db, project, _tmp) = setup();
+        cmd_mark(&db, &project, "done-op").unwrap();
+        cmd_mark(&db, &project, "active-op").unwrap();
+
+        let ops = db.list_operations(&project.hash).unwrap();
+        let completed = ops.iter().find(|o| o.label == "done-op").unwrap();
+        let active = ops.iter().find(|o| o.label == "active-op").unwrap();
+
+        assert!(completed.ended_at.is_some());
+        assert!(active.ended_at.is_none());
+
+        // cmd_list_operations should not error
+        cmd_list_operations(&db, &project).unwrap();
+    }
+
+    // ── cmd_undo (limited: only test the "no completed operations" path) ──
+
+    #[test]
+    fn cmd_undo_fails_when_no_completed_operations() {
+        let (db, project, _tmp) = setup();
+        let uhoh_dir = _tmp.path().join(".uhoh");
+        std::fs::create_dir_all(&uhoh_dir).unwrap();
+
+        // With no operations at all, undo should fail
+        let result = cmd_undo(&uhoh_dir, &db, &project);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("No completed operations"),
+            "unexpected error: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn cmd_undo_closes_active_op_before_failing_with_no_completed() {
+        let (db, project, _tmp) = setup();
+        let uhoh_dir = _tmp.path().join(".uhoh");
+        std::fs::create_dir_all(&uhoh_dir).unwrap();
+
+        // Mark an operation (creates an active, uncompleted op)
+        db.create_operation(&project.hash, "active-only").unwrap();
+
+        // cmd_undo should close the active op, then fail because the now-closed
+        // op has first_snapshot_id=0 which means config loading will be attempted.
+        // Since there's no config.toml, this will error -- but the active op
+        // should have been closed before that point.
+        let _result = cmd_undo(&uhoh_dir, &db, &project);
+
+        // The previously active operation should now be closed
+        let active = db.get_active_operation(&project.hash).unwrap();
+        assert!(active.is_none(), "active op should have been closed");
+    }
+}
