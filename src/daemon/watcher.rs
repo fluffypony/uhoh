@@ -291,4 +291,55 @@ mod tests {
         fn assert_sender_type(_: tokio::sync::mpsc::Sender<WatchEvent>) {}
         let _ = assert_sender_type;
     }
+
+    #[test]
+    fn watcher_runtime_fields_initialize_correctly() {
+        // WatcherRuntime initializes with zero recover attempts and no pending recovery
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let paths = vec![temp.path().to_path_buf()];
+        let (tx, _rx) = mpsc::channel(16);
+
+        let result = rt.block_on(async {
+            WatcherRuntime::start(&paths, tx)
+        });
+        let runtime = result.unwrap();
+        assert_eq!(runtime.recover_attempts, 0);
+        assert!(runtime.next_recover_at.is_none());
+        assert!(!runtime.was_restoring);
+    }
+
+    #[test]
+    fn watcher_runtime_start_watches_existing_paths() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let paths = vec![temp.path().to_path_buf()];
+        let (tx, _rx) = mpsc::channel(16);
+
+        let result = rt.block_on(async {
+            WatcherRuntime::start(&paths, tx)
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn watcher_runtime_start_handles_nonexistent_paths() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let paths = vec![PathBuf::from("/nonexistent/path/that/does/not/exist")];
+        let (tx, _rx) = mpsc::channel(16);
+
+        // Should succeed (nonexistent paths are skipped with a warning, not failed)
+        let result = rt.block_on(async {
+            WatcherRuntime::start(&paths, tx)
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn binary_change_watcher_creates_receiver() {
+        let temp = tempfile::tempdir().unwrap();
+        let watcher = BinaryChangeWatcher::start(temp.path());
+        // Receiver should be available and not immediately closed
+        assert!(!watcher.event_rx.is_closed());
+    }
 }

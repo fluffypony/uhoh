@@ -687,7 +687,7 @@ pub fn scrub_error_message(msg: &str) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
-    use super::scrub_error_message;
+    use super::*;
 
     fn build_dsn(scheme: &str, user: &str, password: &str, host: &str, db: &str) -> String {
         let mut dsn = String::new();
@@ -729,5 +729,175 @@ mod tests {
         assert!(!scrubbed.contains(&format!(":{mysql_password}@")));
         assert!(scrubbed.contains("postgresql://carol@db.local/app"));
         assert!(scrubbed.contains("mysql://dave@mysql.local/shop"));
+    }
+
+    // ── parse_pgpass_fields tests ──
+
+    #[test]
+    fn pgpass_simple_five_fields() {
+        let fields = parse_pgpass_fields("localhost:5432:mydb:user:secret");
+        assert_eq!(fields, vec!["localhost", "5432", "mydb", "user", "secret"]);
+    }
+
+    #[test]
+    fn pgpass_escaped_colon_in_password() {
+        let fields = parse_pgpass_fields("host:5432:db:user:pass\\:word");
+        assert_eq!(fields, vec!["host", "5432", "db", "user", "pass:word"]);
+    }
+
+    #[test]
+    fn pgpass_escaped_backslash() {
+        let fields = parse_pgpass_fields("host:5432:db:user:pass\\\\word");
+        assert_eq!(fields, vec!["host", "5432", "db", "user", "pass\\word"]);
+    }
+
+    #[test]
+    fn pgpass_wildcard_fields() {
+        let fields = parse_pgpass_fields("*:*:*:*:secret");
+        assert_eq!(fields, vec!["*", "*", "*", "*", "secret"]);
+    }
+
+    #[test]
+    fn pgpass_fewer_than_five_fields_skipped() {
+        let fields = parse_pgpass_fields("host:5432:db");
+        assert_eq!(fields.len(), 3);
+    }
+
+    #[test]
+    fn pgpass_empty_password_field() {
+        let fields = parse_pgpass_fields("host:5432:db:user:");
+        assert_eq!(fields, vec!["host", "5432", "db", "user", ""]);
+    }
+
+    #[test]
+    fn pgpass_multiple_escaped_colons() {
+        let fields = parse_pgpass_fields("h\\:ost:54\\:32:d\\:b:u\\:ser:p\\:ass");
+        assert_eq!(fields, vec!["h:ost", "54:32", "d:b", "u:ser", "p:ass"]);
+    }
+
+    // ── scrub_dsn tests ──
+
+    #[test]
+    fn scrub_dsn_removes_password_from_url() {
+        let scrubbed = scrub_dsn("postgres://user:secret@localhost/db");
+        assert!(!scrubbed.contains("secret"));
+        assert!(scrubbed.contains("postgres://user@localhost/db"));
+    }
+
+    #[test]
+    fn scrub_dsn_no_password() {
+        let scrubbed = scrub_dsn("postgres://user@localhost/db");
+        assert!(scrubbed.contains("postgres://user@localhost/db"));
+    }
+
+    #[test]
+    fn scrub_dsn_removes_password_query_param() {
+        let scrubbed = scrub_dsn("postgres://user@localhost/db?password=secret&sslmode=require");
+        assert!(!scrubbed.contains("secret"));
+        assert!(scrubbed.contains("sslmode=require"));
+    }
+
+    #[test]
+    fn scrub_dsn_keyword_value_dsn() {
+        let scrubbed = scrub_dsn("host=localhost dbname=mydb password=secret user=admin");
+        assert!(!scrubbed.contains("secret"));
+        assert!(!scrubbed.contains("password="));
+        assert!(scrubbed.contains("host=localhost"));
+        assert!(scrubbed.contains("user=admin"));
+    }
+
+    // ── encrypt/decrypt roundtrip tests ──
+    // These tests mutate UHOH_MASTER_KEY, which is process-global. Serialize access.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_with_master_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let hex_key = "a".repeat(64);
+        std::env::set_var("UHOH_MASTER_KEY", &hex_key);
+
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(
+            "postgres://localhost/test".to_string(),
+            CredentialMaterial {
+                username: Some("admin".to_string()),
+                password: Some("s3cret".to_string()),
+            },
+        );
+
+        let encrypted = encrypt_credentials_map(&map).unwrap();
+        let decrypted = decrypt_credentials_map(&encrypted).unwrap();
+
+        assert_eq!(decrypted.len(), 1);
+        let entry = decrypted.get("postgres://localhost/test").unwrap();
+        assert_eq!(entry.username.as_deref(), Some("admin"));
+        assert_eq!(entry.password.as_deref(), Some("s3cret"));
+
+        std::env::remove_var("UHOH_MASTER_KEY");
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_empty_map() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let hex_key = "b".repeat(64);
+        std::env::set_var("UHOH_MASTER_KEY", &hex_key);
+
+        let map = std::collections::BTreeMap::new();
+        let encrypted = encrypt_credentials_map(&map).unwrap();
+        let decrypted = decrypt_credentials_map(&encrypted).unwrap();
+        assert!(decrypted.is_empty());
+
+        std::env::remove_var("UHOH_MASTER_KEY");
+    }
+
+    #[test]
+    fn decrypt_rejects_malformed_payload() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let hex_key = "c".repeat(64);
+        std::env::set_var("UHOH_MASTER_KEY", &hex_key);
+
+        assert!(decrypt_credentials_map(b"too short").is_err());
+        assert!(decrypt_credentials_map(b"NOTMAGIC\x01\x00aaaaaaaaaaaaaaaa\x00\x00\x00\x00").is_err());
+
+        std::env::remove_var("UHOH_MASTER_KEY");
+    }
+
+    // ── decode_hex_key tests ──
+
+    #[test]
+    fn decode_hex_key_valid() {
+        let hex = "0123456789abcdef".repeat(4);
+        assert!(decode_hex_key(&hex).is_some());
+    }
+
+    #[test]
+    fn decode_hex_key_wrong_length() {
+        assert!(decode_hex_key("abcdef").is_none());
+    }
+
+    #[test]
+    fn decode_hex_key_invalid_hex() {
+        let bad = "g".repeat(64);
+        assert!(decode_hex_key(&bad).is_none());
+    }
+
+    // ── credential_source + keyring_status tests ──
+
+    #[test]
+    fn credential_source_labels() {
+        assert_eq!(CredentialSource::Environment.label(), "environment");
+        assert_eq!(CredentialSource::EncryptedFile.label(), "encrypted_file");
+        assert_eq!(CredentialSource::Keyring.label(), "keyring");
+        assert_eq!(CredentialSource::PgPass.label(), "pgpass");
+        assert_eq!(CredentialSource::None.label(), "none");
+    }
+
+    #[test]
+    fn keyring_status_degraded() {
+        assert!(!KeyringStatus::NotChecked.is_degraded());
+        assert!(!KeyringStatus::Available.is_degraded());
+        assert!(!KeyringStatus::NoEntry.is_degraded());
+        assert!(KeyringStatus::TimedOut.is_degraded());
+        assert!(KeyringStatus::Unavailable("err".to_string()).is_degraded());
     }
 }

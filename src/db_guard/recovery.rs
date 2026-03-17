@@ -534,7 +534,7 @@ fn timestamp_tag() -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
-    use super::load_or_create_machine_key;
+    use super::*;
 
     #[test]
     fn load_or_create_machine_key_persists_and_reuses_master_key_file() {
@@ -545,5 +545,128 @@ mod tests {
         assert_eq!(first, second);
         let raw = std::fs::read_to_string(temp.path().join("master.key")).expect("master.key");
         assert_eq!(raw.trim(), hex::encode(first));
+    }
+
+    // ── encrypt/decrypt roundtrip ──
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_with_machine_key() {
+        let temp = tempfile::tempdir().unwrap();
+        // Ensure machine key exists
+        load_or_create_machine_key(temp.path()).unwrap();
+
+        let plaintext = b"hello, recovery artifacts";
+        let encrypted = maybe_encrypt(plaintext, temp.path()).unwrap();
+
+        // Encrypted payload should start with magic
+        assert!(encrypted.starts_with(ENC_MAGIC));
+        assert_ne!(&encrypted[ENC_V2_HEADER_LEN..], plaintext);
+
+        let decrypted = decrypt_recovery_payload(&encrypted, temp.path()).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn decrypt_rejects_invalid_magic() {
+        let temp = tempfile::tempdir().unwrap();
+        load_or_create_machine_key(temp.path()).unwrap();
+        let bad = b"BADMAGIC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        assert!(decrypt_recovery_payload(bad, temp.path()).is_err());
+    }
+
+    // ── wrap_in_transaction ──
+
+    #[test]
+    fn wrap_in_transaction_adds_begin_commit() {
+        let sql = "CREATE TABLE t (id INT);";
+        let wrapped = wrap_in_transaction(sql);
+        assert!(wrapped.starts_with("BEGIN;\n"));
+        assert!(wrapped.ends_with("COMMIT;\n"));
+    }
+
+    #[test]
+    fn wrap_in_transaction_preserves_existing_transaction() {
+        let sql = "BEGIN;\nCREATE TABLE t (id INT);\nCOMMIT;";
+        let wrapped = wrap_in_transaction(sql);
+        assert_eq!(wrapped.matches("BEGIN;").count(), 1);
+        assert_eq!(wrapped.matches("COMMIT;").count(), 1);
+    }
+
+    // ── enforce_max_payload_size ──
+
+    #[test]
+    fn enforce_max_payload_size_allows_within_limit() {
+        let payload = vec![0u8; 100];
+        assert!(enforce_max_payload_size(&payload, 1, "test").is_ok());
+    }
+
+    #[test]
+    fn enforce_max_payload_size_rejects_oversized() {
+        let payload = vec![0u8; 2 * 1024 * 1024]; // 2 MiB
+        assert!(enforce_max_payload_size(&payload, 1, "test").is_err());
+    }
+
+    #[test]
+    fn enforce_max_payload_size_rejects_zero_limit() {
+        let payload = vec![0u8; 1];
+        assert!(enforce_max_payload_size(&payload, 0, "test").is_err());
+    }
+
+    // ── parse_postgres_connection_ref ──
+
+    #[test]
+    fn parse_postgres_ref_standard() {
+        let parsed = parse_postgres_connection_ref("postgres://admin@db.example.com:5433/mydb").unwrap();
+        assert_eq!(parsed.host, "db.example.com");
+        assert_eq!(parsed.port, 5433);
+        assert_eq!(parsed.user, "admin");
+        assert_eq!(parsed.database, "mydb");
+    }
+
+    #[test]
+    fn parse_postgres_ref_defaults() {
+        let parsed = parse_postgres_connection_ref("postgres:///").unwrap();
+        assert_eq!(parsed.host, "localhost");
+        assert_eq!(parsed.port, 5432);
+        assert_eq!(parsed.user, "postgres");
+    }
+
+    #[test]
+    fn parse_postgres_ref_rejects_mysql_scheme() {
+        assert!(parse_postgres_connection_ref("mysql://localhost/db").is_err());
+    }
+
+    // ── sqlite_schema_dump ──
+
+    #[test]
+    fn sqlite_schema_dump_returns_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("test.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);").unwrap();
+        drop(conn);
+
+        let schema = sqlite_schema_dump(&db_path).unwrap();
+        assert!(schema.contains("CREATE TABLE users"));
+        assert!(schema.starts_with("BEGIN;\n"));
+        assert!(schema.ends_with("COMMIT;\n"));
+    }
+
+    // ── cleanup_retention ──
+
+    #[test]
+    fn cleanup_retention_keeps_recent_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let recent = temp.path().join("recent.dat");
+        std::fs::write(&recent, "fresh").unwrap();
+
+        cleanup_retention(temp.path(), 30).unwrap();
+        assert!(recent.exists(), "recent files should survive cleanup");
+    }
+
+    #[test]
+    fn cleanup_retention_handles_empty_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(cleanup_retention(temp.path(), 30).is_ok());
     }
 }
