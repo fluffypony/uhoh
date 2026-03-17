@@ -14,6 +14,22 @@ pub enum ResolveError {
     Internal(#[from] anyhow::Error),
 }
 
+impl ResolveError {
+    /// Classify this error into a transport-agnostic kind.
+    pub fn kind(&self) -> crate::project_service::ErrorKind {
+        match self {
+            Self::NotFound(_) => crate::project_service::ErrorKind::NotFound,
+            Self::Ambiguous(_) => crate::project_service::ErrorKind::InvalidInput,
+            Self::Internal(_) => crate::project_service::ErrorKind::Internal,
+        }
+    }
+
+    /// Get the human-readable message for this error.
+    pub fn message(&self) -> String {
+        self.to_string()
+    }
+}
+
 /// Resolve a project from an explicit path/hash target.
 ///
 /// This variant avoids implicit current-directory behavior so server handlers can

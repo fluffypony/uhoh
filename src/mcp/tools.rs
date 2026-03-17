@@ -149,6 +149,16 @@ impl McpToolError {
             data: Some(json!({ "category": "backend" })),
         }
     }
+
+    pub fn from_error_kind(kind: crate::project_service::ErrorKind, message: String) -> Self {
+        use crate::project_service::ErrorKind;
+        match kind {
+            ErrorKind::NotFound => Self::not_found(message),
+            ErrorKind::InvalidInput => Self::invalid_params(message),
+            ErrorKind::Conflict => Self::conflict(message),
+            ErrorKind::Internal => Self::internal(message),
+        }
+    }
 }
 
 /// Shared MCP tool definitions used by both HTTP and STDIO transports.
@@ -402,20 +412,11 @@ fn parse_tool_args<T: DeserializeOwned>(value: Value) -> Result<T, McpToolError>
 }
 
 fn classify_lookup_error(err: ResolveError) -> McpToolError {
-    match err {
-        ResolveError::NotFound(msg) => McpToolError::not_found(msg),
-        ResolveError::Ambiguous(msg) => McpToolError::invalid_params(msg),
-        ResolveError::Internal(err) => McpToolError::internal(err.to_string()),
-    }
+    McpToolError::from_error_kind(err.kind(), err.message())
 }
 
 fn classify_restore_error(err: RestoreProjectError) -> McpToolError {
-    match err {
-        RestoreProjectError::NotFound(message) => McpToolError::not_found(message),
-        RestoreProjectError::Conflict(message) => McpToolError::conflict(message),
-        RestoreProjectError::InvalidInput(message) => McpToolError::invalid_params(message),
-        RestoreProjectError::Internal(err) => McpToolError::internal(err.to_string()),
-    }
+    McpToolError::from_error_kind(err.kind(), err.message())
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

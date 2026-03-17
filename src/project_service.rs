@@ -7,6 +7,17 @@ use crate::db::{Database, ProjectEntry};
 use crate::events::ServerEvent;
 use crate::restore::{RestoreBusyError, RestoreRuntime};
 
+/// Shared error classification for domain errors across transport layers.
+/// Both REST API and MCP transports map domain errors through this enum
+/// to avoid duplicating variant→status classification logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    NotFound,
+    InvalidInput,
+    Conflict,
+    Internal,
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SnapshotCreateResult {
@@ -20,6 +31,23 @@ pub enum RestoreProjectError {
     Conflict(String),
     InvalidInput(String),
     Internal(anyhow::Error),
+}
+
+impl RestoreProjectError {
+    /// Classify this error into a transport-agnostic kind.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::NotFound(_) => ErrorKind::NotFound,
+            Self::Conflict(_) => ErrorKind::Conflict,
+            Self::InvalidInput(_) => ErrorKind::InvalidInput,
+            Self::Internal(_) => ErrorKind::Internal,
+        }
+    }
+
+    /// Get the human-readable message for this error.
+    pub fn message(&self) -> String {
+        self.to_string()
+    }
 }
 
 impl fmt::Display for RestoreProjectError {

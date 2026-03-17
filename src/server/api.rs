@@ -80,6 +80,16 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn from_error_kind(kind: crate::project_service::ErrorKind, message: String) -> Self {
+        use crate::project_service::ErrorKind;
+        match kind {
+            ErrorKind::NotFound => Self::not_found(message),
+            ErrorKind::InvalidInput => Self::invalid_input(message),
+            ErrorKind::Conflict => Self::conflict(message),
+            ErrorKind::Internal => Self::internal(message),
+        }
+    }
+
     #[allow(clippy::needless_pass_by_value)]
     fn invalid_input(message: impl ToString) -> Self {
         Self {
@@ -131,22 +141,13 @@ impl From<serde_json::Error> for ApiError {
 
 impl From<RestoreProjectError> for ApiError {
     fn from(err: RestoreProjectError) -> Self {
-        match err {
-            RestoreProjectError::NotFound(message) => ApiError::not_found(message),
-            RestoreProjectError::Conflict(message) => ApiError::conflict(message),
-            RestoreProjectError::InvalidInput(message) => ApiError::invalid_input(message),
-            RestoreProjectError::Internal(err) => ApiError::internal(err),
-        }
+        ApiError::from_error_kind(err.kind(), err.message())
     }
 }
 
 impl From<ResolveError> for ApiError {
     fn from(err: ResolveError) -> Self {
-        match err {
-            ResolveError::NotFound(message) => ApiError::not_found(message),
-            ResolveError::Ambiguous(message) => ApiError::invalid_input(message),
-            ResolveError::Internal(err) => ApiError::internal(err),
-        }
+        ApiError::from_error_kind(err.kind(), err.message())
     }
 }
 
