@@ -155,9 +155,6 @@ pub fn compute_event_chain_hash_with_id_raw(
 impl Database {
     /// Remove event ledger entries older than `ttl_days` to prevent unbounded growth.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn prune_event_ledger_ttl(&self, ttl_days: i64) -> Result<u64> {
         let conn = self.conn()?;
         let cutoff = chrono::Utc::now() - chrono::Duration::days(ttl_days);
@@ -270,9 +267,6 @@ impl Database {
 
     /// Verify the integrity of the event ledger chain, returning the count and any broken entry IDs.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn verify_event_ledger_chain(&self) -> Result<(usize, Vec<i64>)> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -325,9 +319,6 @@ impl Database {
 
     /// Fetch recent event ledger entries matching the given filters, newest first.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn event_ledger_recent(
         &self,
         filters: LedgerRecentFilters<'_>,
@@ -353,9 +344,6 @@ impl Database {
 
     /// Fetch a single event ledger entry by ID.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn event_ledger_get(&self, id: i64) -> Result<Option<EventLedgerEntry>> {
         let conn = self.conn()?;
         conn.query_row(
@@ -400,9 +388,6 @@ impl Database {
 
     /// Mark a single event ledger entry as resolved.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn event_ledger_mark_resolved(&self, id: i64) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(

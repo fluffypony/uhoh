@@ -6,10 +6,6 @@ use super::{Database, ProjectEntry};
 
 impl Database {
     /// Register a new project with its hash and current filesystem path.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn add_project(&self, hash: &str, path: &str) -> Result<()> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -21,10 +17,6 @@ impl Database {
     }
 
     /// Fetch a project by its exact hash.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn get_project(&self, hash: &str) -> Result<Option<ProjectEntry>> {
         let conn = self.conn()?;
         conn.query_row(
@@ -43,10 +35,6 @@ impl Database {
     }
 
     /// Find a project by its current filesystem path.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn find_project_by_path(&self, path: &Path) -> Result<Option<ProjectEntry>> {
         let conn = self.conn()?;
         let path_str = path.to_string_lossy();
@@ -66,10 +54,6 @@ impl Database {
     }
 
     /// Find a project whose hash starts with the given prefix.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails or the prefix matches more than one project.
     pub fn find_project_by_hash_prefix(&self, prefix: &str) -> Result<Option<ProjectEntry>> {
         let conn = self.conn()?;
         // Escape SQL wildcards in user-provided prefix using backslash + ESCAPE clause
@@ -107,10 +91,6 @@ impl Database {
     }
 
     /// Update the recorded filesystem path for a project.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation or transaction commit fails.
     pub fn update_project_path(&self, hash: &str, new_path: &str) -> Result<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -123,10 +103,6 @@ impl Database {
     }
 
     /// Delete a project and its associated search index entries.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn remove_project(&self, hash: &str) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -138,10 +114,6 @@ impl Database {
     }
 
     /// List all registered projects ordered by creation time.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn list_projects(&self) -> Result<Vec<ProjectEntry>> {
         let conn = self.conn()?;
         let mut stmt = conn

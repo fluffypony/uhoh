@@ -18,10 +18,6 @@ fn map_search_result_row(row: &Row) -> rusqlite::Result<SearchResult> {
 
 impl Database {
     /// Persist an AI-generated summary on a snapshot and update the search index.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn set_ai_summary(&self, snapshot_rowid: i64, summary: &str) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -33,10 +29,6 @@ impl Database {
     }
 
     /// Add a snapshot to the full-text search index.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn index_snapshot_for_search(
         &self,
         snapshot_rowid: i64,
@@ -56,10 +48,6 @@ impl Database {
     }
 
     /// Replace the AI summary for a snapshot already in the search index.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn update_search_index_summary(&self, snapshot_rowid: i64, ai_summary: &str) -> Result<()> {
         let conn = self.conn()?;
         let row: Option<(String, String, String, String)> = conn
@@ -86,10 +74,6 @@ impl Database {
     }
 
     /// Search snapshots using a full-text query, optionally scoped to a project.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn search_snapshots(
         &self,
         query: &str,

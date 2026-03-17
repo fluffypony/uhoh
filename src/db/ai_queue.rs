@@ -5,10 +5,6 @@ use super::{checked_usize_u64, Database, PendingAiSummaryRow};
 
 impl Database {
     /// Enqueue a snapshot for deferred AI summary generation (idempotent per rowid).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn enqueue_ai_summary(&self, snapshot_rowid: i64, project_hash: &str) -> Result<()> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -21,10 +17,6 @@ impl Database {
     }
 
     /// Fetch up to `limit` oldest pending summaries across all projects.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn dequeue_pending_ai(&self, limit: u32) -> Result<Vec<PendingAiSummaryRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -49,10 +41,6 @@ impl Database {
     }
 
     /// Remove a pending AI summary entry by snapshot rowid.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn delete_pending_ai(&self, snapshot_rowid: i64) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -63,10 +51,6 @@ impl Database {
     }
 
     /// Increment the attempt counter for a pending AI summary and return the new count.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn increment_ai_attempts(&self, snapshot_rowid: i64) -> Result<i64> {
         let conn = self.conn()?;
         conn.execute(
@@ -84,10 +68,6 @@ impl Database {
     }
 
     /// Remove queue entries older than `ttl_days` days.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn prune_ai_queue_ttl(&self, ttl_days: i64) -> Result<u64> {
         let conn = self.conn()?;
         let cutoff = chrono::Utc::now() - chrono::Duration::days(ttl_days);

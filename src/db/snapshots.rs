@@ -116,9 +116,6 @@ pub fn create_snapshot_tx(
 impl Database {
     /// Set or clear the pinned flag on a snapshot.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn pin_snapshot(&self, rowid: i64, pinned: bool) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -130,9 +127,6 @@ impl Database {
 
     /// Delete old snapshots (used by compaction)
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn delete_snapshot(&self, rowid: i64) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -145,9 +139,6 @@ impl Database {
 
     /// Find the snapshot just before a given `snapshot_id`
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn snapshot_before(
         &self,
         project_hash: &str,
@@ -182,18 +173,12 @@ impl Database {
 
     /// List snapshots oldest-first for pruning
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn list_snapshots_oldest_first(&self, project_hash: &str) -> Result<Vec<SnapshotRow>> {
         self.list_snapshots_with_order(project_hash, "ORDER BY s.snapshot_id ASC")
     }
 
     /// Total size of stored blobs referenced by a project's snapshots (approximate, counts duplicates)
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn total_blob_size_for_project(&self, project_hash: &str) -> Result<u64> {
         let conn = self.conn()?;
         let size: i64 = conn.query_row(
@@ -211,9 +196,6 @@ impl Database {
 
     /// Estimate the total size of stored blobs referenced by a single snapshot
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn estimate_snapshot_blob_size(&self, snapshot_rowid: i64) -> Result<u64> {
         let conn = self.conn()?;
         let size: i64 = conn.query_row(
@@ -275,9 +257,6 @@ impl Database {
 
     /// List all snapshots for a project, newest first.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn list_snapshots(&self, project_hash: &str) -> Result<Vec<SnapshotRow>> {
         self.list_snapshots_with_order(project_hash, "ORDER BY s.timestamp DESC, s.rowid DESC")
     }
@@ -319,9 +298,6 @@ impl Database {
 
     /// List snapshots for a project with pagination, newest first.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn list_snapshots_paginated(
         &self,
         project_hash: &str,
@@ -361,9 +337,6 @@ impl Database {
 
     /// List snapshot summaries for a project, optionally filtered by timestamp range.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn list_snapshot_summaries(
         &self,
         project_hash: &str,
@@ -469,9 +442,6 @@ impl Database {
 
     /// Lookup a snapshot by its internal rowid
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn get_snapshot_by_rowid(&self, rowid: i64) -> Result<Option<SnapshotRow>> {
         let conn = self.conn()?;
         conn.query_row(
@@ -500,9 +470,6 @@ impl Database {
 
     /// Count the number of snapshots for a project.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn snapshot_count(&self, project_hash: &str) -> Result<u64> {
         let conn = self.conn()?;
         let count: i64 = conn.query_row(
@@ -552,9 +519,6 @@ impl Database {
 
     /// Retrieve all file entries for a snapshot.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn get_snapshot_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -590,9 +554,6 @@ impl Database {
 
     /// Retrieve all deleted file entries for a snapshot.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn get_snapshot_deleted_files(&self, snapshot_rowid: i64) -> Result<Vec<FileEntryRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -624,9 +585,6 @@ impl Database {
 
     /// Get the most recent snapshot rowid for a project
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn latest_snapshot_rowid(&self, project_hash: &str) -> Result<Option<i64>> {
         let conn = self.conn()?;
         conn.query_row(
@@ -640,9 +598,6 @@ impl Database {
 
     /// Get file history: all snapshot entries for a given path, newest first
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn file_history(&self, project_hash: &str, file_path: &str) -> Result<Vec<FileHistoryRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -670,9 +625,6 @@ impl Database {
 
     /// All blob hashes referenced by any snapshot or event ledger entry
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn all_referenced_blob_hashes(&self) -> Result<std::collections::HashSet<String>> {
         let conn = self.conn()?;
         let mut set = std::collections::HashSet::new();
@@ -701,9 +653,6 @@ impl Database {
 
     /// Increment the cached blob bytes counter by delta (can be negative).
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn add_blob_bytes(&self, delta: i64) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -720,9 +669,6 @@ impl Database {
 
     /// Get the cached blob bytes total; returns 0 if missing.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn blob_bytes(&self) -> Result<u64> {
         let conn = self.conn()?;
         let v: i64 = conn
@@ -737,9 +683,6 @@ impl Database {
 
     /// Run incremental vacuum to reclaim free pages without exclusive lock.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
     pub fn vacuum(&self) -> Result<()> {
         let conn = self.conn()?;
         conn.execute_batch("PRAGMA incremental_vacuum(100);")?;
