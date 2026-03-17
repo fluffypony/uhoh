@@ -109,9 +109,11 @@ pub fn run_gc(uhoh_dir: &Path, database: &Database) -> Result<()> {
         }
         std::fs::remove_file(path)
             .with_context(|| format!("Failed to delete: {}", path.display()))?;
-        // Decrement cached blob bytes counter if available
+        // Decrement cached blob bytes counter — non-critical stats cache, log and continue on error.
         #[allow(clippy::cast_possible_wrap)] // sz is a file size from metadata, always within i64 range
-        let _ = database.add_blob_bytes(-(sz as i64));
+        if let Err(e) = database.add_blob_bytes(-(sz as i64)) {
+            tracing::debug!("Non-critical: failed to update blob byte counter during GC: {e}");
+        }
         bar.inc(1);
     }
     bar.finish_and_clear();
