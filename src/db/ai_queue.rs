@@ -63,7 +63,10 @@ impl Database {
                 params![snapshot_rowid],
                 |row| row.get(0),
             )
-            .unwrap_or(0);
+            .unwrap_or_else(|_| {
+                tracing::debug!("AI summary row for snapshot {snapshot_rowid} vanished between UPDATE and SELECT");
+                0
+            });
         Ok(attempts)
     }
 

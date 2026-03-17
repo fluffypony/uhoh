@@ -5,7 +5,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use rand::Rng;
+use rand::RngExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use subtle::ConstantTimeEq;

@@ -110,7 +110,7 @@ dunce = "1.0"
 content_inspector = "0.2"
 
 # Random bytes for marker generation
-rand = "0.9"
+rand = "0.10"
 
 # Hex encoding
 hex = "0.4"

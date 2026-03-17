@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rand::RngCore;
+use rand::Rng;
 use std::path::{Path, PathBuf};
 
 const MARKER_MAGIC: &[u8; 4] = b"UHOH";
