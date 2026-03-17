@@ -7,7 +7,10 @@ use std::path::Path;
 const COMPRESSION_MAGIC: &[u8; 12] = b"UHZS\x00ZSTD\x00v1";
 
 /// How a blob was stored in the CAS.
-/// Numeric values can be persisted in the DB if needed.
+///
+/// Shared between the CAS layer (which determines the method) and the DB layer
+/// (which persists it alongside snapshot file entries). The `repr(u8)` discriminants
+/// double as the on-disk DB encoding — see `to_db`/`from_db`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum StorageMethod {
@@ -17,15 +20,19 @@ pub enum StorageMethod {
 }
 
 impl StorageMethod {
-    #[must_use] 
+    #[must_use]
     pub fn is_recoverable(self) -> bool {
         !matches!(self, StorageMethod::None)
     }
-    #[must_use] 
+
+    /// Serialize to the integer representation used by the SQLite schema.
+    #[must_use]
     pub fn to_db(self) -> i64 {
         self as i64
     }
-    #[must_use] 
+
+    /// Deserialize from the integer representation used by the SQLite schema.
+    #[must_use]
     pub fn from_db(v: i64) -> Self {
         match v {
             1 => StorageMethod::Copy,
@@ -33,7 +40,8 @@ impl StorageMethod {
             _ => StorageMethod::None,
         }
     }
-    #[must_use] 
+
+    #[must_use]
     pub fn display_name(self) -> &'static str {
         match self {
             StorageMethod::None => "none",

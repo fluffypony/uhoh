@@ -27,6 +27,28 @@ struct FileToRestore {
     is_symlink: bool,
 }
 
+/// Drop-based guard that removes a staging directory on scope exit.
+/// Call `disarm()` after a successful restore to prevent cleanup.
+struct StagingCleanup(Option<std::path::PathBuf>);
+
+impl StagingCleanup {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for StagingCleanup {
+    fn drop(&mut self) {
+        if let Some(ref path) = self.0 {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RestoreOutcome {
@@ -375,9 +397,6 @@ pub(crate) fn apply_restore(
     let mut to_delete: Vec<String> = Vec::new();
     let mut to_restore: Vec<FileToRestore> = Vec::new();
 
-    let mut cleanup_staging: Option<std::path::PathBuf> = None;
-
-    let result = (|| -> Result<RestoreOutcome> {
         // Files to delete: in current manifest but not in target manifest
         if let Some(filter) = target_filter.as_ref() {
             if current_tracked.contains(filter) && !target_paths.contains(filter) {
@@ -507,7 +526,7 @@ pub(crate) fn apply_restore(
         let unique_suffix = format!("{}-{}", std::process::id(), nanos_i64);
         let restore_tmp = project_path.join(format!(".uhoh-restore-tmp-{unique_suffix}"));
         std::fs::create_dir_all(&restore_tmp)?;
-        cleanup_staging = Some(restore_tmp.clone());
+        let mut staging_guard = StagingCleanup::new(restore_tmp.clone());
 
         for f in &to_restore {
             let FileToRestore { path, hash, executable, is_symlink } = f;
@@ -594,36 +613,29 @@ pub(crate) fn apply_restore(
         }
 
         let _ = std::fs::remove_dir_all(&restore_tmp);
-        cleanup_staging = None;
+        staging_guard.disarm();
 
         remove_empty_dirs(project_path, project_path);
 
-        Ok(RestoreOutcome {
-            snapshot_id: snap_id_str.clone(),
-            dry_run: false,
-            applied: true,
-            files_restored: to_restore.len(),
-            files_deleted: to_delete.len(),
-            files_to_restore: to_restore
-                .iter()
-                .map(|f| f.path.to_string_lossy().to_string())
-                .collect(),
-            files_to_delete: to_delete
-                .iter()
-                .map(|path| {
-                    encoding::decode_relpath_to_os(path)
-                        .to_string_lossy()
-                        .to_string()
-                })
-                .collect(),
-        })
-    })();
-
-    if let Some(staging) = cleanup_staging {
-        let _ = std::fs::remove_dir_all(staging);
-    }
-
-    result
+    Ok(RestoreOutcome {
+        snapshot_id: snap_id_str.clone(),
+        dry_run: false,
+        applied: true,
+        files_restored: to_restore.len(),
+        files_deleted: to_delete.len(),
+        files_to_restore: to_restore
+            .iter()
+            .map(|f| f.path.to_string_lossy().to_string())
+            .collect(),
+        files_to_delete: to_delete
+            .iter()
+            .map(|path| {
+                encoding::decode_relpath_to_os(path)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect(),
+    })
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
