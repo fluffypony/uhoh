@@ -669,4 +669,88 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         assert!(cleanup_retention(temp.path(), 30).is_ok());
     }
+
+    // ── write_sqlite_baseline (public API) ──
+
+    #[test]
+    fn write_sqlite_baseline_creates_artifact_unencrypted() {
+        let uhoh_dir = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE TABLE t (id INT); INSERT INTO t VALUES (42);").unwrap();
+        drop(conn);
+
+        let info = write_sqlite_baseline(
+            uhoh_dir.path(), "my_guard", &db_path, false, 30, 100,
+        ).unwrap();
+
+        assert!(!info.path.is_empty());
+        assert!(!info.blake3.is_empty());
+        assert!(std::path::Path::new(&info.path).exists());
+    }
+
+    #[test]
+    fn write_sqlite_baseline_creates_artifact_encrypted() {
+        let uhoh_dir = tempfile::tempdir().unwrap();
+        load_or_create_machine_key(uhoh_dir.path()).unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE TABLE t (id INT);").unwrap();
+        drop(conn);
+
+        let info = write_sqlite_baseline(
+            uhoh_dir.path(), "enc_guard", &db_path, true, 30, 100,
+        ).unwrap();
+
+        // Encrypted artifact should start with magic
+        let content = std::fs::read(&info.path).unwrap();
+        assert!(content.starts_with(ENC_MAGIC));
+    }
+
+    // ── write_sqlite_schema_recovery (public API) ──
+
+    #[test]
+    fn write_sqlite_schema_recovery_creates_artifact() {
+        let uhoh_dir = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);").unwrap();
+        drop(conn);
+
+        let info = write_sqlite_schema_recovery(
+            uhoh_dir.path(), "schema_guard", &db_path, "data_change", false, 30, 100,
+        ).unwrap();
+
+        assert!(std::path::Path::new(&info.path).exists());
+        let content = std::fs::read_to_string(&info.path).unwrap();
+        assert!(content.contains("CREATE TABLE users"));
+    }
+
+    #[test]
+    fn write_sqlite_schema_recovery_encrypted() {
+        let uhoh_dir = tempfile::tempdir().unwrap();
+        load_or_create_machine_key(uhoh_dir.path()).unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("test.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE TABLE t (id INT);").unwrap();
+        drop(conn);
+
+        let info = write_sqlite_schema_recovery(
+            uhoh_dir.path(), "enc_schema", &db_path, "change", true, 30, 100,
+        ).unwrap();
+
+        let content = std::fs::read(&info.path).unwrap();
+        assert!(content.starts_with(ENC_MAGIC));
+
+        // Verify roundtrip decryption
+        let decrypted = decrypt_recovery_payload(&content, uhoh_dir.path()).unwrap();
+        let schema = String::from_utf8(decrypted).unwrap();
+        assert!(schema.contains("CREATE TABLE t"));
+    }
 }
