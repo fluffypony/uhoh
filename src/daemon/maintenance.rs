@@ -126,51 +126,19 @@ impl DaemonMaintenanceSubsystem {
         let projects = db_projects.to_vec();
         tokio::spawn(async move {
             let freed = tokio::task::spawn_blocking(move || {
-                let mut freed = 0u64;
                 let project = &projects[idx % projects.len()];
                 match crate::compaction::compact_project(&database, &project.hash, &cfg) {
-                    Ok(f) => freed = freed.saturating_add(f),
-                    Err(err) => tracing::warn!("Compaction failed for project {}: {err}", &project.hash[..project.hash.len().min(12)]),
+                    Ok(f) => f,
+                    Err(err) => {
+                        tracing::warn!("Compaction failed for project {}: {err}", &project.hash[..project.hash.len().min(12)]);
+                        0
+                    }
                 }
-                freed
             })
             .await
             .unwrap_or(0);
             if freed > 100 * 1024 * 1024 {
-                #[allow(clippy::cast_precision_loss)] // precision loss acceptable for display-only MB conversion
-                let freed_mb = freed as f64 / 1_048_576.0;
-                tracing::info!("Compaction estimated freed {:.1} MB; triggering GC", freed_mb);
-                let db_path_for_gc = gc_uhoh_dir.join("uhoh.db");
-                let gc_uhoh_dir_cl = gc_uhoh_dir.clone();
-                std::mem::drop(tokio::task::spawn_blocking(move || {
-                    match crate::db::Database::open(&db_path_for_gc) {
-                        Ok(db) => {
-                            if let Err(err) = crate::gc::run_gc(&gc_uhoh_dir_cl, &db) {
-                                tracing::warn!("GC run after compaction failed: {err}");
-                            }
-                            if vacuum_flag
-                                .compare_exchange(
-                                    false,
-                                    true,
-                                    std::sync::atomic::Ordering::SeqCst,
-                                    std::sync::atomic::Ordering::SeqCst,
-                                )
-                                .is_ok()
-                            {
-                                let vacuum_res = db.vacuum();
-                                vacuum_flag.store(false, std::sync::atomic::Ordering::SeqCst);
-                                if let Err(err) = vacuum_res {
-                                    tracing::warn!("VACUUM failed: {}", err);
-                                }
-                            } else {
-                                tracing::debug!("Skipping VACUUM: prior run still in-flight");
-                            }
-                        }
-                        Err(err) => {
-                            tracing::warn!("Failed to open DB for post-compaction GC: {err}");
-                        }
-                    }
-                }));
+                run_post_compaction_gc(freed, gc_uhoh_dir, vacuum_flag).await;
             }
         });
         self.compaction_index = self.compaction_index.wrapping_add(1);
@@ -341,6 +309,48 @@ impl Subsystem for DaemonMaintenanceSubsystem {
             None => SubsystemHealth::Healthy,
         }
     }
+}
+
+/// Run GC and optional VACUUM after a compaction freed significant space.
+async fn run_post_compaction_gc(
+    freed: u64,
+    uhoh_dir: std::path::PathBuf,
+    vacuum_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    #[allow(clippy::cast_precision_loss)] // precision loss acceptable for display-only MB conversion
+    let freed_mb = freed as f64 / 1_048_576.0;
+    tracing::info!("Compaction estimated freed {:.1} MB; triggering GC", freed_mb);
+    let db_path = uhoh_dir.join("uhoh.db");
+    let _ = tokio::task::spawn_blocking(move || {
+        let db = match crate::db::Database::open(&db_path) {
+            Ok(db) => db,
+            Err(err) => {
+                tracing::warn!("Failed to open DB for post-compaction GC: {err}");
+                return;
+            }
+        };
+        if let Err(err) = crate::gc::run_gc(&uhoh_dir, &db) {
+            tracing::warn!("GC run after compaction failed: {err}");
+        }
+        if vacuum_flag
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            let vacuum_res = db.vacuum();
+            vacuum_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+            if let Err(err) = vacuum_res {
+                tracing::warn!("VACUUM failed: {}", err);
+            }
+        } else {
+            tracing::debug!("Skipping VACUUM: prior run still in-flight");
+        }
+    })
+    .await;
 }
 
 fn database_backup_to(database: &Database, path: &std::path::Path) -> anyhow::Result<()> {
