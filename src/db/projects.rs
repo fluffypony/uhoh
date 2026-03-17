@@ -54,6 +54,10 @@ impl Database {
     }
 
     /// Find a project whose hash starts with the given prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prefix matches more than one project (ambiguous).
     pub fn find_project_by_hash_prefix(&self, prefix: &str) -> Result<Option<ProjectEntry>> {
         let conn = self.conn()?;
         // Escape SQL wildcards in user-provided prefix using backslash + ESCAPE clause
@@ -91,6 +95,10 @@ impl Database {
     }
 
     /// Update the recorded filesystem path for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction cannot be committed.
     pub fn update_project_path(&self, hash: &str, new_path: &str) -> Result<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
