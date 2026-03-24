@@ -76,7 +76,7 @@ You need a Rust toolchain. uhoh pins to stable via `rust-toolchain.toml`, so `ru
 cargo build --release
 ```
 
-The binary ends up in `target/release/uhoh`. Copy it somewhere on your PATH.
+The binary ends up in `target/release/uhoh` (`uhoh.exe` on Windows). Copy it somewhere on your PATH.
 
 ### Feature flags
 
@@ -104,14 +104,14 @@ cargo build --release --features landlock-sandbox
 
 ### Cross-compilation
 
-For fully static Linux binaries, use the musl target:
+For fully static Linux binaries, use the musl target. You need the musl toolchain on the build host (e.g. `apt install musl-tools` on Debian/Ubuntu):
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 ```
 
-`.cargo/config.toml` already sets `+crt-static` for musl targets. For aarch64 Linux builds, you need the matching cross-linker (`aarch64-linux-gnu-gcc` or `aarch64-linux-musl-gcc`).
+`.cargo/config.toml` already sets `+crt-static` for musl targets. For aarch64 Linux builds, you need the matching cross-linker and target (`aarch64-linux-gnu-gcc` or `aarch64-linux-musl-gcc`).
 
 Don't use `+crt-static` with glibc. It breaks DNS resolution through NSS.
 
