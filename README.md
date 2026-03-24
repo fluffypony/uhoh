@@ -68,6 +68,65 @@ uhoh doctor --verify-install
 
 Manual installation remains supported: download from the latest release and place the binary on your PATH (`/usr/local/bin`, `~/.local/bin`, or `%LOCALAPPDATA%\uhoh\bin`).
 
+## Building from source
+
+You need a Rust toolchain. uhoh pins to stable via `rust-toolchain.toml`, so `rustup` will pick the right version automatically. Minimum supported Rust version is 1.80.
+
+```bash
+cargo build --release
+```
+
+The binary ends up in `target/release/uhoh`. Copy it somewhere on your PATH.
+
+### Feature flags
+
+The default build includes compression, OS keyring integration, and the audit-trail subsystem:
+
+```toml
+default = ["compression", "keyring", "audit-trail"]
+```
+
+To strip features you don't need:
+
+```bash
+# Bare minimum
+cargo build --release --no-default-features
+
+# Just compression
+cargo build --release --no-default-features --features compression
+```
+
+There is also a `landlock-sandbox` feature for Linux Landlock support, off by default:
+
+```bash
+cargo build --release --features landlock-sandbox
+```
+
+### Cross-compilation
+
+For fully static Linux binaries, use the musl target:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+`.cargo/config.toml` already sets `+crt-static` for musl targets. For aarch64 Linux builds, you need the matching cross-linker (`aarch64-linux-gnu-gcc` or `aarch64-linux-musl-gcc`).
+
+Don't use `+crt-static` with glibc. It breaks DNS resolution through NSS.
+
+### Running tests
+
+```bash
+cargo test
+```
+
+Tests hit real temp directories and SQLite databases. No external services or mocking setup needed.
+
+### Release profile
+
+Release builds use LTO, strip symbols, and set `codegen-units = 1`. Smaller and faster binaries, slower compile.
+
 ## Quick start
 
 ### Just type `uhoh`
